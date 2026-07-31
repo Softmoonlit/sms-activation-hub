@@ -30,6 +30,11 @@ export class Database {
 
       CREATE INDEX IF NOT EXISTS admin_login_attempts_source_idx
         ON admin_login_attempts (source_fingerprint, attempted_at DESC);
+
+      CREATE TABLE IF NOT EXISTS default_candidate_countries (
+        position SMALLINT PRIMARY KEY CHECK (position BETWEEN 1 AND 3),
+        country_id INTEGER NOT NULL UNIQUE CHECK (country_id >= 0)
+      );
     `);
 
     // 每次进程初始化都使旧 Cookie 失效，避免部署重启后保留管理权限。
@@ -49,6 +54,25 @@ export class Database {
     } finally {
       client.release();
     }
+  }
+
+  async defaultCandidateCountryIds(): Promise<number[]> {
+    const result = await this.pool.query<{ country_id: number }>(
+      'SELECT country_id FROM default_candidate_countries ORDER BY position',
+    );
+    return result.rows.map((row) => row.country_id);
+  }
+
+  async replaceDefaultCandidateCountryIds(countryIds: readonly number[]): Promise<void> {
+    await this.transaction(async (client) => {
+      await client.query('DELETE FROM default_candidate_countries');
+      for (const [index, countryId] of countryIds.entries()) {
+        await client.query(
+          'INSERT INTO default_candidate_countries (position, country_id) VALUES ($1, $2)',
+          [index + 1, countryId],
+        );
+      }
+    });
   }
 
   async close(): Promise<void> {

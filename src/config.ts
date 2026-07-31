@@ -22,8 +22,10 @@ export interface AppConfig {
   adminPassword: string;
   adminPath: string;
   databaseUrl: string;
+  heroSmsApiKey: string;
   loginMaxAttempts: number;
   loginWindowSeconds: number;
+  openAiServiceCode: string;
   port: number;
   publicOrigin: string;
   sessionSecret: string;
@@ -57,6 +59,11 @@ export function readConfig(environment = process.env): AppConfig {
     throw new Error('ADMIN_PATH 不能使用常见后台名称');
   }
 
+  const openAiServiceCode = required(environment, 'OPENAI_SERVICE_CODE');
+  if (!/^[a-z0-9]{1,32}$/i.test(openAiServiceCode)) {
+    throw new Error('OPENAI_SERVICE_CODE 必须是 1 至 32 位字母或数字');
+  }
+
   const sessionSecret = required(environment, 'SESSION_SECRET');
   if (sessionSecret.length < 32) {
     throw new Error('SESSION_SECRET 至少需要 32 个字符');
@@ -71,8 +78,10 @@ export function readConfig(environment = process.env): AppConfig {
     adminPassword: required(environment, 'ADMIN_PASSWORD'),
     adminPath,
     databaseUrl: required(environment, 'DATABASE_URL'),
+    heroSmsApiKey: required(environment, 'HEROSMS_API_KEY'),
     loginMaxAttempts: positiveInteger(environment.LOGIN_MAX_ATTEMPTS, 5, 'LOGIN_MAX_ATTEMPTS'),
     loginWindowSeconds: positiveInteger(environment.LOGIN_WINDOW_SECONDS, 900, 'LOGIN_WINDOW_SECONDS'),
+    openAiServiceCode,
     port: positiveInteger(environment.PORT, 3000, 'PORT'),
     publicOrigin: required(environment, 'PUBLIC_ORIGIN'),
     sessionSecret,

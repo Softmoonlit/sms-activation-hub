@@ -7,6 +7,8 @@ const environment = {
   ADMIN_PASSWORD: 'deployment-password',
   ADMIN_PATH: 'control7',
   DATABASE_URL: 'postgres://test:test@localhost:5432/test',
+  HEROSMS_API_KEY: 'test-hero-sms-api-key',
+  OPENAI_SERVICE_CODE: 'openai',
   PUBLIC_ORIGIN: 'https://test.example',
   SESSION_SECRET: 'test-session-secret-that-is-at-least-32-characters',
 };
@@ -14,6 +16,11 @@ const environment = {
 test('常见后台路径会被拒绝', () => {
   assert.throws(() => readConfig({ ...environment, ADMIN_PATH: 'cpanel' }), /常见后台名称/);
   assert.throws(() => readConfig({ ...environment, ADMIN_PATH: 'phpmyadmin' }), /常见后台名称/);
+});
+
+test('OpenAI 服务代码必须是部署配置', () => {
+  assert.throws(() => readConfig({ ...environment, OPENAI_SERVICE_CODE: '' }), /OPENAI_SERVICE_CODE/);
+  assert.throws(() => readConfig({ ...environment, OPENAI_SERVICE_CODE: 'open-ai' }), /OPENAI_SERVICE_CODE/);
 });
 
 test('生产环境要求指定可信反向代理', () => {
