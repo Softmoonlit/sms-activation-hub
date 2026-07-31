@@ -1,8 +1,11 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
 import cookie from '@fastify/cookie';
 import formbody from '@fastify/formbody';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
+import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AuthorizationPreflight, type AuthorizationSummary } from './activation-authorizations.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
@@ -27,6 +30,12 @@ interface SettingsBody extends CsrfBody {
   candidate3?: string;
 }
 
+interface AuthorizationBody extends CsrfBody {
+  recipientIdentifier?: string;
+  internalNote?: string;
+  preflightFingerprint?: string;
+}
+
 function htmlPage(title: string, content: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -43,7 +52,8 @@ function htmlPage(title: string, content: string): string {
     h1 { margin: 0 0 8px; font-size: 22px; font-weight: 650; }
     p { margin: 0 0 24px; color: #53616c; line-height: 1.55; }
     label { display: grid; gap: 8px; font-size: 14px; font-weight: 600; }
-    input, select { box-sizing: border-box; width: 100%; height: 40px; border: 1px solid #9daab2; border-radius: 4px; padding: 8px 10px; font: inherit; }
+    input, select, textarea { box-sizing: border-box; width: 100%; min-height: 40px; border: 1px solid #9daab2; border-radius: 4px; padding: 8px 10px; font: inherit; }
+    textarea { min-height: 88px; resize: vertical; }
     select { background: #fff; }
     button { margin-top: 20px; min-height: 40px; border: 0; border-radius: 4px; padding: 8px 16px; background: #117a65; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
     .error { margin: 0 0 16px; color: #a12424; font-size: 14px; }
@@ -57,6 +67,17 @@ function htmlPage(title: string, content: string): string {
     .settings form { display: grid; gap: 16px; }
     .settings form button { justify-self: start; background: #117a65; }
     .empty { padding: 32px 0; color: #53616c; }
+    .dashboard { display: grid; gap: 28px; padding: 28px 0; }
+    .card { background: #fff; border: 1px solid #d7dde1; border-radius: 6px; padding: 22px; }
+    .card form { display: grid; gap: 16px; }
+    .card form button { justify-self: start; }
+    .summary { display: grid; gap: 10px; padding: 0; list-style: none; }
+    .authorization { border-top: 1px solid #e3e7e9; padding: 16px 0; }
+    .authorization:first-child { border-top: 0; }
+    .authorization p { margin: 4px 0; }
+    .danger { background: #a12424; }
+    .token { overflow-wrap: anywhere; padding: 12px; background: #edf3f1; border-radius: 4px; }
+    .recipient { width: min(calc(100% - 32px), 520px); }
   </style>
 </head>
 <body>${content}</body>
@@ -72,8 +93,43 @@ function adminPage(title: string, heading: string, path: string, csrfToken: stri
   return htmlPage(title, `<main class="shell"><header><h1>${heading}</h1><nav><a href="${navigationPath}">${navigationLabel}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
 }
 
-function adminShell(path: string, csrfToken: string): string {
-  return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', '<p class="empty">激活授权管理将在这里提供。</p>');
+function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string): string {
+  const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
+  const recent = authorizations.length === 0 ? '<p class="empty">尚未创建激活授权。</p>' : authorizations.map((authorization) => `<article class="authorization"><p><strong>${escapeHtml(authorization.recipientIdentifier)}</strong> · ${authorization.status}</p>${authorization.internalNote ? `<p>${escapeHtml(authorization.internalNote)}</p>` : ''}<p>到期时间：${escapeHtml(authorization.expiresAt.toISOString())}</p>${authorization.status === '待领取' ? `<form method="post" action="/${path}/authorizations/${authorization.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">撤销待领取授权</button></form>` : ''}</article>`).join('');
+  const content = `<section class="dashboard">${errorMarkup}<section class="card"><h2>创建激活授权</h2><p>填写接收者标识和可选内部备注，下一步将执行 HeroSMS 预检并显示确认汇总。</p><form method="post" action="/${path}/authorizations/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>接收者标识<input name="recipientIdentifier" required maxlength="200"></label><label>内部备注（可选）<textarea name="internalNote" maxlength="2000"></textarea></label><button type="submit">预检并确认</button></form></section><section class="card"><h2>最近激活授权</h2>${recent}</section></section>`;
+  return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', content);
+}
+
+function preflightFingerprint(preflight: AuthorizationPreflight, secret: string): string {
+  return createHmac('sha256', secret).update(JSON.stringify(preflight)).digest('base64url');
+}
+
+function fingerprintMatches(actual: string | undefined, expected: string): boolean {
+  if (!actual) return false;
+  const actualBuffer = Buffer.from(actual);
+  const expectedBuffer = Buffer.from(expected);
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function authorizationConfirmationPage(path: string, csrfToken: string, preflight: AuthorizationPreflight, fingerprint: string, warning?: string): string {
+  const candidates = preflight.candidates.map((candidate) => `<li>${escapeHtml(candidate.countryName)}：价格 ${candidate.price}，库存 ${candidate.stock}</li>`).join('');
+  const warningMarkup = warning ? `<p class="error" role="alert">${escapeHtml(warning)}</p>` : '';
+  const content = `<section class="dashboard"><section class="card"><h2>确认创建</h2>${warningMarkup}<ul class="summary"><li><strong>接收者标识：</strong>${escapeHtml(preflight.recipientIdentifier)}</li>${preflight.internalNote ? `<li><strong>内部备注：</strong>${escapeHtml(preflight.internalNote)}</li>` : ''}<li><strong>HeroSMS 余额：</strong>${preflight.balance.toFixed(2)}</li>${candidates}</ul><form method="post" action="/${path}/authorizations"><input type="hidden" name="csrf" value="${csrfToken}"><input type="hidden" name="recipientIdentifier" value="${escapeHtml(preflight.recipientIdentifier)}"><input type="hidden" name="internalNote" value="${escapeHtml(preflight.internalNote ?? '')}"><input type="hidden" name="preflightFingerprint" value="${fingerprint}"><button type="submit">确认创建 24 小时授权</button></form></section></section>`;
+  return adminPage('确认激活授权', '确认激活授权', path, csrfToken, `/${path}`, '返回首页', content);
+}
+
+function authorizationCreatedPage(path: string, csrfToken: string, authorizationUrl: string, expiresAt: Date): string {
+  const escapedUrl = escapeHtml(authorizationUrl);
+  const content = `<section class="dashboard"><section class="card"><h2>激活授权已创建</h2><p>完整授权链接仅显示这一次。丢失后请撤销并重新创建。</p><p class="token" id="authorization-url">${escapedUrl}</p><p>到期时间：${escapeHtml(expiresAt.toISOString())}</p><button type="button" onclick="navigator.clipboard.writeText(document.getElementById('authorization-url').textContent)">复制授权链接</button></section></section>`;
+  return adminPage('激活授权已创建', '激活授权已创建', path, csrfToken, `/${path}`, '返回首页', content);
+}
+
+function recipientPage(expiresAt: Date): string {
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI 短信激活</h1><p>授权有效至 ${escapeHtml(expiresAt.toISOString())}</p><button type="button" disabled>获取号码（后续步骤提供）</button></section></main>`);
+}
+
+function unavailableRecipientPage(): string {
+  return htmlPage('链接不可用', '<main class="recipient"><section class="panel"><h1>链接不可用</h1><p>此链接不可用，请联系发送者</p></section></main>');
 }
 
 function escapeHtml(value: string): string {
@@ -149,16 +205,19 @@ function cookiesForSession(reply: FastifyReply, sessionId: string, csrfToken: st
 
 export interface AppDependencies {
   heroSms?: HeroSms;
+  now?: () => Date;
 }
 
 export async function createApp(config: AppConfig, database = new Database(config.databaseUrl), dependencies: AppDependencies = {}): Promise<FastifyInstance> {
   await database.initialize();
+  await database.expireDueAuthorizations(dependencies.now?.() ?? new Date());
   const authentication = new AdminAuthentication(config, database);
   const heroSms = dependencies.heroSms ?? new HeroSmsHttpAdapter({
     apiKey: config.heroSmsApiKey,
     baseUrl: HEROSMS_COMPATIBILITY_URL,
   });
   const defaultCandidateLocations = new DefaultCandidateLocations(database, heroSms, config.openAiServiceCode);
+  const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, dependencies.now);
   const app = Fastify({ logger: false, trustProxy: config.trustedProxy });
   await app.register(cookie);
   await app.register(formbody);
@@ -176,7 +235,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     if (session) {
       cookiesForSession(reply, session.id, session.csrfToken);
-      return reply.type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken));
+      return reply.type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list()));
     }
 
     const csrfToken = randomToken();
@@ -203,6 +262,61 @@ export async function createApp(config: AppConfig, database = new Database(confi
       }
       throw error;
     }
+  });
+
+  app.post<{ Body: AuthorizationBody }>(`${adminRoot}/authorizations/preview`, async (request, reply) => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    const csrfToken = csrfFrom(request);
+    if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+      return reply.code(403).send();
+    }
+    try {
+      const preflight = await activationAuthorizations.preflight(request.body.recipientIdentifier ?? '', request.body.internalNote);
+      return reply.type('text/html; charset=utf-8').send(authorizationConfirmationPage(config.adminPath, session.csrfToken, preflight, preflightFingerprint(preflight, config.sessionSecret)));
+    } catch (error) {
+      const message = error instanceof AuthorizationValidationError || error instanceof DuplicateActiveAuthorizationError ? error.message : '暂时无法完成 HeroSMS 预检。';
+      return reply.code(error instanceof AuthorizationValidationError || error instanceof DuplicateActiveAuthorizationError ? 422 : 503).type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list(), message));
+    }
+  });
+
+  app.post<{ Body: AuthorizationBody }>(`${adminRoot}/authorizations`, async (request, reply) => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    const csrfToken = csrfFrom(request);
+    if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+      return reply.code(403).send();
+    }
+    try {
+      // 确认与创建之间重新执行预检，避免使用过期的余额、价格或库存。
+      const preflight = await activationAuthorizations.preflight(request.body.recipientIdentifier ?? '', request.body.internalNote);
+      const currentFingerprint = preflightFingerprint(preflight, config.sessionSecret);
+      if (!fingerprintMatches(request.body.preflightFingerprint, currentFingerprint)) {
+        return reply.code(409).type('text/html; charset=utf-8').send(authorizationConfirmationPage(config.adminPath, session.csrfToken, preflight, currentFingerprint, '价格、库存或余额已变化，请重新确认。'));
+      }
+      const created = await activationAuthorizations.create(preflight);
+      const authorizationUrl = new URL(`/a/${created.token}`, config.publicOrigin).toString();
+      return reply.code(201).type('text/html; charset=utf-8').send(authorizationCreatedPage(config.adminPath, session.csrfToken, authorizationUrl, created.expiresAt));
+    } catch (error) {
+      const message = error instanceof AuthorizationValidationError || error instanceof DuplicateActiveAuthorizationError ? error.message : '暂时无法创建激活授权。';
+      return reply.code(error instanceof AuthorizationValidationError || error instanceof DuplicateActiveAuthorizationError ? 422 : 503).type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list(), message));
+    }
+  });
+
+  app.post<{ Body: CsrfBody; Params: { id: string } }>(`${adminRoot}/authorizations/:id/revoke`, async (request, reply) => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    const csrfToken = csrfFrom(request);
+    if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+      return reply.code(403).send();
+    }
+    const revoked = await activationAuthorizations.revoke(request.params.id);
+    if (!revoked) return reply.code(409).type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list(), '该激活授权已经不可撤销。'));
+    return reply.redirect(adminRoot, 303);
+  });
+
+  app.get<{ Params: { token: string } }>('/a/:token', async (request, reply) => {
+    const result = await activationAuthorizations.recipientState(request.params.token);
+    if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    if (result.state === 'unavailable') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage());
+    return reply.type('text/html; charset=utf-8').send(recipientPage(result.expiresAt!));
   });
 
   app.get(`${adminRoot}/settings`, async (request, reply) => {
@@ -259,7 +373,15 @@ export async function createApp(config: AppConfig, database = new Database(confi
     return reply.redirect(adminRoot, 303);
   });
 
+  const expirationSweep = setInterval(() => {
+    void database.expireDueAuthorizations(dependencies.now?.() ?? new Date()).catch(() => undefined);
+  }, 60_000);
+  expirationSweep.unref();
+
   app.setNotFoundHandler(async (_request, reply) => reply.code(404).type('text/plain; charset=utf-8').send('Not Found'));
-  app.addHook('onClose', async () => database.close());
+  app.addHook('onClose', async () => {
+    clearInterval(expirationSweep);
+    await database.close();
+  });
   return app;
 }

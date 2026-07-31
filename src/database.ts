@@ -35,6 +35,43 @@ export class Database {
         position SMALLINT PRIMARY KEY CHECK (position BETWEEN 1 AND 3),
         country_id INTEGER NOT NULL UNIQUE CHECK (country_id >= 0)
       );
+
+      CREATE TABLE IF NOT EXISTS activation_authorizations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        recipient_identifier TEXT NOT NULL,
+        normalized_recipient_identifier TEXT NOT NULL,
+        internal_note TEXT,
+        token_hash TEXT,
+        status TEXT NOT NULL CHECK (status IN ('unclaimed', 'in_progress', 'sms_delivered', 'quota_exhausted', 'revoked', 'expired')),
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        CHECK (expires_at = created_at + INTERVAL '24 hours')
+      );
+
+      ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_status_check;
+      ALTER TABLE activation_authorizations ADD CONSTRAINT activation_authorizations_status_check
+        CHECK (status IN ('unclaimed', 'in_progress', 'sms_delivered', 'quota_exhausted', 'revoked', 'expired'));
+
+      CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_token_hash_idx
+        ON activation_authorizations (token_hash)
+        WHERE token_hash IS NOT NULL;
+
+      DROP INDEX IF EXISTS activation_authorizations_unclaimed_recipient_idx;
+      CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_unended_recipient_idx
+        ON activation_authorizations (normalized_recipient_identifier)
+        WHERE status IN ('unclaimed', 'in_progress');
+
+      CREATE TABLE IF NOT EXISTS authorization_candidate_countries (
+        authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
+        position SMALLINT NOT NULL CHECK (position BETWEEN 1 AND 3),
+        country_id INTEGER NOT NULL CHECK (country_id >= 0),
+        country_name TEXT NOT NULL,
+        quoted_price NUMERIC NOT NULL CHECK (quoted_price >= 0),
+        quoted_stock INTEGER NOT NULL CHECK (quoted_stock > 0),
+        PRIMARY KEY (authorization_id, position),
+        UNIQUE (authorization_id, country_id)
+      );
     `);
 
     // 每次进程初始化都使旧 Cookie 失效，避免部署重启后保留管理权限。
@@ -73,6 +110,113 @@ export class Database {
         );
       }
     });
+  }
+
+  async hasUnendedAuthorization(normalizedRecipientIdentifier: string, now: Date): Promise<boolean> {
+    await this.expireDueAuthorizations(now);
+    const result = await this.pool.query(
+      `SELECT 1 FROM activation_authorizations
+       WHERE normalized_recipient_identifier = $1 AND status IN ('unclaimed', 'in_progress')
+       LIMIT 1`,
+      [normalizedRecipientIdentifier],
+    );
+    return result.rowCount === 1;
+  }
+
+  async createActivationAuthorization(input: {
+    recipientIdentifier: string;
+    normalizedRecipientIdentifier: string;
+    internalNote?: string;
+    tokenHash: string;
+    createdAt: Date;
+    expiresAt: Date;
+    candidates: Array<{ countryId: number; countryName: string; price: number; stock: number }>;
+  }): Promise<string> {
+    if (input.candidates.length !== 3 || new Set(input.candidates.map((candidate) => candidate.countryId)).size !== 3) {
+      throw new Error('激活授权必须包含三个不同的候选地区');
+    }
+    return this.transaction(async (client) => {
+      const result = await client.query<{ id: string }>(
+        `INSERT INTO activation_authorizations
+          (recipient_identifier, normalized_recipient_identifier, internal_note, token_hash, status, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, 'unclaimed', $5, $6)
+         RETURNING id`,
+        [input.recipientIdentifier, input.normalizedRecipientIdentifier, input.internalNote ?? null, input.tokenHash, input.createdAt, input.expiresAt],
+      );
+      const id = result.rows[0]?.id;
+      if (!id) throw new Error('创建激活授权失败');
+      for (const [index, candidate] of input.candidates.entries()) {
+        await client.query(
+          `INSERT INTO authorization_candidate_countries
+            (authorization_id, position, country_id, country_name, quoted_price, quoted_stock)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [id, index + 1, candidate.countryId, candidate.countryName, candidate.price, candidate.stock],
+        );
+      }
+      return id;
+    });
+  }
+
+  async listActivationAuthorizations(now: Date): Promise<Array<{
+    id: string;
+    recipientIdentifier: string;
+    internalNote?: string;
+    status: '待领取' | '进行中' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
+    createdAt: Date;
+    expiresAt: Date;
+  }>> {
+    await this.expireDueAuthorizations(now);
+    const result = await this.pool.query<{
+      id: string; recipient_identifier: string; internal_note: string | null;
+      status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired'; created_at: Date; expires_at: Date;
+    }>(
+      `SELECT id, recipient_identifier, internal_note, status, created_at, expires_at
+       FROM activation_authorizations ORDER BY created_at DESC LIMIT 20`,
+    );
+    const labels = { unclaimed: '待领取', in_progress: '进行中', sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期' } as const;
+    return result.rows.map((row) => ({
+      id: row.id,
+      recipientIdentifier: row.recipient_identifier,
+      ...(row.internal_note ? { internalNote: row.internal_note } : {}),
+      status: labels[row.status],
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+    }));
+  }
+
+  async revokeUnclaimedAuthorization(id: string, now: Date): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE activation_authorizations
+       SET status = 'revoked', revoked_at = $2
+       WHERE id = $1 AND status = 'unclaimed' AND expires_at > $2`,
+      [id, now],
+    );
+    return result.rowCount === 1;
+  }
+
+  async authorizationByTokenHash(hash: string): Promise<{ id: string; status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired'; expiresAt: Date } | undefined> {
+    const result = await this.pool.query<{ id: string; status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired'; expires_at: Date }>(
+      'SELECT id, status, expires_at FROM activation_authorizations WHERE token_hash = $1',
+      [hash],
+    );
+    const row = result.rows[0];
+    return row ? { id: row.id, status: row.status, expiresAt: row.expires_at } : undefined;
+  }
+
+  async expireDueAuthorizations(now: Date): Promise<void> {
+    await this.pool.query(
+      `UPDATE activation_authorizations SET status = 'expired', token_hash = NULL
+       WHERE status <> 'expired' AND expires_at <= $1`,
+      [now],
+    );
+  }
+
+  async expireAuthorization(id: string, now: Date): Promise<void> {
+    await this.pool.query(
+      `UPDATE activation_authorizations SET status = 'expired', token_hash = NULL
+       WHERE id = $1 AND expires_at <= $2`,
+      [id, now],
+    );
   }
 
   async close(): Promise<void> {
