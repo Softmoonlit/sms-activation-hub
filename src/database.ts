@@ -89,7 +89,7 @@ export class Database {
         authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
         country_id INTEGER NOT NULL,
         provider_activation_id TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed')),
+        status TEXT NOT NULL CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'cancelled', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed')),
         phone_number TEXT,
         activation_cost NUMERIC NOT NULL CHECK (activation_cost >= 0),
         currency TEXT NOT NULL,
@@ -102,7 +102,7 @@ export class Database {
 
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_status_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_status_check
-        CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed'));
+        CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'cancelled', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed'));
       ALTER TABLE supplier_activations ALTER COLUMN phone_number DROP NOT NULL;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_code TEXT;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_text TEXT;
@@ -110,11 +110,16 @@ export class Database {
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS completion_claimed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_poll_after TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS replacement_pending BOOLEAN NOT NULL DEFAULT false;
 
       DROP INDEX IF EXISTS supplier_activations_current_idx;
       CREATE UNIQUE INDEX supplier_activations_current_idx
         ON supplier_activations (authorization_id)
-        WHERE status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation', 'sms_delivered', 'completion_confirming');
+        WHERE status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming');
+
+      CREATE INDEX IF NOT EXISTS supplier_activations_replacement_pending_idx
+        ON supplier_activations (acquired_at)
+        WHERE status = 'cancelled' AND replacement_pending;
 
       CREATE TABLE IF NOT EXISTS hero_sms_events (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

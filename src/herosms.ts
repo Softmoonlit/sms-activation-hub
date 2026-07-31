@@ -59,6 +59,8 @@ export interface HeroSmsActivationStatus {
   text?: string;
 }
 
+export type HeroSmsCancellationResult = 'cancelled' | 'sms-delivered' | 'too-early';
+
 export interface HeroSms {
   balance(): Promise<number>;
   services(): Promise<HeroSmsService[]>;
@@ -68,6 +70,7 @@ export interface HeroSms {
   activeActivations(): Promise<HeroSmsActivationRecord[]>;
   activationHistory(start: Date, end: Date): Promise<HeroSmsActivationRecord[]>;
   activationStatus(activationId: string): Promise<HeroSmsActivationStatus>;
+  cancelActivation(activationId: string): Promise<HeroSmsCancellationResult>;
   finishActivation(activationId: string): Promise<void>;
 }
 
@@ -323,6 +326,19 @@ export class HeroSmsHttpAdapter implements HeroSms {
     return { delivered: true, text, ...(code ? { code } : {}), ...(receivedAt ? { receivedAt } : {}) };
   }
 
+  async cancelActivation(activationId: string): Promise<HeroSmsCancellationResult> {
+    const result = await this.request('cancelActivation', { id: activationId }, [204], (value, status) => {
+      if (status !== 409) return undefined;
+      const code = errorCode(value);
+      if (code === 'OTP_RECEIVED' || code === 'ACTIVATION_OTP_RECEIVED') return 'sms-delivered';
+      if (code === 'EARLY_CANCEL_DENIED') return 'too-early';
+      return undefined;
+    });
+    if (result === undefined) return 'cancelled';
+    if (result === 'sms-delivered' || result === 'too-early') return result;
+    throw new HeroSmsResponseError('response');
+  }
+
   async finishActivation(activationId: string): Promise<void> {
     await this.request('finishActivation', { id: activationId }, [204]);
   }
@@ -356,7 +372,12 @@ export class HeroSmsHttpAdapter implements HeroSms {
     }
   }
 
-  private async request(action: string, parameters: Record<string, string> = {}, emptySuccessStatuses: number[] = []): Promise<unknown> {
+  private async request(
+    action: string,
+    parameters: Record<string, string> = {},
+    emptySuccessStatuses: number[] = [],
+    acceptedResponse?: (value: unknown, status: number) => unknown | undefined,
+  ): Promise<unknown> {
     const url = new URL(this.options.baseUrl);
     url.search = new URLSearchParams({ action, api_key: this.options.apiKey, ...parameters }).toString();
 
@@ -375,6 +396,8 @@ export class HeroSmsHttpAdapter implements HeroSms {
 
     if (emptySuccessStatuses.includes(response.status) && response.ok) return undefined;
     const value = parseBody(text);
+    const accepted = acceptedResponse?.(value, response.status);
+    if (accepted !== undefined) return accepted;
     if (action === 'getNumberV2' && (response.status === 408 || response.status === 504)) {
       throw new HeroSmsResponseError('uncertain');
     }

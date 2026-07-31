@@ -18,13 +18,15 @@ const config: AppConfig = {
   port: 32123, publicOrigin: origin, sessionSecret: `playwright-${randomUUID()}-session-secret`, trustedProxy: false,
 };
 let latestActivationId = '';
+let latestCountryId = 0;
 const heroSms: HeroSms = {
   balance: async () => 10,
   services: async () => [{ code: 'openai', name: 'OpenAI' }],
   countries: async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }],
   quotes: async () => [{ countryId: 1, price: 1.2, stock: 1 }, { countryId: 2, price: 0.6, stock: 1 }, { countryId: 3, price: 0.9, stock: 1 }],
-  getNumber: async () => {
+  getNumber: async (_serviceCode, countryId) => {
     latestActivationId = `pw-${randomUUID()}`;
+    latestCountryId = countryId;
     return {
       activationId: latestActivationId, phoneNumber: '+442079460123', activationCost: 0.6, currency: 'USD',
       activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),
@@ -33,12 +35,14 @@ const heroSms: HeroSms = {
   activeActivations: async () => [],
   activationHistory: async () => [],
   activationStatus: async () => ({ delivered: false }),
+  cancelActivation: async () => 'cancelled',
   finishActivation: async () => undefined,
 };
 
-test('移动视口完成领取、浏览器绑定、号码显示和复制', async ({ browser }) => {
+test('移动视口完成领取、浏览器绑定、号码显示、换号确认和复制', async ({ browser }) => {
+  let now = new Date('2026-08-01T00:00:00.000Z');
   const database = new Database(databaseUrl!);
-  const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
+  const app = await createApp(config, database, { heroSms, now: () => now });
   await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
   await app.listen({ host: '127.0.0.1', port: 32123 });
   try {
@@ -65,8 +69,18 @@ test('移动视口完成领取、浏览器绑定、号码显示和复制', async
     await page.getByRole('button', { name: '复制号码' }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('+442079460123');
 
+    now = new Date('2026-08-01T00:02:00.000Z');
+    await page.reload();
+    await page.getByRole('button', { name: '更换号码' }).click();
+    await expect(page.getByText('更换后当前号码将不能继续使用')).toBeVisible();
+    await page.getByRole('button', { name: '继续等待' }).click();
+    await expect(page.locator('.number')).toHaveText('+44 20 7946 0123');
+    await page.getByRole('button', { name: '更换号码' }).click();
+    await page.getByRole('button', { name: '确认更换号码' }).click();
+    await expect(page.locator('.number')).toHaveText('+44 20 7946 0123');
+
     const webhook = await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload: {
-      activationId: latestActivationId, service: 'openai', country: 2, receivedAt: '2026-08-01T00:03:00.000Z',
+      activationId: latestActivationId, service: 'openai', country: latestCountryId, receivedAt: '2026-08-01T00:03:00.000Z',
       code: '482913', text: 'Your code is 482913',
     } });
     assert.equal(webhook.statusCode, 200);

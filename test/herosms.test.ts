@@ -274,6 +274,46 @@ test('HeroSMS adapter 解析已结束状态并分类轮询与完成错误响应'
   });
 });
 
+test('HeroSMS adapter 按取消结果区分成功、短信冲突、过早取消与异常响应', async () => {
+  const requests: URL[] = [];
+  const responses = [
+    new Response(null, { status: 204 }),
+    response(JSON.stringify({ title: 'OTP_RECEIVED', details: 'Cannot terminate activation - OTP has been received on this number' }), 409),
+    response(JSON.stringify(example('earlyCancellationExample')), 409),
+    response(JSON.stringify({ title: 'UNRECOGNIZED_CANCEL_STATE' }), 409),
+  ];
+  const adapter = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async (input) => {
+      requests.push(new URL(input.toString()));
+      return responses.shift()!;
+    },
+  });
+
+  assert.equal(await adapter.cancelActivation('activation-42'), 'cancelled');
+  assert.equal(await adapter.cancelActivation('activation-42'), 'sms-delivered');
+  assert.equal(await adapter.cancelActivation('activation-42'), 'too-early');
+  await assert.rejects(adapter.cancelActivation('activation-42'), (error: unknown) => {
+    assert.ok(error instanceof HeroSmsResponseError);
+    assert.equal(error.kind, 'request');
+    return true;
+  });
+  assert.deepEqual(requests.map((url) => [url.searchParams.get('action'), url.searchParams.get('id')]), [
+    ['cancelActivation', 'activation-42'], ['cancelActivation', 'activation-42'],
+    ['cancelActivation', 'activation-42'], ['cancelActivation', 'activation-42'],
+  ]);
+
+  const malformedSuccess = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response('ACCESS_CANCEL'),
+  });
+  await assert.rejects(malformedSuccess.cancelActivation('activation-42'), (error: unknown) => {
+    assert.ok(error instanceof HeroSmsResponseError);
+    assert.equal(error.kind, 'response');
+    return true;
+  });
+});
+
 test('HeroSMS adapter 拒绝格式错误的成功响应', async () => {
   const adapter = new HeroSmsHttpAdapter({
     apiKey: 'test-api-key',

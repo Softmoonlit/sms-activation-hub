@@ -46,6 +46,10 @@ interface AuthorizationBody extends CsrfBody {
   preflightFingerprint?: string;
 }
 
+interface ReplacementBody {
+  replacement?: string;
+}
+
 function htmlPage(title: string, content: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -171,16 +175,25 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     const structuredCodePollingScript = view.verificationCode ? '' : '<script>setTimeout(()=>location.reload(),5000)</script>';
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${delivery}<ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}${structuredCodePollingScript}`);
   }
+  if (view.state === 'claimed' && view.replacementInProgress) {
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在更换号码</p><ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
+  }
   if (view.state === 'claimed' && view.phoneNumber) {
     const e164 = view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`;
     const smsPollingScript = '<script>setTimeout(()=>location.reload(),5000)</script>';
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p>${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制号码</button><ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：<time datetime="${view.numberExpiresAt!.toISOString()}">${escapeHtml(view.numberExpiresAt!.toISOString())}</time></li><li>可换号时间：<time datetime="${view.cancelAvailableAt!.toISOString()}">${escapeHtml(view.cancelAvailableAt!.toISOString())}</time></li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
+    const replacementAction = view.replacementAvailable ? `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">更换号码</button></form>` : '';
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p>${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制号码</button>${replacementAction}<ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：<time datetime="${view.numberExpiresAt!.toISOString()}">${escapeHtml(view.numberExpiresAt!.toISOString())}</time></li><li>可换号时间：<time datetime="${view.cancelAvailableAt!.toISOString()}">${escapeHtml(view.cancelAvailableAt!.toISOString())}</time></li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
   }
   if (view.state === 'claimed' && view.acquisitionState) {
     const status = view.acquisitionState === 'manual' ? '号码获取结果待发送者处理' : '正在确认号码获取结果';
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p><p>${status}</p></section></main>${countdownScript}`);
   }
-  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm}</section></main>${countdownScript}`);
+  const terminalMessage = view.remainingNumberCount === 0 ? '<p>可用号码次数已用尽</p>' : acquisitionForm;
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${terminalMessage}</section></main>${countdownScript}`);
+}
+
+function replacementConfirmationPage(token: string): string {
+  return htmlPage('确认更换号码', `<main class="recipient"><section class="panel"><h1>更换号码</h1><p>更换后当前号码将不能继续使用。</p><form method="post" action="/a/${encodeURIComponent(token)}/replacement/confirm"><button name="replacement" value="wait" type="submit" autofocus>继续等待</button><button name="replacement" value="confirm" type="submit">确认更换号码</button></form></section></main>`);
 }
 
 function unavailableRecipientPage(): string {
@@ -274,6 +287,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
   const defaultCandidateLocations = new DefaultCandidateLocations(database, heroSms, config.openAiServiceCode);
   const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, dependencies.now);
   await activationAuthorizations.reconcilePendingRequests();
+  await activationAuthorizations.reconcileCancellationConfirmations();
+  await activationAuthorizations.runPendingReplacementAcquisitions();
   await activationAuthorizations.pollWaitingActivations();
   await activationAuthorizations.finishDeliveredActivations();
   await activationAuthorizations.deleteExpiredSensitiveDeliveryData();
@@ -437,6 +452,34 @@ export async function createApp(config: AppConfig, database = new Database(confi
     return reply.code(result.state === 'no-numbers' ? 409 : 503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, message));
   });
 
+  app.post<{ Params: { token: string } }>('/a/:token/replacement', async (request, reply) => {
+    const view = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
+    if (!view.replacementAvailable) {
+      return reply.code(409).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, '当前号码暂时不能更换，请继续等待。'));
+    }
+    return reply.type('text/html; charset=utf-8').send(replacementConfirmationPage(request.params.token));
+  });
+
+  app.post<{ Body: ReplacementBody; Params: { token: string } }>('/a/:token/replacement/confirm', async (request, reply) => {
+    if (request.body?.replacement === 'wait') return reply.redirect(`/a/${request.params.token}`, 303);
+    if (request.body?.replacement !== 'confirm') return reply.code(400).send();
+    const result = await activationAuthorizations.requestNumberReplacement(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
+    const view = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    if (result.state === 'replaced') return reply.redirect(`/a/${request.params.token}`, 303);
+    if (result.state === 'confirming') return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
+    const message = result.state === 'too-early'
+      ? '当前号码暂时不能更换，请继续等待。'
+      : result.state === 'no-numbers'
+        ? '当前暂无可用号码，请联系发送者'
+        : '暂时无法更换号码，请联系发送者';
+    return reply.code(result.state === 'too-early' || result.state === 'no-numbers' ? 409 : 503)
+      .type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, message));
+  });
+
   app.post<{ Body: CsrfBody; Params: { id: string } }>(`${adminRoot}/acquisition-requests/:id/reconcile`, async (request, reply) => {
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     const csrfToken = csrfFrom(request);
@@ -525,6 +568,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
     void Promise.all([
       database.expireDueAuthorizations(dependencies.now?.() ?? new Date()),
       activationAuthorizations.reconcilePendingRequests(),
+      activationAuthorizations.reconcileCancellationConfirmations(),
+      activationAuthorizations.runPendingReplacementAcquisitions(),
       activationAuthorizations.pollWaitingActivations(),
       activationAuthorizations.finishDeliveredActivations(),
       activationAuthorizations.deleteExpiredSensitiveDeliveryData(),

@@ -47,6 +47,7 @@ const heroSms: HeroSms = {
   activeActivations: async () => [],
   activationHistory: async () => [],
   activationStatus: async () => ({ delivered: false }),
+  cancelActivation: async () => 'cancelled',
   finishActivation: async () => undefined,
 };
 

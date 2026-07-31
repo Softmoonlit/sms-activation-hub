@@ -37,7 +37,7 @@ export interface AuthorizationDetail {
   expiresAt: Date;
   activation?: {
     countryName: string;
-    status: 'acquisition_confirming' | 'waiting_sms' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed';
+    status: 'acquisition_confirming' | 'waiting_sms' | 'cancellation_confirming' | 'cancelled' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed';
     numberExpiresAt: Date;
     unrecognizedSmsText?: string;
   };
@@ -55,9 +55,19 @@ export interface RecipientAuthorizationView {
   numberExpiresAt?: Date;
   remainingNumberCount?: number;
   acquisitionState?: 'confirming' | 'manual';
+  replacementAvailable?: boolean;
+  replacementInProgress?: boolean;
   smsDelivered?: boolean;
   verificationCode?: string;
 }
+
+export type ReplacementResult =
+  | { state: 'replaced' | 'confirming' | 'no-numbers' | 'error' }
+  | { state: 'too-early' | 'unavailable' | 'not-found' };
+
+type ReplacementTransition =
+  | { kind: 'not-found' | 'unavailable' | 'too-early' | 'no-numbers' }
+  | { kind: 'cancel'; activationId: string };
 
 export interface HeroSmsWebhookEvent {
   activationId: string;
@@ -234,7 +244,7 @@ export class ActivationAuthorizations {
               (SELECT count(*) FROM authorization_candidate_countries used WHERE used.authorization_id = auth.id AND used.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status
        FROM activation_authorizations auth
-       LEFT JOIN supplier_activations activation ON activation.authorization_id = auth.id AND activation.status IN ('waiting_sms', 'sms_delivered', 'completion_confirming', 'completed', 'manual_reconciliation')
+       LEFT JOIN supplier_activations activation ON activation.authorization_id = auth.id AND activation.status IN ('waiting_sms', 'cancellation_confirming', 'sms_delivered', 'completion_confirming', 'completed', 'manual_reconciliation')
        LEFT JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id AND candidate.country_id = activation.country_id
        LEFT JOIN LATERAL (
          SELECT status FROM number_acquisition_requests request
@@ -264,7 +274,9 @@ export class ActivationAuthorizations {
       ...(authorization.number_expires_at ? { numberExpiresAt: authorization.number_expires_at } : {}),
       remainingNumberCount: 3 - Number(authorization.used_count),
       ...(authorization.acquisition_status ? { acquisitionState: authorization.acquisition_status === 'manual' ? 'manual' as const : 'confirming' as const } : {}),
-      ...(authorization.activation_status && authorization.activation_status !== 'waiting_sms' ? { smsDelivered: true } : {}),
+      ...(authorization.activation_status === 'waiting_sms' && authorization.cancel_available_at && authorization.cancel_available_at <= now && Number(authorization.used_count) < 3 ? { replacementAvailable: true } : {}),
+      ...(authorization.activation_status === 'cancellation_confirming' ? { replacementInProgress: true } : {}),
+      ...(authorization.activation_status && !['waiting_sms', 'cancellation_confirming'].includes(authorization.activation_status) ? { smsDelivered: true } : {}),
       ...(authorization.sms_code ? { verificationCode: authorization.sms_code } : {}),
     };
   }
@@ -275,6 +287,14 @@ export class ActivationAuthorizations {
       receivedAt: event.receivedAt.toISOString(), text: event.text, code: event.code ?? null,
     })).digest('hex');
     return this.database.transaction(async (client) => {
+      // 换号命令始终先锁授权再锁激活；Webhook 保持相同顺序以避免竞争时死锁。
+      const found = await client.query<{ authorization_id: string; country_id: number }>(
+        'SELECT authorization_id, country_id FROM supplier_activations WHERE provider_activation_id = $1',
+        [event.activationId],
+      );
+      const candidate = found.rows[0];
+      if (!candidate || candidate.country_id !== event.countryId || event.serviceCode !== this.openAiServiceCode) return 'ignored';
+      await client.query('SELECT id FROM activation_authorizations WHERE id = $1 FOR UPDATE', [candidate.authorization_id]);
       const activation = await client.query<{ id: string; authorization_id: string; country_id: number; status: string; expires_at: Date }>(
         'SELECT id, authorization_id, country_id, status, expires_at FROM supplier_activations WHERE provider_activation_id = $1 FOR UPDATE',
         [event.activationId],
@@ -287,10 +307,11 @@ export class ActivationAuthorizations {
         [event.activationId, event.receivedAt, payloadDigest, this.now()],
       );
       if (!inserted.rowCount || current.expires_at <= this.now()) return 'accepted';
-      if (current.status === 'waiting_sms') {
+      if (current.status === 'waiting_sms' || current.status === 'cancellation_confirming') {
         await client.query(
-          `UPDATE supplier_activations SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4, sms_poll_after = NULL
-           WHERE id = $1 AND status = 'waiting_sms'`,
+          `UPDATE supplier_activations
+           SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4, sms_poll_after = NULL, replacement_pending = false
+           WHERE id = $1 AND status IN ('waiting_sms', 'cancellation_confirming')`,
           [current.id, event.code ?? null, event.text, event.receivedAt],
         );
         await client.query("UPDATE activation_authorizations SET status = 'sms_delivered' WHERE id = $1 AND status = 'in_progress'", [current.authorization_id]);
@@ -382,6 +403,190 @@ export class ActivationAuthorizations {
     );
   }
 
+  async requestNumberReplacement(token: string, sessionToken?: string): Promise<ReplacementResult> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { state: 'not-found' };
+    const transition = await this.database.transaction(async (client): Promise<ReplacementTransition> => {
+      const authorizationResult = await client.query<{ id: string; status: string; expires_at: Date; recipient_session_hash: string | null }>(
+        'SELECT id, status, expires_at, recipient_session_hash FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
+        [tokenHash(token)],
+      );
+      const authorization = authorizationResult.rows[0];
+      const now = this.now();
+      if (!authorization || authorization.expires_at <= now) {
+        if (authorization) await client.query("UPDATE activation_authorizations SET status = 'expired', token_hash = NULL WHERE id = $1", [authorization.id]);
+        return { kind: 'not-found' };
+      }
+      if (authorization.status !== 'in_progress' || !sessionToken || authorization.recipient_session_hash !== tokenHash(sessionToken)) return { kind: 'unavailable' };
+      const used = await client.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NOT NULL',
+        [authorization.id],
+      );
+      if (Number(used.rows[0]?.count) >= 3) return { kind: 'no-numbers' };
+      const currentResult = await client.query<{ provider_activation_id: string; cancel_available_at: Date }>(
+        `SELECT provider_activation_id, cancel_available_at FROM supplier_activations
+         WHERE authorization_id = $1 AND status = 'waiting_sms' FOR UPDATE`,
+        [authorization.id],
+      );
+      const current = currentResult.rows[0];
+      if (!current || current.cancel_available_at > now) return { kind: 'too-early' };
+      const updated = await client.query(
+        "UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = true WHERE authorization_id = $1 AND status = 'waiting_sms'",
+        [authorization.id],
+      );
+      return updated.rowCount === 1 ? { kind: 'cancel', activationId: current.provider_activation_id } : { kind: 'unavailable' };
+    });
+    if (transition.kind !== 'cancel') return { state: transition.kind };
+
+    try {
+      const cancellation = await this.heroSms.cancelActivation(transition.activationId);
+      if (cancellation === 'too-early') {
+        await this.database.pool.query(
+          "UPDATE supplier_activations SET status = 'waiting_sms', replacement_pending = false WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'",
+          [transition.activationId],
+        );
+        return { state: 'too-early' };
+      }
+      if (cancellation === 'sms-delivered') {
+        await this.reconcileCancellationConfirmations();
+        return { state: 'confirming' };
+      }
+      const authorizationId = await this.confirmCancellation(transition.activationId);
+      return authorizationId ? this.acquireReplacementNumber(authorizationId) : { state: 'confirming' };
+    } catch {
+      // 请求结果不明确时必须保留取消确认状态，等待供应商状态对账。
+      return { state: 'confirming' };
+    }
+  }
+
+  async reconcileCancellationConfirmations(): Promise<void> {
+    const pending = await this.database.pool.query<{ provider_activation_id: string; country_id: number }>(
+      "SELECT provider_activation_id, country_id FROM supplier_activations WHERE status = 'cancellation_confirming' ORDER BY acquired_at",
+    );
+    for (const activation of pending.rows) {
+      try {
+        const status = await this.heroSms.activationStatus(activation.provider_activation_id);
+        if (status.providerStatus === 'cancelled') {
+          const authorizationId = await this.confirmCancellation(activation.provider_activation_id);
+          if (authorizationId) await this.acquireReplacementNumber(authorizationId);
+        } else if (status.delivered && status.text) {
+          await this.receiveHeroSmsWebhook({
+            activationId: activation.provider_activation_id,
+            serviceCode: this.openAiServiceCode,
+            countryId: activation.country_id,
+            receivedAt: status.receivedAt ?? this.now(),
+            text: status.text,
+            ...(status.code ? { code: status.code } : {}),
+          });
+        }
+      } catch { /* 保持取消确认状态，下一次持久任务继续对账。 */ }
+    }
+  }
+
+  async runPendingReplacementAcquisitions(): Promise<void> {
+    const pending = await this.database.pool.query<{ authorization_id: string }>(
+      "SELECT authorization_id FROM supplier_activations WHERE status = 'cancelled' AND replacement_pending ORDER BY acquired_at",
+    );
+    for (const replacement of pending.rows) await this.acquireReplacementNumber(replacement.authorization_id);
+  }
+
+  private async confirmCancellation(providerActivationId: string): Promise<string | undefined> {
+    const result = await this.database.pool.query<{ authorization_id: string }>(
+      `UPDATE supplier_activations
+       SET status = 'cancelled', phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
+       WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'
+       RETURNING authorization_id`,
+      [providerActivationId],
+    );
+    return result.rows[0]?.authorization_id;
+  }
+
+  private async clearPendingReplacement(authorizationId: string): Promise<void> {
+    await this.database.pool.query(
+      "UPDATE supplier_activations SET replacement_pending = false WHERE authorization_id = $1 AND status = 'cancelled' AND replacement_pending",
+      [authorizationId],
+    );
+  }
+
+  private async acquireReplacementNumber(authorizationId: string): Promise<Extract<ReplacementResult, { state: 'replaced' | 'confirming' | 'no-numbers' | 'error' }>> {
+    let quotes: HeroSmsQuote[];
+    try {
+      quotes = await this.heroSms.quotes(this.openAiServiceCode);
+    } catch {
+      await this.clearPendingReplacement(authorizationId);
+      return { state: 'error' };
+    }
+    try {
+      return await this.withAcquisitionLock(async (client) => {
+        const unresolved = await client.query(
+          "SELECT 1 FROM number_acquisition_requests WHERE status IN ('requesting', 'reconciling', 'manual') LIMIT 1",
+        );
+        if (unresolved.rowCount) return { state: 'confirming' };
+        const authorization = await client.query<{ status: string; expires_at: Date }>(
+          'SELECT status, expires_at FROM activation_authorizations WHERE id = $1 FOR UPDATE', [authorizationId],
+        );
+        const current = authorization.rows[0];
+        const now = this.now();
+        if (!current || current.status !== 'in_progress' || current.expires_at <= now) {
+          await this.clearPendingReplacement(authorizationId);
+          return { state: 'error' };
+        }
+        const active = await client.query(
+          "SELECT 1 FROM supplier_activations WHERE authorization_id = $1 AND status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming')",
+          [authorizationId],
+        );
+        if (active.rowCount) {
+          await this.clearPendingReplacement(authorizationId);
+          return { state: 'confirming' };
+        }
+        const candidatesResult = await client.query<{ country_id: number }>(
+          'SELECT country_id FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NULL', [authorizationId],
+        );
+        if (!candidatesResult.rowCount) {
+          await client.query("UPDATE activation_authorizations SET status = 'quota_exhausted' WHERE id = $1 AND status = 'in_progress'", [authorizationId]);
+          await this.clearPendingReplacement(authorizationId);
+          return { state: 'no-numbers' };
+        }
+        const quoteByCountry = new Map(quotes.map((quote) => [quote.countryId, quote]));
+        const candidates = candidatesResult.rows
+          .map((candidate) => ({ ...candidate, quote: quoteByCountry.get(candidate.country_id) }))
+          .filter((candidate): candidate is typeof candidate & { quote: HeroSmsQuote } => Boolean(candidate.quote && candidate.quote.stock > 0))
+          .sort((left, right) => left.quote.price - right.quote.price || left.country_id - right.country_id);
+        for (const candidate of candidates) {
+          const requestedAt = this.now();
+          const request = await client.query<{ id: string }>(
+            `INSERT INTO number_acquisition_requests (authorization_id, country_id, requested_price, status, requested_at, updated_at)
+             VALUES ($1, $2, $3, 'requesting', $4, $4) RETURNING id`,
+            [authorizationId, candidate.country_id, candidate.quote.price, requestedAt],
+          );
+          const requestId = request.rows[0]?.id;
+          if (!requestId) throw new Error('无法持久化号码获取请求');
+          await this.clearPendingReplacement(authorizationId);
+          try {
+            const number = await this.heroSms.getNumber(this.openAiServiceCode, candidate.country_id);
+            await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.country_id, candidate.quote.price, number);
+            return { state: 'replaced' };
+          } catch (error) {
+            if (error instanceof HeroSmsResponseError && error.kind === 'uncertain') {
+              await client.query("UPDATE number_acquisition_requests SET status = 'reconciling', error_kind = 'uncertain', updated_at = $2 WHERE id = $1", [requestId, this.now()]);
+              return { state: (await this.reconcileRequestWithoutLock(requestId)) ? 'replaced' : 'confirming' };
+            }
+            await client.query(
+              "UPDATE number_acquisition_requests SET status = 'failed', error_kind = $2, updated_at = $3 WHERE id = $1",
+              [requestId, error instanceof HeroSmsResponseError ? error.kind : 'provider', this.now()],
+            );
+            if (error instanceof HeroSmsResponseError && error.kind === 'no-numbers') continue;
+            return { state: 'error' };
+          }
+        }
+        await this.clearPendingReplacement(authorizationId);
+        return { state: 'no-numbers' };
+      });
+    } catch {
+      await this.clearPendingReplacement(authorizationId);
+      return { state: 'error' };
+    }
+  }
+
   async claimAndGetNumber(token: string, existingSessionToken?: string): Promise<ClaimResult> {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { state: 'not-found' };
     const sessionToken = existingSessionToken ?? randomBytes(32).toString('base64url');
@@ -442,7 +647,10 @@ export class ActivationAuthorizations {
             await client.query('COMMIT');
             return 'unavailable' as const;
           }
-          const current = await client.query("SELECT 1 FROM supplier_activations WHERE authorization_id = $1 AND status = 'waiting_sms'", [authorizationId]);
+          const current = await client.query(
+            "SELECT 1 FROM supplier_activations WHERE authorization_id = $1 AND status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming')",
+            [authorizationId],
+          );
           if (current.rowCount) {
             await client.query('COMMIT');
             return 'claimed' as const;
@@ -458,6 +666,11 @@ export class ActivationAuthorizations {
             .map((candidate) => ({ ...candidate, quote: quoteByCountry.get(candidate.country_id) }))
             .filter((candidate): candidate is typeof candidate & { quote: HeroSmsQuote } => Boolean(candidate.quote && candidate.quote.stock > 0))
             .sort((left, right) => left.quote.price - right.quote.price || left.country_id - right.country_id);
+
+          if (!candidatesResult.rowCount) {
+            await client.query("UPDATE activation_authorizations SET status = 'quota_exhausted' WHERE id = $1 AND status = 'in_progress'", [authorizationId]);
+            return 'no-numbers' as const;
+          }
 
           for (const candidate of candidates) {
             const beforeCall = await client.query<{ status: string; expires_at: Date; recipient_session_hash: string | null }>(
