@@ -28,6 +28,7 @@ export interface AuthorizationSummary {
   status: '待领取' | '进行中' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
   createdAt: Date;
   expiresAt: Date;
+  canRevoke: boolean;
 }
 
 export interface AuthorizationDetail {
@@ -35,6 +36,13 @@ export interface AuthorizationDetail {
   recipientIdentifier: string;
   status: AuthorizationSummary['status'];
   expiresAt: Date;
+  acquisitionCount: number;
+  canRevoke: boolean;
+  revocationConsequence?: string;
+  acquisition?: {
+    countryName: string;
+    status: '获取结果确认中' | '结果待人工对账';
+  };
   activation?: {
     countryName: string;
     status: 'acquisition_confirming' | 'waiting_sms' | 'cancellation_confirming' | 'cancelled' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed' | 'timed_out';
@@ -149,6 +157,16 @@ export class ActivationAuthorizations {
     return result.rows[0]?.expires_at ?? undefined;
   }
 
+  async nextPendingRevocationCancellation(): Promise<Date | undefined> {
+    const now = this.now();
+    const result = await this.database.pool.query<{ cancel_available_at: Date | null }>(
+      `SELECT min(GREATEST(cancel_available_at, COALESCE(authorization_revocation_cancellation_retry_after, cancel_available_at))) AS cancel_available_at FROM supplier_activations
+       WHERE status = 'waiting_sms' AND authorization_revocation_cancellation_pending AND expires_at > $1`,
+      [now],
+    );
+    return result.rows[0]?.cancel_available_at ?? undefined;
+  }
+
   async preflight(recipientIdentifierValue: string, internalNoteValue?: string): Promise<AuthorizationPreflight> {
     const recipientIdentifier = recipientIdentifierValue.trim();
     const normalizedRecipientIdentifier = normalizeRecipientIdentifier(recipientIdentifierValue);
@@ -210,22 +228,97 @@ export class ActivationAuthorizations {
   }
 
   async revoke(id: string): Promise<boolean> {
-    return this.database.revokeUnclaimedAuthorization(id, this.now());
+    const cancellation = await this.database.transaction(async (client) => {
+      const result = await client.query<{
+        status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired'; expires_at: Date;
+      }>('SELECT status, expires_at FROM activation_authorizations WHERE id = $1 FOR UPDATE', [id]);
+      const authorization = result.rows[0];
+      const now = this.now();
+      if (!authorization || authorization.expires_at <= now) {
+        if (authorization) await this.expireAuthorization(client, id, now);
+        return undefined;
+      }
+      if (!['unclaimed', 'in_progress', 'sms_delivered'].includes(authorization.status)) return undefined;
+      await client.query(
+        "UPDATE activation_authorizations SET status = 'revoked', revoked_at = $2, recipient_session_hash = NULL WHERE id = $1",
+        [id, now],
+      );
+      const activationResult = await client.query<{ provider_activation_id: string; status: string; cancel_available_at: Date; expires_at: Date }>(
+        `SELECT provider_activation_id, status, cancel_available_at, expires_at FROM supplier_activations
+         WHERE authorization_id = $1 AND status IN ('waiting_sms', 'cancellation_confirming')
+         ORDER BY acquired_at DESC LIMIT 1 FOR UPDATE`,
+        [id],
+      );
+      const activation = activationResult.rows[0];
+      if (!activation || activation.expires_at <= now) return null;
+      if (activation.status === 'cancellation_confirming') {
+        await client.query(
+          "UPDATE supplier_activations SET replacement_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
+          [activation.provider_activation_id],
+        );
+        return null;
+      }
+      if (activation.cancel_available_at > now) {
+        await client.query(
+          "UPDATE supplier_activations SET replacement_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
+          [activation.provider_activation_id],
+        );
+        return null;
+      }
+      await client.query(
+        "UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
+        [activation.provider_activation_id],
+      );
+      return activation.provider_activation_id;
+    });
+    if (cancellation === undefined) return false;
+    if (cancellation) await this.cancelRevokedActivation(cancellation);
+    return true;
+  }
+
+  private async cancelRevokedActivation(providerActivationId: string): Promise<void> {
+    try {
+      const result = await this.heroSms.cancelActivation(providerActivationId);
+      if (result === 'cancelled') {
+        await this.confirmCancellation(providerActivationId);
+      } else if (result === 'too-early') {
+        await this.database.pool.query(
+          `UPDATE supplier_activations SET status = 'waiting_sms', authorization_revocation_cancellation_pending = true,
+             authorization_revocation_cancellation_retry_after = $2
+           WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
+          [providerActivationId, new Date(this.now().getTime() + 60_000)],
+        );
+      } else {
+        await this.reconcileCancellationConfirmations();
+      }
+    } catch { /* 保留取消确认状态，由持久任务继续供应商对账。 */ }
   }
 
   async detail(id: string): Promise<AuthorizationDetail | undefined> {
     const result = await this.database.pool.query<{
       id: string; recipient_identifier: string; authorization_status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired';
       authorization_expires_at: Date; country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
-      sms_code: string | null; sms_text: string | null;
+      sms_code: string | null; sms_text: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
+      acquisition_country_name: string | null; cancel_available_at: Date | null;
     }>(
       `SELECT auth.id, auth.recipient_identifier, auth.status AS authorization_status, auth.expires_at AS authorization_expires_at,
               candidate.country_name, activation.status AS activation_status, activation.expires_at AS number_expires_at,
-              activation.sms_code, activation.sms_text
+              activation.sms_code, activation.sms_text,
+              (SELECT count(*) FROM authorization_candidate_countries candidate WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NOT NULL)::text AS used_count,
+              acquisition.status AS acquisition_status, acquisition.country_name AS acquisition_country_name,
+              activation.cancel_available_at
        FROM activation_authorizations auth
        LEFT JOIN LATERAL (
          SELECT * FROM supplier_activations item WHERE item.authorization_id = auth.id ORDER BY item.acquired_at DESC LIMIT 1
        ) activation ON true
+       LEFT JOIN LATERAL (
+         SELECT request.status, candidate.country_name
+         FROM number_acquisition_requests request
+         JOIN authorization_candidate_countries candidate
+           ON candidate.authorization_id = request.authorization_id AND candidate.country_id = request.country_id
+         WHERE request.authorization_id = auth.id AND request.status IN ('requesting', 'reconciling', 'manual')
+         ORDER BY request.requested_at DESC LIMIT 1
+       ) acquisition ON true
        LEFT JOIN authorization_candidate_countries candidate
          ON candidate.authorization_id = auth.id AND candidate.country_id = activation.country_id
        WHERE auth.id = $1`,
@@ -234,8 +327,22 @@ export class ActivationAuthorizations {
     const row = result.rows[0];
     if (!row) return undefined;
     const labels = { unclaimed: '待领取', in_progress: '进行中', sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期' } as const;
+    const canRevoke = row.authorization_expires_at > this.now() && ['unclaimed', 'in_progress', 'sms_delivered'].includes(row.authorization_status);
+    const revocationConsequence = !canRevoke ? undefined
+      : row.acquisition_status ? '先完成供应商对账，确认号码后取消。'
+        : row.activation_status === 'waiting_sms'
+          ? (row.cancel_available_at && row.cancel_available_at > this.now() ? '将在可取消时请求取消当前供应商激活。'
+            : row.number_expires_at && row.number_expires_at <= this.now() ? '当前激活已结束，仅终止接收者访问。' : '立即请求取消当前供应商激活。')
+          : row.authorization_status === 'sms_delivered' ? '只终止接收者访问，不请求供应商取消。'
+            : '立即终止接收者访问。';
     return {
       id: row.id, recipientIdentifier: row.recipient_identifier, status: labels[row.authorization_status], expiresAt: row.authorization_expires_at,
+      acquisitionCount: Number(row.used_count), canRevoke,
+      ...(revocationConsequence ? { revocationConsequence } : {}),
+      ...(row.acquisition_status && row.acquisition_country_name ? { acquisition: {
+        countryName: row.acquisition_country_name,
+        status: row.acquisition_status === 'manual' ? '结果待人工对账' as const : '获取结果确认中' as const,
+      } } : {}),
       ...(row.country_name && row.activation_status && row.number_expires_at ? { activation: {
         countryName: row.country_name, status: row.activation_status, numberExpiresAt: row.number_expires_at,
         ...(!row.sms_code && row.sms_text && row.number_expires_at > this.now() ? { unrecognizedSmsText: row.sms_text } : {}),
@@ -287,6 +394,7 @@ export class ActivationAuthorizations {
       await this.database.expireAuthorization(authorization.id, now);
       return { state: 'not-found' };
     }
+    if (authorization.status === 'revoked') return { state: 'unavailable', expiresAt: authorization.expires_at };
     if (authorization.status === 'unclaimed') return { state: 'available', expiresAt: authorization.expires_at };
     if (!sessionToken || !authorization.recipient_session_hash || tokenHash(sessionToken) !== authorization.recipient_session_hash) {
       return { state: 'unavailable', expiresAt: authorization.expires_at };
@@ -339,7 +447,9 @@ export class ActivationAuthorizations {
         await client.query(
           `UPDATE supplier_activations
            SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4, sms_poll_after = NULL,
-               replacement_pending = false, authorization_expiry_cancellation_pending = false
+               replacement_pending = false, authorization_expiry_cancellation_pending = false,
+               authorization_revocation_cancellation_pending = false,
+               authorization_revocation_cancellation_retry_after = NULL
            WHERE id = $1 AND status IN ('waiting_sms', 'cancellation_confirming')`,
           [current.id, event.code ?? null, event.text, event.receivedAt],
         );
@@ -441,6 +551,8 @@ export class ActivationAuthorizations {
            refund_reconciliation_status = 'pending', timeout_reconciliation_claimed_at = NULL,
            timeout_reconciliation_claim_token = NULL, replacement_pending = false,
            authorization_expiry_cancellation_pending = false,
+           authorization_revocation_cancellation_pending = false,
+           authorization_revocation_cancellation_retry_after = NULL,
            phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
        WHERE id IN (
          SELECT id FROM supplier_activations
@@ -715,6 +827,25 @@ export class ActivationAuthorizations {
     }
   }
 
+  async cancelRevokedActivations(): Promise<void> {
+    for (;;) {
+      const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
+        `UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = false
+         WHERE id = (
+           SELECT id FROM supplier_activations
+           WHERE status = 'waiting_sms' AND authorization_revocation_cancellation_pending AND cancel_available_at <= $1
+             AND (authorization_revocation_cancellation_retry_after IS NULL OR authorization_revocation_cancellation_retry_after <= $1)
+             AND expires_at > $1
+           ORDER BY cancel_available_at LIMIT 1 FOR UPDATE SKIP LOCKED
+         ) RETURNING provider_activation_id`,
+        [this.now()],
+      );
+      const activation = claimed.rows[0];
+      if (!activation) return;
+      await this.cancelRevokedActivation(activation.provider_activation_id);
+    }
+  }
+
   async cancelAcquisitionsConfirmedAfterAuthorizationExpiry(): Promise<void> {
     for (;;) {
       const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
@@ -790,7 +921,9 @@ export class ActivationAuthorizations {
         `UPDATE supplier_activations
          SET status = 'cancelled', supplier_cancelled_at = COALESCE(supplier_cancelled_at, $2),
              phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL,
-             replacement_pending = $3, authorization_expiry_cancellation_pending = false
+             replacement_pending = $3, authorization_expiry_cancellation_pending = false,
+             authorization_revocation_cancellation_pending = false,
+             authorization_revocation_cancellation_retry_after = NULL
          WHERE id = $1`,
         [activation.id, this.now(), replacementAllowed],
       );
@@ -1128,7 +1261,11 @@ export class ActivationAuthorizations {
   async reconcilePendingRequests(): Promise<void> {
     await this.withAcquisitionLock(async () => {
       const result = await this.database.pool.query<{ id: string }>(
-        "SELECT id FROM number_acquisition_requests WHERE status IN ('requesting', 'reconciling') ORDER BY requested_at",
+        `SELECT request.id FROM number_acquisition_requests request
+         JOIN activation_authorizations auth ON auth.id = request.authorization_id
+         WHERE request.status IN ('requesting', 'reconciling')
+            OR (request.status = 'manual' AND auth.status = 'revoked')
+         ORDER BY request.requested_at`,
       );
       for (const request of result.rows) await this.reconcileRequestWithoutLock(request.id);
     });
@@ -1312,27 +1449,28 @@ export class ActivationAuthorizations {
     number: HeroSmsNumber,
     fallbackPrice: number,
   ): Promise<boolean> {
-    const authorization = await client.query<{ expires_at: Date }>(
-      'SELECT expires_at FROM activation_authorizations WHERE id = $1 FOR UPDATE',
+    const authorization = await client.query<{ expires_at: Date; status: string }>(
+      'SELECT expires_at, status FROM activation_authorizations WHERE id = $1 FOR UPDATE',
       [authorizationId],
     );
     const expiresAt = authorization.rows[0]?.expires_at;
-    if (!expiresAt) throw new Error('激活授权不存在');
+    const authorizationStatus = authorization.rows[0]?.status;
+    if (!expiresAt || !authorizationStatus) throw new Error('激活授权不存在');
     const confirmedAt = this.now();
-    const deliverable = expiresAt > confirmedAt;
-    if (!deliverable) {
+    const deliverable = expiresAt > confirmedAt && authorizationStatus !== 'revoked';
+    if (authorizationStatus !== 'revoked' && !deliverable) {
       await this.expireAuthorization(client, authorizationId, confirmedAt);
     }
     const acquiredAt = number.activationTime ?? confirmedAt;
     const numberExpiresAt = number.activationEndTime ?? new Date(acquiredAt.getTime() + 20 * 60 * 1000);
     await client.query(
       `INSERT INTO supplier_activations
-        (authorization_id, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_poll_after, authorization_expiry_cancellation_pending)
-       VALUES ($1, $2, $3, 'waiting_sms', $4, $5, $6, $7, $8, $9, $10, $11)`,
+        (authorization_id, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_poll_after, authorization_expiry_cancellation_pending, authorization_revocation_cancellation_pending)
+       VALUES ($1, $2, $3, 'waiting_sms', $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [authorizationId, countryId, number.activationId, deliverable ? number.phoneNumber : null,
         number.activationCost ?? fallbackPrice, number.currency ?? 'UNKNOWN', acquiredAt,
         new Date(acquiredAt.getTime() + 2 * 60 * 1000), numberExpiresAt,
-        deliverable ? acquiredAt : null, !deliverable],
+        deliverable ? acquiredAt : null, !deliverable && authorizationStatus !== 'revoked', authorizationStatus === 'revoked'],
     );
     return deliverable;
   }

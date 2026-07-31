@@ -118,6 +118,8 @@ export class Database {
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_reconciliation_claimed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_reconciliation_claim_token TEXT;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_expiry_cancellation_pending BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_revocation_cancellation_pending BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_revocation_cancellation_retry_after TIMESTAMPTZ;
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_refund_reconciliation_status_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_refund_reconciliation_status_check
         CHECK (refund_reconciliation_status IN ('pending', 'resolved'));
@@ -157,6 +159,10 @@ export class Database {
       CREATE INDEX IF NOT EXISTS supplier_activations_authorization_expiry_cancellation_idx
         ON supplier_activations (cancel_available_at)
         WHERE status = 'waiting_sms' AND authorization_expiry_cancellation_pending;
+
+      CREATE INDEX IF NOT EXISTS supplier_activations_authorization_revocation_cancellation_idx
+        ON supplier_activations (cancel_available_at)
+        WHERE status = 'waiting_sms' AND authorization_revocation_cancellation_pending;
 
       CREATE TABLE IF NOT EXISTS supplier_activation_refunds (
         supplier_activation_id UUID PRIMARY KEY REFERENCES supplier_activations(id) ON DELETE RESTRICT,
@@ -293,6 +299,7 @@ export class Database {
     status: '待领取' | '进行中' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
     createdAt: Date;
     expiresAt: Date;
+    canRevoke: boolean;
   }>> {
     await this.expireDueAuthorizations(now);
     const result = await this.pool.query<{
@@ -310,6 +317,7 @@ export class Database {
       status: labels[row.status],
       createdAt: row.created_at,
       expiresAt: row.expires_at,
+      canRevoke: ['unclaimed', 'in_progress', 'sms_delivered'].includes(row.status) && row.expires_at > now,
     }));
   }
 

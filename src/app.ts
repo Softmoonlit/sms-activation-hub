@@ -112,7 +112,7 @@ function adminPage(title: string, heading: string, path: string, csrfToken: stri
 
 function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
   const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
-  const recent = authorizations.length === 0 ? '<p class="empty">尚未创建激活授权。</p>' : authorizations.map((authorization) => `<article class="authorization"><p><strong>${escapeHtml(authorization.recipientIdentifier)}</strong> · ${authorization.status}</p>${authorization.internalNote ? `<p>${escapeHtml(authorization.internalNote)}</p>` : ''}<p>到期时间：${escapeHtml(authorization.expiresAt.toISOString())}</p><p><a href="/${path}/authorizations/${authorization.id}">查看详情</a></p>${authorization.status === '待领取' ? `<form method="post" action="/${path}/authorizations/${authorization.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">撤销待领取授权</button></form>` : ''}</article>`).join('');
+  const recent = authorizations.length === 0 ? '<p class="empty">尚未创建激活授权。</p>' : authorizations.map((authorization) => `<article class="authorization"><p><strong>${escapeHtml(authorization.recipientIdentifier)}</strong> · ${authorization.status}</p>${authorization.internalNote ? `<p>${escapeHtml(authorization.internalNote)}</p>` : ''}<p>到期时间：${escapeHtml(authorization.expiresAt.toISOString())}</p><p><a href="/${path}/authorizations/${authorization.id}">查看详情</a></p>${authorization.canRevoke ? `<p><a href="/${path}/authorizations/${authorization.id}/revoke">撤销授权</a></p>` : ''}</article>`).join('');
   const reconciliationMarkup = reconciliations.length === 0 ? '' : `<section class="card"><h2>号码获取对账</h2><p class="error">全局号码获取队列已暂停，处理完成后自动恢复。</p>${reconciliations.map((request) => {
     const candidates = request.candidates.map((candidate) => `<li>激活 ID ${escapeHtml(candidate.activationId)}${candidate.countryId !== undefined ? `，地区 ${candidate.countryId}` : ''}${candidate.activationTime ? `，时间 ${escapeHtml(candidate.activationTime.toISOString())}` : ''}<form method="post" action="/${path}/acquisition-requests/${request.id}/candidates/${encodeURIComponent(candidate.activationId)}/link"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">关联此供应商激活</button></form></li>`).join('');
     return `<article class="authorization"><p><strong>${escapeHtml(request.recipientIdentifier)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(request.requestedAt.toISOString())}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
@@ -123,8 +123,19 @@ function adminShell(path: string, csrfToken: string, authorizations: Authorizati
 
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
   const activation = detail.activation ? `<section class="card"><h2>最近一次供应商激活</h2><ul class="summary"><li><strong>地区：</strong>${escapeHtml(detail.activation.countryName)}</li><li><strong>激活状态：</strong>${escapeHtml(detail.activation.status)}</li><li><strong>号码有效至：</strong>${escapeHtml(detail.activation.numberExpiresAt.toISOString())}</li></ul>${detail.activation.unrecognizedSmsText ? `<h3>无法识别验证码的短信正文</h3><p class="token">${escapeHtml(detail.activation.unrecognizedSmsText)}</p>` : ''}</section>` : '<section class="card"><p>尚无供应商激活。</p></section>';
-  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(detail.recipientIdentifier)}</h2><p>授权状态：${detail.status}</p><p>授权到期时间：${escapeHtml(detail.expiresAt.toISOString())}</p></section>${activation}</section>`;
+  const revoke = detail.canRevoke ? `<p><a href="/${path}/authorizations/${detail.id}/revoke">撤销授权</a></p>` : '';
+  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(detail.recipientIdentifier)}</h2><p>授权状态：${detail.status}</p><p>已获取次数：${detail.acquisitionCount}</p><p>授权到期时间：${escapeHtml(detail.expiresAt.toISOString())}</p>${revoke}</section>${activation}</section>`;
   return adminPage('激活授权详情', '激活授权详情', path, csrfToken, `/${path}`, '返回首页', content);
+}
+
+function authorizationRevocationConfirmationPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
+  const activation = detail.activation
+    ? `<li><strong>当前地区：</strong>${escapeHtml(detail.activation.countryName)}</li><li><strong>当前激活状态：</strong>${escapeHtml(detail.activation.status)}</li>`
+    : detail.acquisition
+      ? `<li><strong>当前地区：</strong>${escapeHtml(detail.acquisition.countryName)}</li><li><strong>当前激活状态：</strong>${detail.acquisition.status}</li>`
+      : '<li><strong>当前激活状态：</strong>尚未获取号码</li>';
+  const content = `<section class="dashboard"><section class="card"><h2>确认撤销授权</h2><ul class="summary"><li><strong>接收者标识：</strong>${escapeHtml(detail.recipientIdentifier)}</li><li><strong>授权状态：</strong>${detail.status}</li>${activation}<li><strong>已获取次数：</strong>${detail.acquisitionCount}</li><li><strong>撤销后：</strong>${escapeHtml(detail.revocationConsequence ?? '该激活授权已经不可撤销。')}</li></ul><form method="post" action="/${path}/authorizations/${detail.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认撤销授权</button></form></section></section>`;
+  return adminPage('确认撤销授权', '确认撤销授权', path, csrfToken, `/${path}/authorizations/${detail.id}`, '返回详情', content);
 }
 
 function preflightFingerprint(preflight: AuthorizationPreflight, secret: string): string {
@@ -296,6 +307,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   await activationAuthorizations.reconcilePendingRequests();
   await activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry();
   await activationAuthorizations.reconcileTimedOutActivations();
+  await activationAuthorizations.cancelRevokedActivations();
   await activationAuthorizations.reconcileCancellationConfirmations();
   await activationAuthorizations.runPendingReplacementAcquisitions();
   await activationAuthorizations.pollWaitingActivations();
@@ -307,6 +319,31 @@ export async function createApp(config: AppConfig, database = new Database(confi
 
   let closing = false;
   let authorizationExpiryTimer: NodeJS.Timeout | undefined;
+  let revocationCancellationTimer: NodeJS.Timeout | undefined;
+  const retryRevocationCancellationScheduling = (): void => {
+    if (closing) return;
+    revocationCancellationTimer = setTimeout(() => {
+      revocationCancellationTimer = undefined;
+      void scheduleNextRevocationCancellation().catch(retryRevocationCancellationScheduling);
+    }, 1_000);
+    revocationCancellationTimer.unref();
+  };
+  const scheduleNextRevocationCancellation = async (): Promise<void> => {
+    if (closing) return;
+    if (revocationCancellationTimer) clearTimeout(revocationCancellationTimer);
+    revocationCancellationTimer = undefined;
+    const cancelAt = await activationAuthorizations.nextPendingRevocationCancellation();
+    if (!cancelAt) return;
+    const currentTime = dependencies.now?.() ?? new Date();
+    const delay = Math.min(Math.max(0, cancelAt.getTime() - currentTime.getTime()), 2_147_483_647);
+    revocationCancellationTimer = setTimeout(() => {
+      revocationCancellationTimer = undefined;
+      void activationAuthorizations.cancelRevokedActivations()
+        .then(scheduleNextRevocationCancellation)
+        .catch(retryRevocationCancellationScheduling);
+    }, delay);
+    revocationCancellationTimer.unref();
+  };
   const retryAuthorizationExpiryScheduling = (): void => {
     if (closing) return;
     authorizationExpiryTimer = setTimeout(() => {
@@ -394,6 +431,15 @@ export async function createApp(config: AppConfig, database = new Database(confi
     return reply.type('text/html; charset=utf-8').send(authorizationDetailPage(config.adminPath, session.csrfToken, detail));
   });
 
+  app.get<{ Params: { id: string } }>(`${adminRoot}/authorizations/:id/revoke`, async (request, reply) => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    if (!session) return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    const detail = await activationAuthorizations.detail(request.params.id);
+    if (!detail || !detail.canRevoke) return reply.code(409).type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list(), '该激活授权已经不可撤销。'));
+    cookiesForSession(reply, session.id, session.csrfToken);
+    return reply.type('text/html; charset=utf-8').send(authorizationRevocationConfirmationPage(config.adminPath, session.csrfToken, detail));
+  });
+
   app.post<{ Body: LoginBody }>(`${adminRoot}/login`, async (request, reply) => {
     const csrfToken = csrfFrom(request);
     if (!isSameOrigin(request, config) || !csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
@@ -461,6 +507,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     }
     const revoked = await activationAuthorizations.revoke(request.params.id);
     if (!revoked) return reply.code(409).type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list(), '该激活授权已经不可撤销。'));
+    void scheduleNextRevocationCancellation().catch(retryRevocationCancellationScheduling);
     return reply.redirect(adminRoot, 303);
   });
 
@@ -609,6 +656,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry();
     // 超时收尾必须先于取消对账，避免刚到二十分钟的取消确认自动创建后继激活。
     await activationAuthorizations.reconcileTimedOutActivations();
+    await activationAuthorizations.cancelRevokedActivations();
     await activationAuthorizations.reconcileCancellationConfirmations();
     await activationAuthorizations.runPendingReplacementAcquisitions();
     await activationAuthorizations.pollWaitingActivations();
@@ -625,12 +673,14 @@ export async function createApp(config: AppConfig, database = new Database(confi
   }, 60_000);
   expirationSweep.unref();
   await scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
+  await scheduleNextRevocationCancellation().catch(retryRevocationCancellationScheduling);
 
   app.setNotFoundHandler(async (_request, reply) => reply.code(404).type('text/plain; charset=utf-8').send('Not Found'));
   app.addHook('onClose', async () => {
     closing = true;
     clearInterval(expirationSweep);
     if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
+    if (revocationCancellationTimer) clearTimeout(revocationCancellationTimer);
     await database.close();
   });
   return app;

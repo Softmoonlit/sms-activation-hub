@@ -1158,14 +1158,244 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
+  test('管理员确认撤销已领取且可取消的授权后，立即切断访问并取消当前供应商激活', async () => {
+    let now = new Date('2026-09-01T00:00:00.000Z');
+    const activationId = `revoked-waiting-${randomUUID()}`;
+    let cancelCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+        activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async (id) => { assert.equal(id, activationId); cancelCalls += 1; return 'cancelled'; },
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `撤销确认-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      now = new Date('2026-09-01T00:02:00.000Z');
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
+      assert.equal(confirmation.statusCode, 200);
+      assert.match(confirmation.body, new RegExp(recipientIdentifier));
+      assert.match(confirmation.body, /<strong>授权状态：<\/strong>进行中/);
+      assert.match(confirmation.body, /<strong>当前激活状态：<\/strong>waiting_sms/);
+      assert.match(confirmation.body, /<strong>当前地区：<\/strong>美国/);
+      assert.match(confirmation.body, /<strong>已获取次数：<\/strong>1/);
+      assert.match(confirmation.body, /立即请求取消当前供应商激活/);
+
+      const revoked = await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {});
+      assert.equal(revoked.statusCode, 303);
+      assert.equal(cancelCalls, 1);
+      const recipient = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(recipient.body, /此链接不可用，请联系发送者/);
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
+      assert.match(detail.body, /已撤销/);
+      assert.match(detail.body, /cancelled/);
+      assert.doesNotMatch(detail.body, /\+14155550123/);
+    } finally { await app.close(); }
+  });
+
+  test('撤销未满两分钟的当前激活会持久等待，并在重启后到时取消', async () => {
+    let now = new Date('2026-09-02T00:00:00.000Z');
+    const activationId = `revoked-delayed-${randomUUID()}`;
+    let cancelCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+        activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => { cancelCalls += 1; return 'cancelled'; },
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    let token = '';
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `延迟撤销-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
+      assert.match(confirmation.body, /将在可取消时请求取消当前供应商激活/);
+      assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
+      assert.equal(cancelCalls, 0);
+      assert.match((await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } })).body, /此链接不可用，请联系发送者/);
+    } finally { await app.close(); }
+
+    now = new Date('2026-09-02T00:01:59.999Z');
+    const beforeAllowed = await openApplication(heroSms, () => now);
+    try { assert.equal(cancelCalls, 0); } finally { await beforeAllowed.app.close(); }
+    now = new Date('2026-09-02T00:02:00.000Z');
+    const allowed = await openApplication(heroSms, () => now);
+    try {
+      assert.equal(cancelCalls, 1);
+      assert.match((await allowed.app.inject({ method: 'GET', url: `/a/${token}` })).body, /此链接不可用，请联系发送者/);
+    } finally { await allowed.app.close(); }
+  });
+
+  test('撤销取消过早响应会持久延后重试，重启前不重复请求供应商', async () => {
+    let now = new Date('2026-09-06T00:00:00.000Z');
+    const activationId = `revoked-too-early-${randomUUID()}`;
+    let cancellationCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+        activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancellationCalls += 1;
+        return cancellationCalls === 1 ? 'too-early' : 'cancelled';
+      },
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `过早取消-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
+      assert.equal(cancellationCalls, 0);
+    } finally { await app.close(); }
+
+    now = new Date('2026-09-06T00:02:00.000Z');
+    const tooEarly = await openApplication(heroSms, () => now);
+    try { assert.equal(cancellationCalls, 1); } finally { await tooEarly.app.close(); }
+    now = new Date('2026-09-06T00:02:30.000Z');
+    const beforeRetry = await openApplication(heroSms, () => now);
+    try { assert.equal(cancellationCalls, 1); } finally { await beforeRetry.app.close(); }
+    now = new Date('2026-09-06T00:03:00.000Z');
+    const retried = await openApplication(heroSms, () => now);
+    try { assert.equal(cancellationCalls, 2); } finally { await retried.app.close(); }
+  });
+
+  test('短信送达后撤销只终止接收者访问，不取消供应商激活或自动换号', async () => {
+    const now = new Date('2026-09-03T00:03:00.000Z');
+    const activationId = `revoked-sms-${randomUUID()}`;
+    let cancelCalls = 0;
+    let acquiredNumbers = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        acquiredNumbers += 1;
+        return { activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) };
+      },
+      cancelActivation: async () => { cancelCalls += 1; return 'cancelled'; },
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `短信撤销-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      assert.equal((await app.inject({
+        method: 'POST', url: `/${config.heroSmsWebhookPath}`, remoteAddress: '127.0.0.1',
+        payload: { activationId, service: 'openai', country: 1, receivedAt: now.toISOString(), text: '验证码 482913', code: '482913' },
+      })).statusCode, 200);
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
+      assert.match(confirmation.body, /只终止接收者访问，不请求供应商取消/);
+      assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
+      assert.equal(cancelCalls, 0);
+      assert.equal(acquiredNumbers, 1);
+      assert.match((await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } })).body, /此链接不可用，请联系发送者/);
+    } finally { await app.close(); }
+  });
+
+  test('撤销获取结果待确认的授权后，重启对账确认号码并取消且不交付', async () => {
+    let now = new Date('2026-09-04T00:00:00.000Z');
+    const activationId = `revoked-reconciled-${randomUUID()}`;
+    let reconciliationFindsNumber = false;
+    let cancelCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => { throw new HeroSmsResponseError('uncertain'); },
+      activeActivations: async () => reconciliationFindsNumber ? [{
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', serviceCode: 'openai', countryId: 1,
+        activationTime: new Date('2026-09-04T00:00:00.000Z'), status: 'STATUS_WAIT_CODE',
+      }] : [],
+      cancelActivation: async () => { cancelCalls += 1; return 'cancelled'; },
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    let token = '';
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `对账撤销-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      assert.equal((await app.inject({ method: 'POST', url: `/a/${token}/numbers` })).statusCode, 202);
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
+      assert.match(confirmation.body, /先完成供应商对账，确认号码后取消/);
+      assert.match(confirmation.body, /<strong>当前地区：<\/strong>美国/);
+      assert.match(confirmation.body, /<strong>当前激活状态：<\/strong>(?:获取结果确认中|结果待人工对账)/);
+      assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
+      assert.match((await app.inject({ method: 'GET', url: `/a/${token}` })).body, /此链接不可用，请联系发送者/);
+    } finally { await app.close(); }
+
+    reconciliationFindsNumber = true;
+    now = new Date('2026-09-04T00:02:00.000Z');
+    const restarted = await openApplication(heroSms, () => now);
+    try {
+      assert.equal(cancelCalls, 1);
+      assert.match((await restarted.app.inject({ method: 'GET', url: `/a/${token}` })).body, /此链接不可用，请联系发送者/);
+    } finally { await restarted.app.close(); }
+  });
+
+  test('撤销取消响应报告短信送达时，接收者仍被断开且不产生后继号码', async () => {
+    let now = new Date('2026-09-05T00:02:00.001Z');
+    const activationId = `revoked-cancel-sms-${randomUUID()}`;
+    let acquiredNumbers = 0;
+    let cancellationCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        acquiredNumbers += 1;
+        return { activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: new Date('2026-09-05T00:00:00.000Z'), activationEndTime: new Date('2026-09-05T00:20:00.000Z') };
+      },
+      cancelActivation: async () => { cancellationCalls += 1; return 'sms-delivered'; },
+      activationStatus: async () => ({ delivered: true, receivedAt: now, text: '验证码 482913', code: '482913' }),
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `取消短信竞态-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
+      assert.equal(cancellationCalls, 1);
+      assert.equal(acquiredNumbers, 1);
+      assert.match((await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } })).body, /此链接不可用，请联系发送者/);
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
+      assert.match(detail.body, /completion_confirming|completed/);
+    } finally { await app.close(); }
+  });
+
   test('管理员撤销待领取授权后，真实链接在 24 小时内显示统一不可用，截止后返回 404', async () => {
     let now = new Date('2026-08-18T00:00:00.000Z');
     const { app } = await openApplication(scriptedHeroSms(), () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const recipientIdentifier = randomUUID();
+      const created = await createAuthorization(app, session, { recipientIdentifier });
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      const id = (await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } })).body.match(/authorizations\/([0-9a-f-]{36})\/revoke/)?.[1]; assert.ok(id);
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
       const revoked = await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {});
       assert.equal(revoked.statusCode, 303);
       const unavailable = await app.inject({ method: 'GET', url: `/a/${token}` });
