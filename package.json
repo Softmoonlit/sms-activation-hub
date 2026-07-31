@@ -12,7 +12,7 @@
     "test": "node --import tsx scripts/run-tests.ts",
     "test:unit": "node --import tsx --test test/config.test.ts test/herosms.test.ts test/test-database-runner.test.ts",
     "test:node": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "node --import tsx scripts/run-tests.ts --playwright"
   },
   "engines": {
     "node": ">=22"

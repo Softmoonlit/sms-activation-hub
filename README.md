@@ -19,9 +19,10 @@ npm run dev
 ```sh
 npm run typecheck
 npm test
+npm run test:e2e
 ```
 
-`npm test` 会连接 PostgreSQL，创建名称随机的隔离测试数据库，运行完整测试，并在成功或失败后强制删除该数据库。测试不会再复用应用数据库，因此历史授权和未完成对账不会污染后续运行。
+`npm test` 和 `npm run test:e2e` 都会连接 PostgreSQL，分别为 Node.js 测试和 Playwright 浏览器测试创建名称随机的隔离测试数据库，并在成功或失败后强制删除该数据库。测试不会复用应用数据库，因此历史授权和未完成对账不会污染后续运行。
 
 本地开发时，如果 `.env` 中的 `DATABASE_URL` 指向 `127.0.0.1`、`localhost` 或 `::1`，测试运行器会复用该服务器连接来创建临时数据库。CI 或远程 PostgreSQL 必须显式设置 `TEST_DATABASE_ADMIN_URL`；该账号需要 `CREATE DATABASE` 和 `DROP DATABASE` 权限。测试运行器拒绝隐式使用远程 `DATABASE_URL`。
 
@@ -33,6 +34,9 @@ npm run test:unit
 
 # 底层 Node 测试入口，仅供测试运行器或专项排查使用；必须自行提供 TEST_DATABASE_URL
 TEST_DATABASE_URL=postgres://... npm run test:node
+
+# 底层 Playwright 入口同样必须自行提供 TEST_DATABASE_URL；通常应使用 npm run test:e2e
+TEST_DATABASE_URL=postgres://... npx playwright test
 ```
 
-缺少 `TEST_DATABASE_URL` 时，数据库集成测试会失败而不是静默跳过，防止不完整的测试结果被误认为全部通过。
+缺少 `TEST_DATABASE_URL` 时，数据库集成测试和 Playwright 浏览器测试都会失败而不是静默跳过，防止不完整的测试结果被误认为全部通过。以后新增的任何数据库测试入口也必须复用同一隔离数据库运行原则：自动化入口负责创建和清理临时数据库，底层入口缺少 `TEST_DATABASE_URL` 时明确失败。

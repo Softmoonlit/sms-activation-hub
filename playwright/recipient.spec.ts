@@ -9,6 +9,7 @@ import { Database } from '../src/database.js';
 import type { HeroSms } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
+if (!databaseUrl) throw new Error('Playwright 测试必须通过隔离测试数据库运行器执行');
 const origin = 'http://127.0.0.1:32123';
 const config: AppConfig = {
   adminPassword: 'correct-deployment-password', adminPath: 'control7', databaseUrl: databaseUrl ?? '',
@@ -34,8 +35,6 @@ const heroSms: HeroSms = {
   activationStatus: async () => ({ delivered: false }),
   finishActivation: async () => undefined,
 };
-
-test.skip(!databaseUrl, '需要 TEST_DATABASE_URL');
 
 test('移动视口完成领取、浏览器绑定、号码显示和复制', async ({ browser }) => {
   const database = new Database(databaseUrl!);

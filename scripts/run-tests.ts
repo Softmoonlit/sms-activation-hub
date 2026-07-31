@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
 import 'dotenv/config';
 import { Client } from 'pg';
 
+const require = createRequire(import.meta.url);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 export function resolveTestDatabaseAdminUrl(environment: NodeJS.ProcessEnv): string {
@@ -45,10 +47,16 @@ function databaseUrl(baseUrl: string, databaseName: string): string {
   return parsed.toString();
 }
 
-async function runNodeTests(testDatabaseUrl: string): Promise<number> {
-  const child = spawn(process.execPath, [
-    '--import', 'tsx', '--test', '--test-concurrency=1', 'test/**/*.test.ts',
-  ], {
+type TestSuite = 'node' | 'playwright';
+
+function testCommand(suite: TestSuite): string[] {
+  return suite === 'playwright'
+    ? [require.resolve('@playwright/test/cli'), 'test']
+    : ['--import', 'tsx', '--test', '--test-concurrency=1', 'test/**/*.test.ts'];
+}
+
+async function runTests(testDatabaseUrl: string, suite: TestSuite): Promise<number> {
+  const child = spawn(process.execPath, testCommand(suite), {
     env: { ...process.env, TEST_DATABASE_URL: testDatabaseUrl },
     stdio: 'inherit',
   });
@@ -66,7 +74,7 @@ async function runNodeTests(testDatabaseUrl: string): Promise<number> {
   });
 }
 
-export async function main(): Promise<number> {
+export async function main(suite: TestSuite = 'node'): Promise<number> {
   const adminUrl = resolveTestDatabaseAdminUrl(process.env);
   const maintenanceUrl = databaseUrl(adminUrl, 'postgres');
   const testDatabaseName = `sms_website_test_${Date.now()}_${randomBytes(4).toString('hex')}`;
@@ -77,7 +85,7 @@ export async function main(): Promise<number> {
   try {
     await client.query(`CREATE DATABASE ${quoteIdentifier(testDatabaseName)}`);
     console.log(`已创建隔离测试数据库：${testDatabaseName}`);
-    return await runNodeTests(testDatabaseUrl);
+    return await runTests(testDatabaseUrl, suite);
   } finally {
     await client.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(testDatabaseName)} WITH (FORCE)`);
     await client.end();
@@ -86,7 +94,8 @@ export async function main(): Promise<number> {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().then(
+  const suite: TestSuite = process.argv.includes('--playwright') ? 'playwright' : 'node';
+  main(suite).then(
     (exitCode) => { process.exitCode = exitCode; },
     (error: unknown) => {
       console.error(error instanceof Error ? error.message : error);
