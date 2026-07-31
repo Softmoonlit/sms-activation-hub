@@ -41,6 +41,8 @@ const heroSms: HeroSms = {
     { countryId: 4, price: 0.22, stock: 5 },
   ],
   getNumber: async () => { throw new Error('设置测试不应获取号码'); },
+  activeActivations: async () => [],
+  activationHistory: async () => [],
 };
 
 type LoginMaterial = { csrf: string; csrfCookie: string };

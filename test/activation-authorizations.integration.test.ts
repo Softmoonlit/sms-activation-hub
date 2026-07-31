@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { createApp } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
-import { HeroSmsResponseError, type HeroSms, type HeroSmsNumber } from '../src/herosms.js';
+import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsNumber } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const origin = 'https://test.example';
@@ -22,6 +22,8 @@ function scriptedHeroSms(overrides: Partial<{
   stock: number;
   quotes: HeroSms['quotes'];
   getNumber: HeroSms['getNumber'];
+  activeActivations: HeroSms['activeActivations'];
+  activationHistory: HeroSms['activationHistory'];
 }> = {}): HeroSms {
   return {
     balance: async () => overrides.balance ?? 10,
@@ -36,6 +38,8 @@ function scriptedHeroSms(overrides: Partial<{
       activationId: `activation-${countryId}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
       activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),
     })),
+    activeActivations: overrides.activeActivations ?? (async () => []),
+    activationHistory: overrides.activationHistory ?? (async () => []),
   };
 }
 
@@ -232,6 +236,193 @@ if (!databaseUrl) {
       assert.equal((await opened.app.inject({ method: 'POST', url: `/a/${thirdToken}/numbers` })).statusCode, 404);
       assert.equal(calls, 2, '截止后不得调用 HeroSMS');
     } finally { await opened.app.close(); }
+  });
+
+  test('三个候选地区均明确无库存时保留全部地区和获取额度', async () => {
+    const fixedNow = new Date('2026-08-04T12:00:00.000Z');
+    const attemptedCountries: number[] = [];
+    const heroSms = scriptedHeroSms({
+      getNumber: async (_serviceCode, countryId) => {
+        attemptedCountries.push(countryId);
+        throw new HeroSmsResponseError('no-numbers');
+      },
+    });
+    const { app, database } = await openApplication(heroSms, () => fixedNow);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `no-stock-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const response = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(response.statusCode, 409);
+      assert.match(response.body, /当前暂无可用号码，请联系发送者/);
+      assert.deepEqual(attemptedCountries, [1, 2, 3]);
+      const candidates = await database.pool.query<{ used_at: Date | null }>(
+        `SELECT candidate.used_at FROM authorization_candidate_countries candidate
+         JOIN activation_authorizations auth ON auth.id = candidate.authorization_id
+         WHERE auth.recipient_identifier = $1 ORDER BY candidate.position`,
+        [recipientIdentifier],
+      );
+      assert.deepEqual(candidates.rows.map((candidate) => candidate.used_at), [null, null, null]);
+    } finally { await app.close(); }
+  });
+
+  test('明确获取失败不消耗地区或额度，管理员处理后可由原绑定浏览器重试', async () => {
+    const fixedNow = new Date('2026-08-05T00:00:00.000Z');
+    const definiteKinds = ['balance', 'authentication', 'account', 'request', 'rate-limit', 'provider'] as const;
+    let failureKind: typeof definiteKinds[number] | undefined = definiteKinds[0];
+    let activationSequence = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        if (failureKind) throw new HeroSmsResponseError(failureKind);
+        activationSequence += 1;
+        return { activationId: `recovered-${activationSequence}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: fixedNow };
+      },
+    });
+    const { app, database } = await openApplication(heroSms, () => fixedNow);
+    try {
+      const session = await login(app);
+      for (const kind of definiteKinds) {
+        failureKind = kind;
+        const recipientIdentifier = `${kind}-${randomUUID()}`;
+        const created = await createAuthorization(app, session, { recipientIdentifier });
+        const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+        const failed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+        assert.equal(failed.statusCode, 503);
+        assert.match(failed.body, /暂时无法获取号码，请联系发送者/);
+        const recipientCookie = `recipient_session=${cookieValue(failed, 'recipient_session')}`;
+        const unused = await database.pool.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM authorization_candidate_countries
+           WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE recipient_identifier = $1)
+             AND used_at IS NOT NULL`,
+          [recipientIdentifier],
+        );
+        assert.equal(unused.rows[0]?.count, '0');
+
+        failureKind = undefined;
+        const retried = await app.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
+        assert.equal(retried.statusCode, 303, `管理员处理 ${kind} 后应可重试`);
+      }
+    } finally { await app.close(); }
+  });
+
+  test('响应丢失后自动从活动激活与历史唯一恢复，不重复调用号码获取', async () => {
+    const fixedNow = new Date('2026-08-06T00:00:00.000Z');
+    let getNumberCalls = 0;
+    const recovered: HeroSmsActivationRecord = {
+      activationId: `lost-${randomUUID()}`, phoneNumber: '+442079460123', activationCost: 0.9,
+      currency: 'USD', serviceCode: 'openai', countryId: 1, activationTime: fixedNow, status: '1',
+    };
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => { getNumberCalls += 1; throw new HeroSmsResponseError('uncertain'); },
+      activeActivations: async () => [recovered],
+      activationHistory: async () => [],
+    });
+    const { app } = await openApplication(heroSms, () => fixedNow);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /\+44 20 7946 0123/);
+      assert.equal(getNumberCalls, 1, '对账必须恢复原请求，不得盲目重试');
+    } finally { await app.close(); }
+  });
+
+  test('无法唯一归属时全局暂停，管理员可关联候选或确认未产生激活并解除暂停', async () => {
+    const fixedNow = new Date('2026-08-07T00:00:00.000Z');
+    let mode: 'uncertain' | 'success' = 'uncertain';
+    let getNumberCalls = 0;
+    const candidates: HeroSmsActivationRecord[] = [1, 2, 3].map((suffix) => ({
+      activationId: `ambiguous-${suffix}-${randomUUID()}`, phoneNumber: `+1415555012${suffix}`,
+      activationCost: 0.8, currency: 'USD', serviceCode: 'openai', countryId: 1,
+      activationTime: fixedNow, status: '1',
+    }));
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        if (mode === 'uncertain') throw new HeroSmsResponseError('uncertain');
+        return { activationId: `after-review-${randomUUID()}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: fixedNow };
+      },
+      activeActivations: async () => candidates,
+      activationHistory: async () => [],
+    });
+    const { app } = await openApplication(heroSms, () => fixedNow);
+    try {
+      const session = await login(app);
+      const first = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const second = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const firstToken = first.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(firstToken);
+      const secondToken = second.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(secondToken);
+      const uncertain = await app.inject({ method: 'POST', url: `/a/${firstToken}/numbers` });
+      assert.equal(uncertain.statusCode, 202);
+      assert.match(uncertain.body, /号码获取结果待发送者处理/);
+      const firstCookie = `recipient_session=${cookieValue(uncertain, 'recipient_session')}`;
+
+      const paused = await app.inject({ method: 'POST', url: `/a/${secondToken}/numbers` });
+      assert.equal(paused.statusCode, 503);
+      assert.equal(getNumberCalls, 1, '人工对账期间不得开始其他号码获取');
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.match(home.body, /结果待人工对账/);
+      const link = home.body.match(/action="(\/control7\/acquisition-requests\/[0-9a-f-]{36}\/candidates\/[^"/]+\/link)"/)?.[1]; assert.ok(link);
+      const linked = await post(app, session, link, {});
+      assert.equal(linked.statusCode, 303);
+      const recoveredPage = await app.inject({ method: 'GET', url: `/a/${firstToken}`, headers: { cookie: firstCookie } });
+      assert.match(recoveredPage.body, /\+1 415 555 0121/, '人工关联后应恢复号码和激活状态');
+
+      const secondCookie = `recipient_session=${cookieValue(paused, 'recipient_session')}`;
+      const secondUncertain = await app.inject({ method: 'POST', url: `/a/${secondToken}/numbers`, headers: { cookie: secondCookie } });
+      assert.equal(secondUncertain.statusCode, 202, '人工关联后全局队列应恢复');
+      const secondHome = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const requestId = secondHome.body.match(/acquisition-requests\/([0-9a-f-]{36})\/confirm-absent/)?.[1]; assert.ok(requestId);
+      const confirmed = await post(app, session, `/${config.adminPath}/acquisition-requests/${requestId}/confirm-absent`, {});
+      assert.equal(confirmed.statusCode, 303);
+
+      mode = 'success';
+      const retried = await app.inject({ method: 'POST', url: `/a/${secondToken}/numbers`, headers: { cookie: secondCookie } });
+      assert.equal(retried.statusCode, 303, '确认未产生激活后原授权可重试');
+    } finally { await app.close(); }
+  });
+
+  test('未完成对账在应用重启后恢复并自动关联唯一供应商激活', async () => {
+    const fixedNow = new Date('2026-08-08T00:00:00.000Z');
+    const providerActivationId = `restart-${randomUUID()}`;
+    let reconciliationAvailable = false;
+    let records: HeroSmsActivationRecord[] = [];
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => { throw new HeroSmsResponseError('uncertain'); },
+      activeActivations: async () => {
+        if (!reconciliationAvailable) throw new HeroSmsResponseError('provider');
+        return records;
+      },
+      activationHistory: async () => [],
+    });
+    const opened = await openApplication(heroSms, () => fixedNow);
+    let token: string;
+    let recipientCookie: string;
+    try {
+      const session = await login(opened.app);
+      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      const uncertain = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(uncertain.statusCode, 202);
+      recipientCookie = `recipient_session=${cookieValue(uncertain, 'recipient_session')}`;
+    } finally { await opened.app.close(); }
+
+    reconciliationAvailable = true;
+    records = [{
+      activationId: providerActivationId, phoneNumber: '+14155550123', activationCost: 0.8,
+      currency: 'USD', serviceCode: 'openai', countryId: 1, activationTime: fixedNow, status: '1',
+    }];
+    const restarted = await openApplication(heroSms, () => fixedNow);
+    try {
+      const page = await restarted.app.inject({ method: 'GET', url: `/a/${token!}`, headers: { cookie: recipientCookie! } });
+      assert.match(page.body, /\+1 415 555 0123/);
+    } finally { await restarted.app.close(); }
   });
 
   test('管理员撤销待领取授权后，真实链接在 24 小时内显示统一不可用，截止后返回 404', async () => {

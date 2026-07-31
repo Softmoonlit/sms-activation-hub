@@ -5,7 +5,7 @@ import formbody from '@fastify/formbody';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
-import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AuthorizationPreflight, type AuthorizationSummary, type RecipientAuthorizationView } from './activation-authorizations.js';
+import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AcquisitionReconciliation, type AuthorizationPreflight, type AuthorizationSummary, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
@@ -97,10 +97,14 @@ function adminPage(title: string, heading: string, path: string, csrfToken: stri
   return htmlPage(title, `<main class="shell"><header><h1>${heading}</h1><nav><a href="${navigationPath}">${navigationLabel}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
 }
 
-function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string): string {
+function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
   const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
   const recent = authorizations.length === 0 ? '<p class="empty">尚未创建激活授权。</p>' : authorizations.map((authorization) => `<article class="authorization"><p><strong>${escapeHtml(authorization.recipientIdentifier)}</strong> · ${authorization.status}</p>${authorization.internalNote ? `<p>${escapeHtml(authorization.internalNote)}</p>` : ''}<p>到期时间：${escapeHtml(authorization.expiresAt.toISOString())}</p>${authorization.status === '待领取' ? `<form method="post" action="/${path}/authorizations/${authorization.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">撤销待领取授权</button></form>` : ''}</article>`).join('');
-  const content = `<section class="dashboard">${errorMarkup}<section class="card"><h2>创建激活授权</h2><p>填写接收者标识和可选内部备注，下一步将执行 HeroSMS 预检并显示确认汇总。</p><form method="post" action="/${path}/authorizations/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>接收者标识<input name="recipientIdentifier" required maxlength="200"></label><label>内部备注（可选）<textarea name="internalNote" maxlength="2000"></textarea></label><button type="submit">预检并确认</button></form></section><section class="card"><h2>最近激活授权</h2>${recent}</section></section>`;
+  const reconciliationMarkup = reconciliations.length === 0 ? '' : `<section class="card"><h2>号码获取对账</h2><p class="error">全局号码获取队列已暂停，处理完成后自动恢复。</p>${reconciliations.map((request) => {
+    const candidates = request.candidates.map((candidate) => `<li>激活 ID ${escapeHtml(candidate.activationId)}${candidate.countryId !== undefined ? `，地区 ${candidate.countryId}` : ''}${candidate.activationTime ? `，时间 ${escapeHtml(candidate.activationTime.toISOString())}` : ''}<form method="post" action="/${path}/acquisition-requests/${request.id}/candidates/${encodeURIComponent(candidate.activationId)}/link"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">关联此供应商激活</button></form></li>`).join('');
+    return `<article class="authorization"><p><strong>${escapeHtml(request.recipientIdentifier)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(request.requestedAt.toISOString())}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
+  }).join('')}</section>`;
+  const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>创建激活授权</h2><p>填写接收者标识和可选内部备注，下一步将执行 HeroSMS 预检并显示确认汇总。</p><form method="post" action="/${path}/authorizations/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>接收者标识<input name="recipientIdentifier" required maxlength="200"></label><label>内部备注（可选）<textarea name="internalNote" maxlength="2000"></textarea></label><button type="submit">预检并确认</button></form></section><section class="card"><h2>最近激活授权</h2>${recent}</section></section>`;
   return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', content);
 }
 
@@ -148,6 +152,10 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   if (view.state === 'claimed' && view.phoneNumber) {
     const e164 = view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`;
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p>${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制号码</button><ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：<time datetime="${view.numberExpiresAt!.toISOString()}">${escapeHtml(view.numberExpiresAt!.toISOString())}</time></li><li>可换号时间：<time datetime="${view.cancelAvailableAt!.toISOString()}">${escapeHtml(view.cancelAvailableAt!.toISOString())}</time></li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}`);
+  }
+  if (view.state === 'claimed' && view.acquisitionState) {
+    const status = view.acquisitionState === 'manual' ? '号码获取结果待发送者处理' : '正在确认号码获取结果';
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p><p>${status}</p></section></main>${countdownScript}`);
   }
   return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm}</section></main>${countdownScript}`);
 }
@@ -242,6 +250,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
   const defaultCandidateLocations = new DefaultCandidateLocations(database, heroSms, config.openAiServiceCode);
   const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, dependencies.now);
+  await activationAuthorizations.reconcilePendingRequests();
   const app = Fastify({ logger: false, trustProxy: config.trustedProxy });
   await app.register(cookie);
   await app.register(formbody);
@@ -259,7 +268,13 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     if (session) {
       cookiesForSession(reply, session.id, session.csrfToken);
-      return reply.type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list()));
+      return reply.type('text/html; charset=utf-8').send(adminShell(
+        config.adminPath,
+        session.csrfToken,
+        await activationAuthorizations.list(),
+        undefined,
+        await activationAuthorizations.listAcquisitionReconciliations(),
+      ));
     }
 
     const csrfToken = randomToken();
@@ -352,10 +367,43 @@ export async function createApp(config: AppConfig, database = new Database(confi
     });
     if (result.state === 'claimed') return reply.redirect(`/a/${request.params.token}`, 303);
     const view = await activationAuthorizations.recipientState(request.params.token, result.sessionToken);
+    if (result.state === 'confirming') {
+      return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
+    }
     const message = result.state === 'no-numbers'
       ? '当前暂无可用号码，请联系发送者'
       : '暂时无法获取号码，请联系发送者';
     return reply.code(result.state === 'no-numbers' ? 409 : 503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, message));
+  });
+
+  app.post<{ Body: CsrfBody; Params: { id: string } }>(`${adminRoot}/acquisition-requests/:id/reconcile`, async (request, reply) => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    const csrfToken = csrfFrom(request);
+    if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+      return reply.code(403).send();
+    }
+    await activationAuthorizations.reconcileAcquisitionRequest(request.params.id);
+    return reply.redirect(adminRoot, 303);
+  });
+
+  app.post<{ Body: CsrfBody; Params: { id: string; activationId: string } }>(`${adminRoot}/acquisition-requests/:id/candidates/:activationId/link`, async (request, reply) => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    const csrfToken = csrfFrom(request);
+    if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+      return reply.code(403).send();
+    }
+    const linked = await activationAuthorizations.linkAcquisitionCandidate(request.params.id, request.params.activationId);
+    return linked ? reply.redirect(adminRoot, 303) : reply.code(409).send();
+  });
+
+  app.post<{ Body: CsrfBody; Params: { id: string } }>(`${adminRoot}/acquisition-requests/:id/confirm-absent`, async (request, reply) => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    const csrfToken = csrfFrom(request);
+    if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+      return reply.code(403).send();
+    }
+    const confirmed = await activationAuthorizations.confirmAcquisitionAbsent(request.params.id);
+    return confirmed ? reply.redirect(adminRoot, 303) : reply.code(409).send();
   });
 
   app.get(`${adminRoot}/settings`, async (request, reply) => {
@@ -413,7 +461,10 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
 
   const expirationSweep = setInterval(() => {
-    void database.expireDueAuthorizations(dependencies.now?.() ?? new Date()).catch(() => undefined);
+    void Promise.all([
+      database.expireDueAuthorizations(dependencies.now?.() ?? new Date()),
+      activationAuthorizations.reconcilePendingRequests(),
+    ]).catch(() => undefined);
   }, 60_000);
   expirationSweep.unref();
 

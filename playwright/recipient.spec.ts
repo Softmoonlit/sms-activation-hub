@@ -24,6 +24,8 @@ const heroSms: HeroSms = {
     activationId: `pw-${randomUUID()}`, phoneNumber: '+442079460123', activationCost: 0.6, currency: 'USD',
     activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),
   }),
+  activeActivations: async () => [],
+  activationHistory: async () => [],
 };
 
 test.skip(!databaseUrl, '需要 TEST_DATABASE_URL');

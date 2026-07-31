@@ -89,7 +89,7 @@ export class Database {
         authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
         country_id INTEGER NOT NULL,
         provider_activation_id TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL CHECK (status IN ('waiting_sms')),
+        status TEXT NOT NULL CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation')),
         phone_number TEXT NOT NULL,
         activation_cost NUMERIC NOT NULL CHECK (activation_cost >= 0),
         currency TEXT NOT NULL,
@@ -100,9 +100,42 @@ export class Database {
         CHECK (cancel_available_at >= acquired_at)
       );
 
-      CREATE UNIQUE INDEX IF NOT EXISTS supplier_activations_current_idx
+      ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_status_check;
+      ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_status_check
+        CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation'));
+
+      DROP INDEX IF EXISTS supplier_activations_current_idx;
+      CREATE UNIQUE INDEX supplier_activations_current_idx
         ON supplier_activations (authorization_id)
-        WHERE status = 'waiting_sms';
+        WHERE status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation');
+
+      CREATE TABLE IF NOT EXISTS number_acquisition_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
+        country_id INTEGER NOT NULL,
+        requested_price NUMERIC NOT NULL CHECK (requested_price >= 0),
+        status TEXT NOT NULL CHECK (status IN ('requesting', 'reconciling', 'manual', 'resolved', 'confirmed_absent', 'failed')),
+        error_kind TEXT,
+        requested_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS number_acquisition_requests_unresolved_idx
+        ON number_acquisition_requests (requested_at)
+        WHERE status IN ('requesting', 'reconciling', 'manual');
+
+      CREATE TABLE IF NOT EXISTS number_acquisition_candidates (
+        request_id UUID NOT NULL REFERENCES number_acquisition_requests(id) ON DELETE CASCADE,
+        provider_activation_id TEXT NOT NULL,
+        phone_number TEXT NOT NULL,
+        activation_cost NUMERIC NOT NULL CHECK (activation_cost >= 0),
+        currency TEXT NOT NULL,
+        service_code TEXT,
+        country_id INTEGER,
+        activation_time TIMESTAMPTZ,
+        provider_status TEXT NOT NULL,
+        PRIMARY KEY (request_id, provider_activation_id)
+      );
     `);
 
     // 每次进程初始化都使旧 Cookie 失效，避免部署重启后保留管理权限。

@@ -144,6 +144,86 @@ test('HeroSMS adapter 将兼容文本和 JSON 错误归类且不包含请求 URL
   });
 });
 
+test('HeroSMS adapter 将号码获取的明确账户错误分类为不可重试失败', async () => {
+  const cases = [
+    ['NO_BALANCE', 'balance'],
+    ['BAD_KEY', 'authentication'],
+    [JSON.stringify({ title: 'ACCOUNT_INACTIVE', details: 'Activate your account' }), 'account'],
+    [JSON.stringify({ title: 'CHANNELS_LIMIT', details: 'Too many channels' }), 'account'],
+    [JSON.stringify({ title: 'WRONG_COUNTRY', details: 'Wrong country' }), 'request'],
+    [JSON.stringify({ title: 'RATE_LIMIT', details: 'Slow down' }), 'rate-limit'],
+    [JSON.stringify({ title: 'SERVER_ERROR', details: 'Try later' }), 'provider'],
+  ] as const;
+
+  for (const [body, kind] of cases) {
+    const adapter = new HeroSmsHttpAdapter({
+      apiKey: 'secret-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+      fetch: async () => response(body),
+    });
+    await assert.rejects(adapter.getNumber('openai', 1), (error: unknown) => {
+      assert.ok(error instanceof HeroSmsResponseError);
+      assert.equal(error.kind, kind);
+      return true;
+    });
+  }
+});
+
+test('HeroSMS adapter 将断网与不可解析的号码响应分类为结果不确定', async () => {
+  const disconnected = new HeroSmsHttpAdapter({
+    apiKey: 'secret-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => { throw new TypeError('connection reset'); },
+  });
+  const malformed = new HeroSmsHttpAdapter({
+    apiKey: 'secret-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response('<html>upstream timeout</html>'),
+  });
+  const timedOut = new HeroSmsHttpAdapter({
+    apiKey: 'secret-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php', requestTimeoutMs: 1,
+    fetch: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    }),
+  });
+  const gatewayTimeout = new HeroSmsHttpAdapter({
+    apiKey: 'secret-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response(JSON.stringify({ title: 'SERVER_ERROR' }), 504),
+  });
+
+  for (const adapter of [disconnected, malformed, timedOut, gatewayTimeout]) {
+    await assert.rejects(adapter.getNumber('openai', 1), (error: unknown) => {
+      assert.ok(error instanceof HeroSmsResponseError);
+      assert.equal(error.kind, 'uncertain');
+      return true;
+    });
+  }
+});
+
+test('HeroSMS adapter 读取活动激活与历史供号码获取对账', async () => {
+  const requests: URL[] = [];
+  const adapter = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async (input) => {
+      const url = new URL(input.toString());
+      requests.push(url);
+      if (url.searchParams.get('action') === 'getActiveActivations') {
+        return response(JSON.stringify(example('activationsSuccessfulExample')));
+      }
+      return response(JSON.stringify(example('successfulActivationsHistoryExample')));
+    },
+  });
+
+  assert.deepEqual(await adapter.activeActivations(), [{
+    activationId: '635468021', phoneNumber: '79********1', activationCost: 12.5,
+    currency: '840', serviceCode: 'vk', countryId: 2,
+    activationTime: new Date('2022-06-01T16:59:16Z'), status: '4',
+  }]);
+  assert.deepEqual(await adapter.activationHistory(new Date('2026-02-18T15:00:00Z'), new Date('2026-02-18T17:00:00Z')), [{
+    activationId: '635468024', phoneNumber: '7*********0', activationCost: 0,
+    currency: '840', activationTime: undefined, status: '4',
+  }]);
+  assert.equal(requests[1]?.searchParams.get('start'), '1771426800');
+  assert.equal(requests[1]?.searchParams.get('end'), '1771434000');
+});
+
 test('HeroSMS adapter 拒绝格式错误的成功响应', async () => {
   const adapter = new HeroSmsHttpAdapter({
     apiKey: 'test-api-key',

@@ -1,4 +1,13 @@
-export type HeroSmsErrorKind = 'authentication' | 'no-numbers' | 'provider' | 'request' | 'response';
+export type HeroSmsErrorKind =
+  | 'authentication'
+  | 'balance'
+  | 'account'
+  | 'no-numbers'
+  | 'rate-limit'
+  | 'provider'
+  | 'request'
+  | 'response'
+  | 'uncertain';
 
 export class HeroSmsResponseError extends Error {
   constructor(readonly kind: HeroSmsErrorKind) {
@@ -31,32 +40,54 @@ export interface HeroSmsNumber {
   activationEndTime?: Date;
 }
 
+export interface HeroSmsActivationRecord {
+  activationId: string;
+  phoneNumber: string;
+  activationCost: number;
+  currency: string;
+  serviceCode?: string;
+  countryId?: number;
+  activationTime?: Date;
+  status: string;
+}
+
 export interface HeroSms {
   balance(): Promise<number>;
   services(): Promise<HeroSmsService[]>;
   countries(): Promise<HeroSmsCountry[]>;
   quotes(serviceCode: string): Promise<HeroSmsQuote[]>;
   getNumber(serviceCode: string, countryId: number): Promise<HeroSmsNumber>;
+  activeActivations(): Promise<HeroSmsActivationRecord[]>;
+  activationHistory(start: Date, end: Date): Promise<HeroSmsActivationRecord[]>;
 }
 
 export interface HeroSmsHttpAdapterOptions {
   apiKey: string;
   baseUrl: string;
   fetch?: typeof globalThis.fetch;
+  requestTimeoutMs?: number;
 }
 
 function messageFor(kind: HeroSmsErrorKind): string {
   switch (kind) {
     case 'authentication':
       return 'HeroSMS 认证失败';
+    case 'balance':
+      return 'HeroSMS 余额不足';
+    case 'account':
+      return 'HeroSMS 账号不可用';
     case 'no-numbers':
       return 'HeroSMS 当前无可用号码';
+    case 'rate-limit':
+      return 'HeroSMS 请求过于频繁';
     case 'request':
       return 'HeroSMS 请求无效';
     case 'provider':
       return 'HeroSMS 暂时不可用';
     case 'response':
       return 'HeroSMS 返回了无法识别的响应';
+    case 'uncertain':
+      return 'HeroSMS 请求结果不确定';
   }
 }
 
@@ -68,16 +99,21 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function errorCode(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.split(':', 1)[0];
+  if (value && typeof value === 'object' && 'title' in value && typeof value.title === 'string') return value.title;
+  return undefined;
+}
+
 function errorKind(value: unknown): HeroSmsErrorKind | undefined {
-  if (value === 'NO_NUMBERS' || (value && typeof value === 'object' && 'title' in value && value.title === 'NO_NUMBERS')) {
-    return 'no-numbers';
-  }
-  if (value === 'NO_KEY' || value === 'BAD_KEY') {
-    return 'authentication';
-  }
-  if (typeof value === 'string' && /^(BAD_ACTION|ERROR|NO_ACTIVATION|NO_SERVICE|INVALID_)/.test(value)) {
-    return 'request';
-  }
+  const code = errorCode(value);
+  if (code === 'NO_NUMBERS') return 'no-numbers';
+  if (code === 'NO_BALANCE') return 'balance';
+  if (code === 'NO_KEY' || code === 'BAD_KEY') return 'authentication';
+  if (code === 'ACCOUNT_INACTIVE' || code === 'CHANNELS_LIMIT') return 'account';
+  if (code === 'RATE_LIMIT') return 'rate-limit';
+  if (code === 'SERVER_ERROR' || code === 'ERROR_SQL') return 'provider';
+  if (code && /^(BAD_|WRONG_|INVALID_|NO_ACTIVATION|NO_SERVICE|ERROR$)/.test(code)) return 'request';
   if (value && typeof value === 'object' && 'status' in value && value.status === 'false') {
     const message = 'msg' in value ? value.msg : undefined;
     return typeof message === 'string' && /key|auth/i.test(message) ? 'authentication' : 'request';
@@ -95,6 +131,38 @@ function parseBody(text: string): unknown {
 
 function objectEntries(value: unknown): [string, unknown][] | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : undefined;
+}
+
+function dateValue(value: unknown): Date | undefined {
+  if (typeof value !== 'string' || /^0{4}-0{2}-0{2}/.test(value)) return undefined;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(' ', 'T')}Z` : value;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function activationRecord(value: unknown, active: boolean): HeroSmsActivationRecord | undefined {
+  const entries = objectEntries(value);
+  if (!entries) return undefined;
+  const fields = Object.fromEntries(entries);
+  const activationId = nonEmptyString(active ? fields.activationId : fields.id);
+  const phoneNumber = nonEmptyString(active ? fields.phoneNumber : fields.phone);
+  const activationCost = nonNegativeNumber(active ? fields.activationCost : fields.cost);
+  const currencyValue = fields.currency;
+  const currency = typeof currencyValue === 'number' && Number.isFinite(currencyValue)
+    ? currencyValue.toString()
+    : nonEmptyString(currencyValue);
+  const status = nonEmptyString(active ? fields.activationStatus : fields.status);
+  const serviceCode = active ? nonEmptyString(fields.serviceCode) : undefined;
+  const countryIdValue = active && typeof fields.countryCode === 'string' ? Number(fields.countryCode) : fields.countryCode;
+  const countryId = active ? nonNegativeNumber(countryIdValue) : undefined;
+  if (!activationId || !phoneNumber || activationCost === undefined || !currency || !status
+    || (active && (!serviceCode || countryId === undefined || !Number.isInteger(countryId)))) return undefined;
+  return {
+    activationId, phoneNumber, activationCost, currency, status,
+    ...(serviceCode ? { serviceCode } : {}),
+    ...(countryId !== undefined ? { countryId } : {}),
+    activationTime: dateValue(active ? fields.activationTime : fields.date),
+  };
 }
 
 export class HeroSmsHttpAdapter implements HeroSms {
@@ -191,14 +259,20 @@ export class HeroSmsHttpAdapter implements HeroSms {
   }
 
   async getNumber(serviceCode: string, countryId: number): Promise<HeroSmsNumber> {
-    const value = await this.request('getNumberV2', { service: serviceCode, country: countryId.toString() });
+    let value: unknown;
+    try {
+      value = await this.request('getNumberV2', { service: serviceCode, country: countryId.toString() });
+    } catch (error) {
+      if (error instanceof HeroSmsResponseError && error.kind === 'response') throw new HeroSmsResponseError('uncertain');
+      throw error;
+    }
     if (typeof value === 'string') {
       const match = /^ACCESS_NUMBER:([^:]+):(.+)$/.exec(value);
-      if (!match?.[1] || !match[2]) throw new HeroSmsResponseError('response');
+      if (!match?.[1] || !match[2]) throw new HeroSmsResponseError('uncertain');
       return { activationId: match[1], phoneNumber: match[2] };
     }
     const entries = objectEntries(value);
-    if (!entries) throw new HeroSmsResponseError('response');
+    if (!entries) throw new HeroSmsResponseError('uncertain');
     const fields = Object.fromEntries(entries);
     const activationId = nonEmptyString(fields.activationId);
     const phoneNumber = nonEmptyString(fields.phoneNumber);
@@ -207,14 +281,14 @@ export class HeroSmsHttpAdapter implements HeroSms {
     const currency = typeof currencyValue === 'number' && Number.isFinite(currencyValue)
       ? currencyValue.toString()
       : nonEmptyString(currencyValue);
-    const activationTime = typeof fields.activationTime === 'string' ? new Date(fields.activationTime) : undefined;
-    const activationEndTime = typeof fields.activationEndTime === 'string' ? new Date(fields.activationEndTime) : undefined;
+    const activationTime = dateValue(fields.activationTime);
+    const activationEndTime = dateValue(fields.activationEndTime);
     if (!activationId || !phoneNumber
       || (fields.activationCost !== undefined && activationCost === undefined)
       || (fields.currency !== undefined && !currency)
-      || (activationTime && Number.isNaN(activationTime.getTime()))
-      || (activationEndTime && Number.isNaN(activationEndTime.getTime()))) {
-      throw new HeroSmsResponseError('response');
+      || (fields.activationTime !== undefined && !activationTime)
+      || (fields.activationEndTime !== undefined && !activationEndTime)) {
+      throw new HeroSmsResponseError('uncertain');
     }
     return {
       activationId, phoneNumber,
@@ -225,24 +299,68 @@ export class HeroSmsHttpAdapter implements HeroSms {
     };
   }
 
+  async activeActivations(): Promise<HeroSmsActivationRecord[]> {
+    const all: HeroSmsActivationRecord[] = [];
+    for (let start = 0; ; start += 100) {
+      const value = await this.request('getActiveActivations', { start: start.toString(), limit: '100' });
+      const fields = objectEntries(value) ? Object.fromEntries(objectEntries(value)!) : undefined;
+      if (!fields || fields.status !== 'success' || !Array.isArray(fields.data)) throw new HeroSmsResponseError('response');
+      const records = fields.data.map((item: unknown) => activationRecord(item, true));
+      if (records.some((record: HeroSmsActivationRecord | undefined) => !record)) throw new HeroSmsResponseError('response');
+      all.push(...records as HeroSmsActivationRecord[]);
+      if (records.length < 100) return all;
+    }
+  }
+
+  async activationHistory(start: Date, end: Date): Promise<HeroSmsActivationRecord[]> {
+    const all: HeroSmsActivationRecord[] = [];
+    for (let offset = 0; ; offset += 100) {
+      const value = await this.request('getHistory', {
+        start: Math.floor(start.getTime() / 1000).toString(),
+        end: Math.floor(end.getTime() / 1000).toString(),
+        offset: offset.toString(), size: '100',
+      });
+      if (!Array.isArray(value)) throw new HeroSmsResponseError('response');
+      const records = value.map((item) => activationRecord(item, false));
+      if (records.some((record) => !record)) throw new HeroSmsResponseError('response');
+      all.push(...records as HeroSmsActivationRecord[]);
+      if (records.length < 100) return all;
+    }
+  }
+
   private async request(action: string, parameters: Record<string, string> = {}): Promise<unknown> {
     const url = new URL(this.options.baseUrl);
     url.search = new URLSearchParams({ action, api_key: this.options.apiKey, ...parameters }).toString();
 
     let response: Response;
+    let text: string;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.options.requestTimeoutMs ?? 15_000);
     try {
-      response = await this.fetch(url);
+      response = await this.fetch(url, { signal: controller.signal });
+      text = await response.text();
     } catch {
-      throw new HeroSmsResponseError('provider');
+      throw new HeroSmsResponseError('uncertain');
+    } finally {
+      clearTimeout(timeout);
     }
 
-    const value = parseBody(await response.text());
+    const value = parseBody(text);
+    if (action === 'getNumberV2' && (response.status === 408 || response.status === 504)) {
+      throw new HeroSmsResponseError('uncertain');
+    }
     const returnedError = errorKind(value);
     if (returnedError) {
       throw new HeroSmsResponseError(returnedError);
     }
     if (!response.ok) {
-      throw new HeroSmsResponseError(response.status === 401 ? 'authentication' : 'provider');
+      const kind: HeroSmsErrorKind = response.status === 401 ? 'authentication'
+        : response.status === 402 ? 'balance'
+          : response.status === 403 ? 'account'
+            : response.status === 429 ? 'rate-limit'
+              : response.status >= 500 ? 'provider'
+                : 'request';
+      throw new HeroSmsResponseError(kind);
     }
     return value;
   }
