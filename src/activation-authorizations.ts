@@ -137,6 +137,18 @@ export class ActivationAuthorizations {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
+  async expireDue(): Promise<void> {
+    await this.database.expireDueAuthorizations(this.now());
+  }
+
+  async nextRecipientAccessExpiry(): Promise<Date | undefined> {
+    const result = await this.database.pool.query<{ expires_at: Date | null }>(
+      `SELECT min(expires_at) AS expires_at FROM activation_authorizations
+       WHERE token_hash IS NOT NULL OR recipient_session_hash IS NOT NULL`,
+    );
+    return result.rows[0]?.expires_at ?? undefined;
+  }
+
   async preflight(recipientIdentifierValue: string, internalNoteValue?: string): Promise<AuthorizationPreflight> {
     const recipientIdentifier = recipientIdentifierValue.trim();
     const normalizedRecipientIdentifier = normalizeRecipientIdentifier(recipientIdentifierValue);
@@ -326,7 +338,8 @@ export class ActivationAuthorizations {
       if (current.status === 'waiting_sms' || current.status === 'cancellation_confirming') {
         await client.query(
           `UPDATE supplier_activations
-           SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4, sms_poll_after = NULL, replacement_pending = false
+           SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4, sms_poll_after = NULL,
+               replacement_pending = false, authorization_expiry_cancellation_pending = false
            WHERE id = $1 AND status IN ('waiting_sms', 'cancellation_confirming')`,
           [current.id, event.code ?? null, event.text, event.receivedAt],
         );
@@ -427,6 +440,7 @@ export class ActivationAuthorizations {
        SET status = 'manual_reconciliation', timed_out_at = COALESCE(timed_out_at, $1),
            refund_reconciliation_status = 'pending', timeout_reconciliation_claimed_at = NULL,
            timeout_reconciliation_claim_token = NULL, replacement_pending = false,
+           authorization_expiry_cancellation_pending = false,
            phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
        WHERE id IN (
          SELECT id FROM supplier_activations
@@ -610,6 +624,13 @@ export class ActivationAuthorizations {
     });
   }
 
+  private async expireAuthorization(client: PoolClient, authorizationId: string, now: Date): Promise<void> {
+    await client.query(
+      "UPDATE activation_authorizations SET status = 'expired', token_hash = NULL, recipient_session_hash = NULL WHERE id = $1 AND expires_at <= $2",
+      [authorizationId, now],
+    );
+  }
+
   async requestNumberReplacement(token: string, sessionToken?: string): Promise<ReplacementResult> {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { state: 'not-found' };
     const target = await this.database.pool.query<{ id: string }>(
@@ -625,7 +646,7 @@ export class ActivationAuthorizations {
       const authorization = authorizationResult.rows[0];
       const now = this.now();
       if (!authorization || authorization.expires_at <= now) {
-        if (authorization) await client.query("UPDATE activation_authorizations SET status = 'expired', token_hash = NULL WHERE id = $1", [authorization.id]);
+        if (authorization) await this.expireAuthorization(client, authorization.id, now);
         return { kind: 'not-found' };
       }
       if (authorization.status !== 'in_progress' || !sessionToken || authorization.recipient_session_hash !== tokenHash(sessionToken)) return { kind: 'unavailable' };
@@ -662,8 +683,8 @@ export class ActivationAuthorizations {
         await this.reconcileCancellationConfirmations();
         return { state: 'confirming' };
       }
-      const authorizationId = await this.confirmCancellation(transition.activationId);
-      return authorizationId ? this.acquireReplacementNumber(authorizationId) : { state: 'confirming' };
+      const confirmed = await this.confirmCancellation(transition.activationId);
+      return confirmed?.replacementAllowed ? this.acquireReplacementNumber(confirmed.authorizationId) : { state: 'confirming' };
     } catch {
       // 请求结果不明确时必须保留取消确认状态，等待供应商状态对账。
       return { state: 'confirming' };
@@ -678,8 +699,8 @@ export class ActivationAuthorizations {
       try {
         const status = await this.heroSms.activationStatus(activation.provider_activation_id);
         if (status.providerStatus === 'cancelled') {
-          const authorizationId = await this.confirmCancellation(activation.provider_activation_id);
-          if (authorizationId) await this.acquireReplacementNumber(authorizationId);
+          const confirmed = await this.confirmCancellation(activation.provider_activation_id);
+          if (confirmed?.replacementAllowed) await this.acquireReplacementNumber(confirmed.authorizationId);
         } else if (status.delivered && status.text) {
           await this.receiveHeroSmsWebhook({
             activationId: activation.provider_activation_id,
@@ -694,23 +715,87 @@ export class ActivationAuthorizations {
     }
   }
 
+  async cancelAcquisitionsConfirmedAfterAuthorizationExpiry(): Promise<void> {
+    for (;;) {
+      const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
+        `UPDATE supplier_activations SET status = 'cancellation_confirming', authorization_expiry_cancellation_pending = false
+         WHERE id = (
+           SELECT id FROM supplier_activations
+           WHERE status = 'waiting_sms' AND authorization_expiry_cancellation_pending AND cancel_available_at <= $1
+           ORDER BY cancel_available_at LIMIT 1 FOR UPDATE SKIP LOCKED
+         ) RETURNING provider_activation_id`,
+        [this.now()],
+      );
+      const activation = claimed.rows[0];
+      if (!activation) return;
+      try {
+        const cancellation = await this.heroSms.cancelActivation(activation.provider_activation_id);
+        if (cancellation === 'cancelled') {
+          await this.confirmCancellation(activation.provider_activation_id);
+          continue;
+        }
+        if (cancellation === 'too-early') {
+          await this.database.pool.query(
+            `UPDATE supplier_activations
+             SET status = 'waiting_sms', authorization_expiry_cancellation_pending = true
+             WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
+            [activation.provider_activation_id],
+          );
+        }
+        // 短信冲突和不明确结果均保留取消确认状态，交由供应商状态对账。
+      } catch { /* 持久状态已记录，后续任务继续供应商对账。 */ }
+    }
+  }
+
   async runPendingReplacementAcquisitions(): Promise<void> {
+    const now = this.now();
+    await this.database.pool.query(
+      `UPDATE supplier_activations activation SET replacement_pending = false
+       FROM activation_authorizations auth
+       WHERE activation.authorization_id = auth.id AND activation.status = 'cancelled' AND activation.replacement_pending
+         AND (auth.status <> 'in_progress' OR auth.expires_at <= $1)`,
+      [now],
+    );
     const pending = await this.database.pool.query<{ authorization_id: string }>(
-      "SELECT authorization_id FROM supplier_activations WHERE status = 'cancelled' AND replacement_pending ORDER BY acquired_at",
+      `SELECT activation.authorization_id FROM supplier_activations activation
+       JOIN activation_authorizations auth ON auth.id = activation.authorization_id
+       WHERE activation.status = 'cancelled' AND activation.replacement_pending
+         AND auth.status = 'in_progress' AND auth.expires_at > $1
+       ORDER BY activation.acquired_at`,
+      [now],
     );
     for (const replacement of pending.rows) await this.acquireReplacementNumber(replacement.authorization_id);
   }
 
-  private async confirmCancellation(providerActivationId: string): Promise<string | undefined> {
-    const result = await this.database.pool.query<{ authorization_id: string }>(
-      `UPDATE supplier_activations
-       SET status = 'cancelled', supplier_cancelled_at = COALESCE(supplier_cancelled_at, $2),
-           phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
-       WHERE provider_activation_id = $1 AND status = 'cancellation_confirming' AND expires_at > $2
-       RETURNING authorization_id`,
-      [providerActivationId, this.now()],
-    );
-    return result.rows[0]?.authorization_id;
+  private async confirmCancellation(providerActivationId: string): Promise<{ authorizationId: string; replacementAllowed: boolean } | undefined> {
+    return this.database.transaction(async (client) => {
+      const result = await client.query<{
+        id: string; authorization_id: string; replacement_pending: boolean; authorization_status: string; authorization_expires_at: Date;
+      }>(
+        `SELECT activation.id, activation.authorization_id, activation.replacement_pending,
+                auth.status AS authorization_status, auth.expires_at AS authorization_expires_at
+         FROM supplier_activations activation
+         JOIN activation_authorizations auth ON auth.id = activation.authorization_id
+         WHERE activation.provider_activation_id = $1 AND activation.status = 'cancellation_confirming'
+           AND activation.expires_at > $2
+         FOR UPDATE OF activation, auth`,
+        [providerActivationId, this.now()],
+      );
+      const activation = result.rows[0];
+      if (!activation) return undefined;
+      const replacementAllowed = activation.replacement_pending
+        && activation.authorization_status === 'in_progress'
+        && activation.authorization_expires_at > this.now();
+      await client.query(
+        `UPDATE supplier_activations
+         SET status = 'cancelled', supplier_cancelled_at = COALESCE(supplier_cancelled_at, $2),
+             phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL,
+             replacement_pending = $3, authorization_expiry_cancellation_pending = false
+         WHERE id = $1`,
+        [activation.id, this.now(), replacementAllowed],
+      );
+      return { authorizationId: activation.authorization_id, replacementAllowed };
+    });
   }
 
   private async clearPendingReplacement(authorizationId: string): Promise<void> {
@@ -721,6 +806,15 @@ export class ActivationAuthorizations {
   }
 
   private async acquireReplacementNumber(authorizationId: string): Promise<Extract<ReplacementResult, { state: 'replaced' | 'confirming' | 'no-numbers' | 'error' }>> {
+    const eligibility = await this.database.pool.query<{ status: string; expires_at: Date }>(
+      'SELECT status, expires_at FROM activation_authorizations WHERE id = $1',
+      [authorizationId],
+    );
+    const authorization = eligibility.rows[0];
+    if (!authorization || authorization.status !== 'in_progress' || authorization.expires_at <= this.now()) {
+      await this.clearPendingReplacement(authorizationId);
+      return { state: 'error' };
+    }
     let quotes: HeroSmsQuote[];
     try {
       quotes = await this.heroSms.quotes(this.openAiServiceCode);
@@ -768,20 +862,37 @@ export class ActivationAuthorizations {
           const requestedAt = this.now();
           const request = await client.query<{ id: string }>(
             `INSERT INTO number_acquisition_requests (authorization_id, country_id, requested_price, status, requested_at, updated_at)
-             VALUES ($1, $2, $3, 'requesting', $4, $4) RETURNING id`,
+             SELECT auth.id, $2, $3, 'requesting', $4, $4
+             FROM activation_authorizations auth
+             WHERE auth.id = $1 AND auth.status = 'in_progress' AND auth.expires_at > $4
+             RETURNING id`,
             [authorizationId, candidate.country_id, candidate.quote.price, requestedAt],
           );
           const requestId = request.rows[0]?.id;
-          if (!requestId) throw new Error('无法持久化号码获取请求');
+          if (!requestId) {
+            await this.clearPendingReplacement(authorizationId);
+            return { state: 'error' };
+          }
+          const providerCallAt = this.now();
+          if (current.expires_at <= providerCallAt) {
+            await client.query(
+              "UPDATE number_acquisition_requests SET status = 'failed', error_kind = 'authorization-expired', updated_at = $2 WHERE id = $1",
+              [requestId, providerCallAt],
+            );
+            await this.expireAuthorization(client, authorizationId, providerCallAt);
+            await this.clearPendingReplacement(authorizationId);
+            return { state: 'error' };
+          }
           await this.clearPendingReplacement(authorizationId);
           try {
             const number = await this.heroSms.getNumber(this.openAiServiceCode, candidate.country_id);
-            await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.country_id, candidate.quote.price, number);
-            return { state: 'replaced' };
+            const deliverable = await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.country_id, candidate.quote.price, number);
+            return { state: deliverable ? 'replaced' : 'error' };
           } catch (error) {
             if (error instanceof HeroSmsResponseError && error.kind === 'uncertain') {
               await client.query("UPDATE number_acquisition_requests SET status = 'reconciling', error_kind = 'uncertain', updated_at = $2 WHERE id = $1", [requestId, this.now()]);
-              return { state: (await this.reconcileRequestWithoutLock(requestId)) ? 'replaced' : 'confirming' };
+              const reconciled = await this.reconcileRequestWithoutLock(requestId);
+              return { state: current.expires_at <= this.now() ? 'error' : reconciled ? 'replaced' : 'confirming' };
             }
             await client.query(
               "UPDATE number_acquisition_requests SET status = 'failed', error_kind = $2, updated_at = $3 WHERE id = $1",
@@ -816,7 +927,7 @@ export class ActivationAuthorizations {
       const authorization = result.rows[0];
       const now = this.now();
       if (!authorization || authorization.expires_at <= now) {
-        if (authorization) await client.query("UPDATE activation_authorizations SET status = 'expired', token_hash = NULL WHERE id = $1", [authorization.id]);
+        if (authorization) await this.expireAuthorization(client, authorization.id, now);
         return undefined;
       }
       if (authorization.status === 'unclaimed') {
@@ -857,7 +968,7 @@ export class ActivationAuthorizations {
           const authorization = authorizationResult.rows[0];
           const now = this.now();
           if (!authorization || authorization.expires_at <= now) {
-            if (authorization) await client.query("UPDATE activation_authorizations SET status = 'expired', token_hash = NULL WHERE id = $1", [authorizationId]);
+            if (authorization) await this.expireAuthorization(client, authorizationId, now);
             await client.query('COMMIT');
             return 'not-found' as const;
           }
@@ -898,9 +1009,7 @@ export class ActivationAuthorizations {
             const currentAuthorization = beforeCall.rows[0];
             const requestedAt = this.now();
             if (!currentAuthorization || currentAuthorization.expires_at <= requestedAt) {
-              if (currentAuthorization) {
-                await client.query("UPDATE activation_authorizations SET status = 'expired', token_hash = NULL WHERE id = $1", [authorizationId]);
-              }
+              if (currentAuthorization) await this.expireAuthorization(client, authorizationId, requestedAt);
               return 'not-found' as const;
             }
             if (currentAuthorization.status !== 'in_progress' || currentAuthorization.recipient_session_hash !== tokenHash(sessionToken)) {
@@ -910,11 +1019,24 @@ export class ActivationAuthorizations {
             const request = await client.query<{ id: string }>(
               `INSERT INTO number_acquisition_requests
                 (authorization_id, country_id, requested_price, status, requested_at, updated_at)
-               VALUES ($1, $2, $3, 'requesting', $4, $4) RETURNING id`,
-              [authorizationId, candidate.country_id, candidate.quote.price, requestedAt],
+               SELECT auth.id, $2, $3, 'requesting', $4, $4
+               FROM activation_authorizations auth
+               WHERE auth.id = $1 AND auth.status = 'in_progress' AND auth.expires_at > $4
+                 AND auth.recipient_session_hash = $5
+               RETURNING id`,
+              [authorizationId, candidate.country_id, candidate.quote.price, requestedAt, tokenHash(sessionToken)],
             );
             const requestId = request.rows[0]?.id;
-            if (!requestId) throw new Error('无法持久化号码获取请求');
+            if (!requestId) return 'not-found' as const;
+            const providerCallAt = this.now();
+            if (currentAuthorization.expires_at <= providerCallAt) {
+              await client.query(
+                "UPDATE number_acquisition_requests SET status = 'failed', error_kind = 'authorization-expired', updated_at = $2 WHERE id = $1",
+                [requestId, providerCallAt],
+              );
+              await this.expireAuthorization(client, authorizationId, providerCallAt);
+              return 'not-found' as const;
+            }
 
             let number: HeroSmsNumber;
             try {
@@ -926,7 +1048,9 @@ export class ActivationAuthorizations {
                   [requestId, error.kind, this.now()],
                 );
                 const reconciled = await this.reconcileRequestWithoutLock(requestId);
-                return reconciled ? 'claimed' as const : 'confirming' as const;
+                return currentAuthorization.expires_at <= this.now()
+                  ? 'not-found' as const
+                  : reconciled ? 'claimed' as const : 'confirming' as const;
               }
               await client.query(
                 "UPDATE number_acquisition_requests SET status = 'failed', error_kind = $2, updated_at = $3 WHERE id = $1",
@@ -937,8 +1061,8 @@ export class ActivationAuthorizations {
             }
 
             try {
-              await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.country_id, candidate.quote.price, number);
-              return 'claimed' as const;
+              const deliverable = await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.country_id, candidate.quote.price, number);
+              return deliverable ? 'claimed' as const : 'not-found' as const;
             } catch {
               try {
                 await client.query(
@@ -946,7 +1070,9 @@ export class ActivationAuthorizations {
                   [requestId, this.now()],
                 );
                 const reconciled = await this.reconcileRequestWithoutLock(requestId);
-                return reconciled ? 'claimed' as const : 'confirming' as const;
+                return currentAuthorization.expires_at <= this.now()
+                  ? 'not-found' as const
+                  : reconciled ? 'claimed' as const : 'confirming' as const;
               } catch {
                 return 'confirming' as const;
               }
@@ -958,7 +1084,11 @@ export class ActivationAuthorizations {
           throw error;
         }
       });
-      if (outcome === 'not-found' || outcome === 'unavailable') return { state: outcome };
+      if (outcome === 'not-found') {
+        await this.cancelAcquisitionsConfirmedAfterAuthorizationExpiry();
+        return { state: 'not-found' };
+      }
+      if (outcome === 'unavailable') return { state: outcome };
       if (outcome === 'paused' || outcome === 'error') return { state: 'error', sessionToken };
       return { state: outcome, sessionToken };
     } catch {
@@ -1158,16 +1288,17 @@ export class ActivationAuthorizations {
     countryId: number,
     requestedPrice: number,
     number: HeroSmsNumber,
-  ): Promise<void> {
+  ): Promise<boolean> {
     await client.query('BEGIN');
     try {
-      await this.insertSupplierActivation(client, authorizationId, countryId, number, requestedPrice);
+      const deliverable = await this.insertSupplierActivation(client, authorizationId, countryId, number, requestedPrice);
       await client.query(
         'UPDATE authorization_candidate_countries SET used_at = $3 WHERE authorization_id = $1 AND country_id = $2 AND used_at IS NULL',
         [authorizationId, countryId, this.now()],
       );
       await client.query("UPDATE number_acquisition_requests SET status = 'resolved', updated_at = $2 WHERE id = $1", [requestId, this.now()]);
       await client.query('COMMIT');
+      return deliverable;
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -1180,16 +1311,29 @@ export class ActivationAuthorizations {
     countryId: number,
     number: HeroSmsNumber,
     fallbackPrice: number,
-  ): Promise<void> {
-    const acquiredAt = number.activationTime ?? this.now();
-    const expiresAt = number.activationEndTime ?? new Date(acquiredAt.getTime() + 20 * 60 * 1000);
+  ): Promise<boolean> {
+    const authorization = await client.query<{ expires_at: Date }>(
+      'SELECT expires_at FROM activation_authorizations WHERE id = $1 FOR UPDATE',
+      [authorizationId],
+    );
+    const expiresAt = authorization.rows[0]?.expires_at;
+    if (!expiresAt) throw new Error('激活授权不存在');
+    const confirmedAt = this.now();
+    const deliverable = expiresAt > confirmedAt;
+    if (!deliverable) {
+      await this.expireAuthorization(client, authorizationId, confirmedAt);
+    }
+    const acquiredAt = number.activationTime ?? confirmedAt;
+    const numberExpiresAt = number.activationEndTime ?? new Date(acquiredAt.getTime() + 20 * 60 * 1000);
     await client.query(
       `INSERT INTO supplier_activations
-        (authorization_id, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_poll_after)
-       VALUES ($1, $2, $3, 'waiting_sms', $4, $5, $6, $7, $8, $9, $7)`,
-      [authorizationId, countryId, number.activationId, number.phoneNumber,
+        (authorization_id, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_poll_after, authorization_expiry_cancellation_pending)
+       VALUES ($1, $2, $3, 'waiting_sms', $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [authorizationId, countryId, number.activationId, deliverable ? number.phoneNumber : null,
         number.activationCost ?? fallbackPrice, number.currency ?? 'UNKNOWN', acquiredAt,
-        new Date(acquiredAt.getTime() + 2 * 60 * 1000), expiresAt],
+        new Date(acquiredAt.getTime() + 2 * 60 * 1000), numberExpiresAt,
+        deliverable ? acquiredAt : null, !deliverable],
     );
+    return deliverable;
   }
 }

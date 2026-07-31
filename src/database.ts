@@ -117,6 +117,7 @@ export class Database {
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_final_status_confirmed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_reconciliation_claimed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_reconciliation_claim_token TEXT;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_expiry_cancellation_pending BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_refund_reconciliation_status_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_refund_reconciliation_status_check
         CHECK (refund_reconciliation_status IN ('pending', 'resolved'));
@@ -152,6 +153,10 @@ export class Database {
         ON supplier_activations (expires_at)
         WHERE status IN ('manual_reconciliation', 'timed_out') AND timed_out_at IS NOT NULL
           AND refund_reconciliation_status = 'pending';
+
+      CREATE INDEX IF NOT EXISTS supplier_activations_authorization_expiry_cancellation_idx
+        ON supplier_activations (cancel_available_at)
+        WHERE status = 'waiting_sms' AND authorization_expiry_cancellation_pending;
 
       CREATE TABLE IF NOT EXISTS supplier_activation_refunds (
         supplier_activation_id UUID PRIMARY KEY REFERENCES supplier_activations(id) ON DELETE RESTRICT,
@@ -329,7 +334,7 @@ export class Database {
 
   async expireDueAuthorizations(now: Date): Promise<void> {
     await this.pool.query(
-      `UPDATE activation_authorizations SET status = 'expired', token_hash = NULL
+      `UPDATE activation_authorizations SET status = 'expired', token_hash = NULL, recipient_session_hash = NULL
        WHERE status <> 'expired' AND expires_at <= $1`,
       [now],
     );
@@ -337,7 +342,7 @@ export class Database {
 
   async expireAuthorization(id: string, now: Date): Promise<void> {
     await this.pool.query(
-      `UPDATE activation_authorizations SET status = 'expired', token_hash = NULL
+      `UPDATE activation_authorizations SET status = 'expired', token_hash = NULL, recipient_session_hash = NULL
        WHERE id = $1 AND expires_at <= $2`,
       [id, now],
     );

@@ -294,6 +294,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   const defaultCandidateLocations = new DefaultCandidateLocations(database, heroSms, config.openAiServiceCode);
   const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, dependencies.now);
   await activationAuthorizations.reconcilePendingRequests();
+  await activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry();
   await activationAuthorizations.reconcileTimedOutActivations();
   await activationAuthorizations.reconcileCancellationConfirmations();
   await activationAuthorizations.runPendingReplacementAcquisitions();
@@ -303,6 +304,33 @@ export async function createApp(config: AppConfig, database = new Database(confi
   const app = Fastify({ logger: false, trustProxy: config.trustedProxy });
   await app.register(cookie);
   await app.register(formbody);
+
+  let closing = false;
+  let authorizationExpiryTimer: NodeJS.Timeout | undefined;
+  const retryAuthorizationExpiryScheduling = (): void => {
+    if (closing) return;
+    authorizationExpiryTimer = setTimeout(() => {
+      authorizationExpiryTimer = undefined;
+      void scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
+    }, 1_000);
+    authorizationExpiryTimer.unref();
+  };
+  const scheduleNextAuthorizationExpiry = async (): Promise<void> => {
+    if (closing) return;
+    if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
+    authorizationExpiryTimer = undefined;
+    const expiresAt = await activationAuthorizations.nextRecipientAccessExpiry();
+    if (!expiresAt) return;
+    const currentTime = dependencies.now?.() ?? new Date();
+    const delay = Math.min(Math.max(0, expiresAt.getTime() - currentTime.getTime()), 2_147_483_647);
+    authorizationExpiryTimer = setTimeout(() => {
+      authorizationExpiryTimer = undefined;
+      void activationAuthorizations.expireDue()
+        .then(scheduleNextAuthorizationExpiry)
+        .catch(retryAuthorizationExpiryScheduling);
+    }, delay);
+    authorizationExpiryTimer.unref();
+  };
 
   app.addHook('onRequest', async (_request, reply) => {
     reply.header('Referrer-Policy', 'no-referrer');
@@ -416,6 +444,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
         return reply.code(409).type('text/html; charset=utf-8').send(authorizationConfirmationPage(config.adminPath, session.csrfToken, preflight, currentFingerprint, '价格、库存或余额已变化，请重新确认。'));
       }
       const created = await activationAuthorizations.create(preflight);
+      void scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
       const authorizationUrl = new URL(`/a/${created.token}`, config.publicOrigin).toString();
       return reply.code(201).type('text/html; charset=utf-8').send(authorizationCreatedPage(config.adminPath, session.csrfToken, authorizationUrl, created.expiresAt));
     } catch (error) {
@@ -477,6 +506,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
     const view = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
     if (result.state === 'replaced') return reply.redirect(`/a/${request.params.token}`, 303);
     if (result.state === 'confirming') return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
     const message = result.state === 'too-early'
@@ -575,6 +606,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   const runBackgroundTasks = async (): Promise<void> => {
     await database.expireDueAuthorizations(dependencies.now?.() ?? new Date());
     await activationAuthorizations.reconcilePendingRequests();
+    await activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry();
     // 超时收尾必须先于取消对账，避免刚到二十分钟的取消确认自动创建后继激活。
     await activationAuthorizations.reconcileTimedOutActivations();
     await activationAuthorizations.reconcileCancellationConfirmations();
@@ -592,10 +624,13 @@ export async function createApp(config: AppConfig, database = new Database(confi
       .finally(() => { backgroundTasksRunning = false; });
   }, 60_000);
   expirationSweep.unref();
+  await scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
 
   app.setNotFoundHandler(async (_request, reply) => reply.code(404).type('text/plain; charset=utf-8').send('Not Found'));
   app.addHook('onClose', async () => {
+    closing = true;
     clearInterval(expirationSweep);
+    if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
     await database.close();
   });
   return app;
