@@ -251,14 +251,7 @@ export class ActivationAuthorizations {
       );
       const activation = activationResult.rows[0];
       if (!activation || activation.expires_at <= now) return null;
-      if (activation.status === 'cancellation_confirming') {
-        await client.query(
-          "UPDATE supplier_activations SET replacement_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
-          [activation.provider_activation_id],
-        );
-        return null;
-      }
-      if (activation.cancel_available_at > now) {
+      if (activation.status === 'cancellation_confirming' || activation.cancel_available_at > now) {
         await client.query(
           "UPDATE supplier_activations SET replacement_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
           [activation.provider_activation_id],

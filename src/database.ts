@@ -321,16 +321,6 @@ export class Database {
     }));
   }
 
-  async revokeUnclaimedAuthorization(id: string, now: Date): Promise<boolean> {
-    const result = await this.pool.query(
-      `UPDATE activation_authorizations
-       SET status = 'revoked', revoked_at = $2
-       WHERE id = $1 AND status = 'unclaimed' AND expires_at > $2`,
-      [id, now],
-    );
-    return result.rowCount === 1;
-  }
-
   async authorizationByTokenHash(hash: string): Promise<{ id: string; status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired'; expiresAt: Date } | undefined> {
     const result = await this.pool.query<{ id: string; status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired'; expires_at: Date }>(
       'SELECT id, status, expires_at FROM activation_authorizations WHERE token_hash = $1',
