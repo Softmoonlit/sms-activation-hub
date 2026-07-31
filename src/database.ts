@@ -121,6 +121,23 @@ export class Database {
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_refund_reconciliation_status_check
         CHECK (refund_reconciliation_status IN ('pending', 'resolved'));
 
+      UPDATE supplier_activations
+        SET status = 'manual_reconciliation'
+        WHERE status = 'timed_out' AND timeout_final_status_confirmed_at IS NULL;
+
+      UPDATE activation_authorizations auth
+        SET status = 'quota_exhausted'
+        WHERE auth.status = 'in_progress'
+          AND NOT EXISTS (
+            SELECT 1 FROM authorization_candidate_countries candidate
+            WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NULL
+          )
+          AND (
+            SELECT activation.status FROM supplier_activations activation
+            WHERE activation.authorization_id = auth.id
+            ORDER BY activation.acquired_at DESC LIMIT 1
+          ) = 'timed_out';
+
       DROP INDEX IF EXISTS supplier_activations_current_idx;
       CREATE UNIQUE INDEX supplier_activations_current_idx
         ON supplier_activations (authorization_id)
@@ -130,9 +147,11 @@ export class Database {
         ON supplier_activations (acquired_at)
         WHERE status = 'cancelled' AND replacement_pending;
 
-      CREATE INDEX IF NOT EXISTS supplier_activations_timeout_reconciliation_idx
+      DROP INDEX IF EXISTS supplier_activations_timeout_reconciliation_idx;
+      CREATE INDEX supplier_activations_timeout_reconciliation_idx
         ON supplier_activations (expires_at)
-        WHERE status = 'timed_out' AND refund_reconciliation_status = 'pending';
+        WHERE status IN ('manual_reconciliation', 'timed_out') AND timed_out_at IS NOT NULL
+          AND refund_reconciliation_status = 'pending';
 
       CREATE TABLE IF NOT EXISTS supplier_activation_refunds (
         supplier_activation_id UUID PRIMARY KEY REFERENCES supplier_activations(id) ON DELETE RESTRICT,

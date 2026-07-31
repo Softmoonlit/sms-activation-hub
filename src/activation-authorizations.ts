@@ -244,7 +244,7 @@ export class ActivationAuthorizations {
       expires_at: Date; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
       acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string;
       acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; sms_code: string | null;
-      last_activation_status: string | null; timeout_final_status_confirmed_at: Date | null;
+      last_activation_status: string | null; last_activation_timed_out_at: Date | null;
     }>(
       `SELECT auth.id, auth.status, auth.expires_at, auth.recipient_session_hash,
               candidate.country_name, activation.phone_number, activation.acquired_at,
@@ -252,7 +252,7 @@ export class ActivationAuthorizations {
               activation.status AS activation_status, activation.sms_code,
               (SELECT count(*) FROM authorization_candidate_countries used WHERE used.authorization_id = auth.id AND used.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status, last_activation.status AS last_activation_status,
-              last_activation.timeout_final_status_confirmed_at
+              last_activation.timed_out_at AS last_activation_timed_out_at
        FROM activation_authorizations auth
        LEFT JOIN supplier_activations activation ON activation.authorization_id = auth.id AND activation.status IN ('waiting_sms', 'cancellation_confirming', 'sms_delivered', 'completion_confirming', 'completed', 'manual_reconciliation')
        LEFT JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id AND candidate.country_id = activation.country_id
@@ -262,7 +262,7 @@ export class ActivationAuthorizations {
          ORDER BY request.requested_at DESC LIMIT 1
        ) acquisition ON true
        LEFT JOIN LATERAL (
-         SELECT status, timeout_final_status_confirmed_at FROM supplier_activations item
+         SELECT status, timed_out_at FROM supplier_activations item
          WHERE item.authorization_id = auth.id ORDER BY item.acquired_at DESC LIMIT 1
        ) last_activation ON true
        WHERE auth.token_hash = $1`,
@@ -290,9 +290,9 @@ export class ActivationAuthorizations {
       ...(authorization.acquisition_status ? { acquisitionState: authorization.acquisition_status === 'manual' ? 'manual' as const : 'confirming' as const } : {}),
       ...(authorization.activation_status === 'waiting_sms' && authorization.cancel_available_at && authorization.cancel_available_at <= now && Number(authorization.used_count) < 3 ? { replacementAvailable: true } : {}),
       ...(authorization.activation_status === 'cancellation_confirming' ? { replacementInProgress: true } : {}),
-      ...(authorization.last_activation_status === 'timed_out' && !authorization.timeout_final_status_confirmed_at ? { activationTimeoutInProgress: true } : {}),
-      ...(authorization.last_activation_status === 'timed_out' && authorization.timeout_final_status_confirmed_at && Number(authorization.used_count) < 3 ? { nextNumberAvailable: true } : {}),
-      ...(authorization.activation_status && !['waiting_sms', 'cancellation_confirming'].includes(authorization.activation_status) ? { smsDelivered: true } : {}),
+      ...(authorization.last_activation_status === 'manual_reconciliation' && authorization.last_activation_timed_out_at ? { activationTimeoutInProgress: true } : {}),
+      ...(authorization.last_activation_status === 'timed_out' && Number(authorization.used_count) < 3 ? { nextNumberAvailable: true } : {}),
+      ...(authorization.status === 'sms_delivered' ? { smsDelivered: true } : {}),
       ...(authorization.sms_code ? { verificationCode: authorization.sms_code } : {}),
     };
   }
@@ -421,10 +421,10 @@ export class ActivationAuthorizations {
 
   async reconcileTimedOutActivations(authorizationId?: string): Promise<void> {
     const now = this.now();
-    // 号码有效窗口到期本身是明确终态；退款是否到账则由独立的持久对账任务确认。
+    // 号码有效窗口到期后先进入供应商对账；只有确认窗口内未送达，才进入“已超时”明确终态。
     await this.database.pool.query(
       `UPDATE supplier_activations
-       SET status = 'timed_out', timed_out_at = COALESCE(timed_out_at, $1),
+       SET status = 'manual_reconciliation', timed_out_at = COALESCE(timed_out_at, $1),
            refund_reconciliation_status = 'pending', timeout_reconciliation_claimed_at = NULL,
            timeout_reconciliation_claim_token = NULL, replacement_pending = false,
            phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
@@ -439,22 +439,28 @@ export class ActivationAuthorizations {
 
     const reconciliationClaimToken = randomBytes(16).toString('base64url');
     const claimed = await this.database.pool.query<{
-      id: string; provider_activation_id: string; acquired_at: Date; expires_at: Date;
+      id: string; provider_activation_id: string; acquired_at: Date; expires_at: Date; status: 'manual_reconciliation' | 'timed_out';
     }>(
       `UPDATE supplier_activations
        SET timeout_reconciliation_claimed_at = $1, timeout_reconciliation_claim_token = $3
        WHERE id IN (
          SELECT id FROM supplier_activations
-         WHERE status = 'timed_out' AND refund_reconciliation_status = 'pending'
+         WHERE ((status = 'manual_reconciliation' AND timed_out_at IS NOT NULL) OR status = 'timed_out')
+           AND refund_reconciliation_status = 'pending'
            AND (timeout_reconciliation_claimed_at IS NULL OR timeout_reconciliation_claimed_at <= $2)
            AND ($4::uuid IS NULL OR authorization_id = $4)
          ORDER BY expires_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED
        )
-       RETURNING id, provider_activation_id, acquired_at, expires_at`,
+       RETURNING id, provider_activation_id, acquired_at, expires_at, status`,
       [now, new Date(now.getTime() - 5 * 60 * 1000), reconciliationClaimToken, authorizationId ?? null],
     );
 
     for (const activation of claimed.rows) {
+      if (activation.status === 'timed_out') {
+        await this.reconcileTimedOutRefund(activation, reconciliationClaimToken, now);
+        continue;
+      }
+
       let finalStatus;
       try {
         finalStatus = await this.heroSms.activationStatus(activation.provider_activation_id);
@@ -486,31 +492,55 @@ export class ActivationAuthorizations {
       // 供应商已经确认取消；退款仍可继续对账，但不再阻塞接收者自行获取下一个号码。
       await this.confirmTimedOutFinalStatus(activation.id, reconciliationClaimToken);
 
-      try {
-        const history = await this.heroSms.activationHistory(
-          new Date(activation.acquired_at.getTime() - 5 * 60 * 1000),
-          now,
-        );
-        const record = history.find((item) => item.activationId === activation.provider_activation_id);
-        if (!record) {
-          // HeroSMS 尚未给出可确认退款的历史事实，保留任务供下一次扫描或重启恢复。
-          await this.releaseTimeoutReconciliation(activation.id, reconciliationClaimToken);
-          continue;
-        }
-        await this.resolveTimeoutRefund(activation.id, reconciliationClaimToken, record.activationCost === 0);
-      } catch {
-        await this.releaseTimeoutReconciliation(activation.id, reconciliationClaimToken);
+      await this.reconcileTimedOutRefund(activation, reconciliationClaimToken, now);
+    }
+  }
+
+  private async reconcileTimedOutRefund(
+    activation: { id: string; provider_activation_id: string; acquired_at: Date },
+    claimToken: string,
+    now: Date,
+  ): Promise<void> {
+    try {
+      const history = await this.heroSms.activationHistory(
+        new Date(activation.acquired_at.getTime() - 5 * 60 * 1000),
+        now,
+      );
+      const record = history.find((item) => item.activationId === activation.provider_activation_id);
+      if (!record || record.activationCost !== 0) {
+        // 尚无零费用历史事实时不能确认退款，保留任务供下一次扫描或重启恢复。
+        await this.releaseTimeoutReconciliation(activation.id, claimToken);
+        return;
       }
+      await this.resolveTimeoutRefund(activation.id, claimToken, true);
+    } catch {
+      await this.releaseTimeoutReconciliation(activation.id, claimToken);
     }
   }
 
   private async confirmTimedOutFinalStatus(activationId: string, claimToken: string): Promise<void> {
-    await this.database.pool.query(
-      `UPDATE supplier_activations
-       SET timeout_final_status_confirmed_at = COALESCE(timeout_final_status_confirmed_at, $3)
-       WHERE id = $1 AND status = 'timed_out' AND timeout_reconciliation_claim_token = $2`,
-      [activationId, claimToken, this.now()],
-    );
+    await this.database.transaction(async (client) => {
+      const confirmed = await client.query<{ authorization_id: string }>(
+        `UPDATE supplier_activations
+         SET status = 'timed_out', timeout_final_status_confirmed_at = COALESCE(timeout_final_status_confirmed_at, $3)
+         WHERE id = $1 AND status = 'manual_reconciliation' AND timed_out_at IS NOT NULL
+           AND timeout_reconciliation_claim_token = $2
+         RETURNING authorization_id`,
+        [activationId, claimToken, this.now()],
+      );
+      const authorizationId = confirmed.rows[0]?.authorization_id;
+      if (!authorizationId) return;
+      await client.query(
+        `UPDATE activation_authorizations auth
+         SET status = 'quota_exhausted'
+         WHERE auth.id = $1 AND auth.status = 'in_progress'
+           AND NOT EXISTS (
+             SELECT 1 FROM authorization_candidate_countries candidate
+             WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NULL
+           )`,
+        [authorizationId],
+      );
+    });
   }
 
   private async recordTimedOutDelivery(activationId: string, claimToken: string): Promise<void> {
@@ -519,7 +549,8 @@ export class ActivationAuthorizations {
         `UPDATE supplier_activations
          SET status = 'completion_confirming', refund_reconciliation_status = 'resolved',
              timeout_reconciliation_claimed_at = NULL, timeout_reconciliation_claim_token = NULL
-         WHERE id = $1 AND status = 'timed_out' AND timeout_reconciliation_claim_token = $2
+         WHERE id = $1 AND status = 'manual_reconciliation' AND timed_out_at IS NOT NULL
+           AND timeout_reconciliation_claim_token = $2
          RETURNING authorization_id`,
         [activationId, claimToken],
       );
@@ -537,7 +568,8 @@ export class ActivationAuthorizations {
     await this.database.pool.query(
       `UPDATE supplier_activations
        SET supplier_cancelled_at = COALESCE(supplier_cancelled_at, $3)
-       WHERE id = $1 AND status = 'timed_out' AND timeout_reconciliation_claim_token = $2`,
+       WHERE id = $1 AND status = 'manual_reconciliation' AND timed_out_at IS NOT NULL
+         AND timeout_reconciliation_claim_token = $2`,
       [activationId, claimToken, this.now()],
     );
   }
@@ -546,8 +578,8 @@ export class ActivationAuthorizations {
     await this.database.pool.query(
       `UPDATE supplier_activations
        SET timeout_reconciliation_claimed_at = NULL, timeout_reconciliation_claim_token = NULL
-       WHERE id = $1 AND status = 'timed_out' AND refund_reconciliation_status = 'pending'
-         AND timeout_reconciliation_claim_token = $2`,
+       WHERE id = $1 AND status IN ('manual_reconciliation', 'timed_out') AND timed_out_at IS NOT NULL
+         AND refund_reconciliation_status = 'pending' AND timeout_reconciliation_claim_token = $2`,
       [activationId, claimToken],
     );
   }
@@ -712,7 +744,7 @@ export class ActivationAuthorizations {
           return { state: 'error' };
         }
         const active = await client.query(
-          "SELECT 1 FROM supplier_activations WHERE authorization_id = $1 AND (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming') OR (status = 'timed_out' AND timeout_final_status_confirmed_at IS NULL))",
+          "SELECT 1 FROM supplier_activations WHERE authorization_id = $1 AND status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming')",
           [authorizationId],
         );
         if (active.rowCount) {
@@ -834,7 +866,7 @@ export class ActivationAuthorizations {
             return 'unavailable' as const;
           }
           const current = await client.query(
-            "SELECT 1 FROM supplier_activations WHERE authorization_id = $1 AND (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming') OR (status = 'timed_out' AND timeout_final_status_confirmed_at IS NULL))",
+            "SELECT 1 FROM supplier_activations WHERE authorization_id = $1 AND status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming')",
             [authorizationId],
           );
           if (current.rowCount) {
