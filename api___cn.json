@@ -1,0 +1,5416 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "用于与 HEROSMS 配合使用的 API 协议",
+    "description": "您使用软件进行注册吗？ HeroSMS 与以前的 SMS-Activate 合作伙伴兼容\n\n1. 选择任何包含 SMS-Activate 的 SMS 接收服务的软件。\n2. 选择SMS-Activate 作为接收短信​​的服务。\n3. 在软件设置中将主机从 https://api.sms-activate.ae 替换为 https://hero-sms.com。\n4. 输入您 HeroSMS 帐户中的 API 密钥（在我们的网站上请求）。\n\n如果您遇到任何困难，请联系我们的技术支持。我们会处理一切。",
+    "version": "1.0"
+  },
+  "servers": [
+    {
+      "url": "https://hero-sms.com/api/v1",
+      "description": "HeroSMS API服务器"
+    },
+    {
+      "url": "https://hero-sms.com/stubs/handler_api.php",
+      "description": "SMS-Activate API 兼容服务器"
+    }
+  ],
+  "paths": {
+    "/activations/offers": {
+      "get": {
+        "tags": [
+          "Activations"
+        ],
+        "summary": "接收激活优惠",
+        "description": "返回按服务和国家/地区分组的激活优惠以及用于显示它们的元数据",
+        "operationId": "434f72d594d60aac33007f802a61b90d",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/servicesPath"
+          },
+          {
+            "$ref": "#/components/parameters/countriesPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ActivationsOffersSchema"
+                      }
+                    },
+                    "meta": {
+                      "$ref": "#/components/schemas/ActivationsOffersMetaData"
+                    }
+                  },
+                  "type": "object"
+                },
+                "examples": {
+                  "无过滤器": {
+                    "$ref": "#/components/examples/ActivationsOffersExample"
+                  },
+                  "按服务过滤": {
+                    "$ref": "#/components/examples/ActivationsOffersServicesFilterExample"
+                  },
+                  "按国家过滤": {
+                    "$ref": "#/components/examples/ActivationsOffersCountriesFilterExample"
+                  },
+                  "按服务和国家/地区过滤": {
+                    "$ref": "#/components/examples/ActivationsOffersServicesCountriesFiltersExample"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/OfferNotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntityResponse"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequestsResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/emails": {
+      "get": {
+        "tags": [
+          "Emails"
+        ],
+        "summary": "获取有效购物清单",
+        "operationId": "7f17119e77aad0c154d2f5e600ef092a",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/search"
+          },
+          {
+            "$ref": "#/components/parameters/size"
+          },
+          {
+            "$ref": "#/components/parameters/page"
+          },
+          {
+            "$ref": "#/components/parameters/sort"
+          },
+          {
+            "parameter": "status",
+            "name": "status",
+            "in": "query",
+            "description": "按状态筛选",
+            "required": false,
+            "style": "deepObject",
+            "explode": true,
+            "schema": {
+              "properties": {
+                "id": {
+                  "description": "状态",
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "enum": [
+                      3,
+                      4,
+                      5,
+                      6,
+                      7
+                    ]
+                  }
+                }
+              },
+              "type": "object"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EmailActivation"
+                      }
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Emails"
+        ],
+        "summary": "购买通过邮箱的激活",
+        "operationId": "22164e5067a27560b8fbf28b2ac1f019",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "required": [
+                  "site",
+                  "domain"
+                ],
+                "properties": {
+                  "site": {
+                    "$ref": "#/components/schemas/EmailSite"
+                  },
+                  "domain": {
+                    "$ref": "#/components/schemas/EmailDomain"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/EmailActivationSuccessResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/emails/batch": {
+      "post": {
+        "tags": [
+          "Emails"
+        ],
+        "summary": "批量购买通过邮箱方式激活",
+        "operationId": "7892a59d83e6e38d154854fe1f1b065f",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "required": [
+                  "site",
+                  "domain",
+                  "count"
+                ],
+                "properties": {
+                  "site": {
+                    "$ref": "#/components/schemas/EmailSite"
+                  },
+                  "domain": {
+                    "$ref": "#/components/schemas/EmailDomain"
+                  },
+                  "count": {
+                    "description": "所需激活的邮箱数量（1 至 10）",
+                    "type": "integer",
+                    "maximum": 10,
+                    "minimum": 1,
+                    "example": 5
+                  },
+                  "service": {
+                    "$ref": "#/components/schemas/ServiceId"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/EmailActivationBatchSuccessResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/emails/{emailId}": {
+      "get": {
+        "tags": [
+          "Emails"
+        ],
+        "summary": "检查通过邮箱激活的状态",
+        "operationId": "c57ebd15edbfa8625b8a60984b76e3c6",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/emailId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EmailActivationSuccessResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Emails"
+        ],
+        "summary": "取消购买通过邮箱的激活",
+        "operationId": "20dae8daa691db1282f0d1d268dbac44",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/emailId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/emails/{emailId}/reorder": {
+      "post": {
+        "tags": [
+          "Emails"
+        ],
+        "summary": "重新购买通过邮箱的激活",
+        "operationId": "bb0d53e0557982f130c1540ed663e831",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/emailId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EmailActivationSuccessResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/emails/domains": {
+      "get": {
+        "tags": [
+          "Emails"
+        ],
+        "summary": "获取可用域名列表",
+        "operationId": "59f271906bdbc81b6b2cdd4213b01775",
+        "parameters": [
+          {
+            "name": "site",
+            "in": "query",
+            "description": "购买的激活适用于哪个网站",
+            "schema": {
+              "type": "string",
+              "example": "telegram.com"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "properties": {
+                          "name": {
+                            "description": "域名名称",
+                            "type": "string"
+                          },
+                          "cost": {
+                            "description": "价格",
+                            "type": "number",
+                            "format": "float"
+                          },
+                          "count": {
+                            "description": "可买邮箱的数量",
+                            "type": "integer"
+                          }
+                        },
+                        "type": "object"
+                      }
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "?action=getBalance": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "请求账户余额",
+        "description": "以“ACCESS_BALANCE:<amount>”格式返回当前余额",
+        "operationId": "getBalance",
+        "responses": {
+          "200": {
+            "description": "余额请求结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "successfulBalanceExample": {
+                    "$ref": "#/components/examples/successfulBalanceExample"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/methodNotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getNumber": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "索取号码",
+        "description": "请求指定服务和国家/地区的电话号码。返回类似“ACCESS_NUMBER:<activation_id>:<number>”的字符串",
+        "operationId": "getNumber",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredService"
+          },
+          {
+            "$ref": "#/components/parameters/qpSARequiredCountry"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalOperator"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalMaxPrice"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalFixedPrice"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalRef"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalPhoneException"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "号码请求结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "successfulNumberExample": {
+                    "$ref": "#/components/examples/successfulNumberExample"
+                  },
+                  "numbersNotFoundExample": {
+                    "$ref": "#/components/examples/numbersNotFoundExample"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/getNumberBadRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "402": {
+            "$ref": "#/components/responses/paymentRequiredResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/methodNotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getNumberV2": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "请求编号V2",
+        "description": "与 getNumber 类似，但返回更多激活信息（JSON 对象）",
+        "operationId": "getNumberV2",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredService"
+          },
+          {
+            "$ref": "#/components/parameters/qpSARequiredCountry"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalOperator"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalMaxPrice"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalFixedPrice"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalRef"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalPhoneException"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "号码请求结果（V2）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "successfulNumberv2Example": {
+                    "$ref": "#/components/examples/successfulNumberv2Example"
+                  },
+                  "numbersNotFoundExample": {
+                    "$ref": "#/components/examples/numbersNotFoundExample"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/getNumberBadRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "402": {
+            "$ref": "#/components/responses/paymentRequiredResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/methodNotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=setStatus": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "更改激活状态",
+        "description": "激活生命周期管理。\n可能的状态：\n- 3 — 请求重新发送短信\n- 6 — 完成激活（收到并确认代码）\n- 8 — 取消激活（返还资金）",
+        "operationId": "setStatus",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          },
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationStatus"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "状态变更结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "successfulRetryGetExample": {
+                    "$ref": "#/components/examples/successfulRetryGetExample"
+                  },
+                  "successfulAccessActivationExample": {
+                    "$ref": "#/components/examples/successfulAccessActivationExample"
+                  },
+                  "successfulAccessCancelExample": {
+                    "$ref": "#/components/examples/successfulAccessCancelExample"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/badRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "409": {
+            "$ref": "#/components/responses/activationCancelConflictResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getStatus": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取激活状态",
+        "description": "以文本形式返回当前激活状态（STATUS_WAIT_CODE、STATUS_OK 等）+ 代码（如果有）",
+        "operationId": "getStatus",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "当前激活状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "successfulWaitCodeExample": {
+                    "$ref": "#/components/examples/successfulWaitCodeExample"
+                  },
+                  "successfulWaitRetryExample": {
+                    "$ref": "#/components/examples/successfulWaitRetryExample"
+                  },
+                  "successfulWaitResendExample": {
+                    "$ref": "#/components/examples/successfulWaitResendExample"
+                  },
+                  "successfulCancelExample": {
+                    "$ref": "#/components/examples/successfulCancelExample"
+                  },
+                  "successfulOKExample": {
+                    "$ref": "#/components/examples/successfulOKExample"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/badRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "402": {
+            "$ref": "#/components/responses/paymentRequiredResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getStatusV2": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取V2激活状态",
+        "description": "以结构化形式 (JSON) 返回激活状态",
+        "operationId": "getStatusV2",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "当前激活状态（V2）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivationStatusV2"
+                },
+                "examples": {
+                  "correctActivationStatusExample": {
+                    "$ref": "#/components/examples/successfulActivationV2Example"
+                  },
+                  "successfulCancelExample": {
+                    "summary": "激活已取消",
+                    "value": "STATUS_CANCEL"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/badRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "402": {
+            "$ref": "#/components/responses/paymentRequiredResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getActiveActivations": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取活动激活列表",
+        "description": "返回活动激活的列表",
+        "operationId": "getActiveActivations",
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "description": "偏移量（默认 0）",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "录音限制（最多 100 条）",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "接收主动激活的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActiveActivations"
+                },
+                "examples": {
+                  "activationsSuccessfulExample": {
+                    "$ref": "#/components/examples/activationsSuccessfulExample"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/badRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "402": {
+            "$ref": "#/components/responses/paymentRequiredResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/methodNotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getHistory": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取激活历史记录",
+        "description": "返回激活历史记录",
+        "operationId": "getHistory",
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "description": "周期开始（Unix 时间戳）",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "description": "周期结束（Unix 时间戳）",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "偏移量（默认 0）",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "录音限制（最多 100 条）",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "接收激活历史记录的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivationsHistory"
+                },
+                "examples": {
+                  "successfulActivationsHistoryExample": {
+                    "$ref": "#/components/examples/successfulActivationsHistoryExample"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/methodNotFoundResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=reactivate": {
+      "post": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "请求重新激活号码",
+        "description": "请求已成功使用的电话号码",
+        "operationId": "reactivate",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          },
+          {
+            "$ref": "#/components/parameters/qpSADuration"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "号码重新激活结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/successfulNumberv2Response"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "402": {
+            "$ref": "#/components/responses/paymentRequiredResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/reactivationForbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=reactivateOptions": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "请求号码重新激活费用",
+        "description": "正在请求号码重新激活费用",
+        "operationId": "reactivateOptions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ActivationExtendOptionsSuccessResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/reactivationForbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=prolong": {
+      "post": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "延长号码",
+        "description": "延长电话号码会话时间。仅适用于“租赁”类型的激活。",
+        "operationId": "prolong",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          },
+          {
+            "$ref": "#/components/parameters/qpSARequiredDuration"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "号码延长结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/successfulNumberv2Response"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/prolongationBadRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "402": {
+            "$ref": "#/components/responses/paymentRequiredResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=prolongOptions": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取号码延长费用",
+        "description": "请求号码延长费用",
+        "operationId": "prolongOptions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ActivationExtendOptionsSuccessResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/prolongationInfoBadRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=prolongHistory": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取号码延长历史",
+        "description": "请求号码延长历史",
+        "operationId": "prolongHistory",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "号码延长历史",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/prolongationHistoryListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/prolongationInfoBadRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getCountries": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "请求国家列表",
+        "description": "返回国家列表",
+        "operationId": "getCountries",
+        "responses": {
+          "200": {
+            "description": "请求国家名单的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Country"
+                },
+                "examples": {
+                  "successGetCountriesExample": {
+                    "$ref": "#/components/examples/successGetCountriesExample"
+                  },
+                  "missingKeyExample": {
+                    "$ref": "#/components/examples/missingKeyExample"
+                  },
+                  "incorrectKeyExample": {
+                    "$ref": "#/components/examples/incorrectKeyExample"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getServicesList": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "索取服务清单",
+        "description": "返回服务列表",
+        "operationId": "getServicesList",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSAOptionalCountry"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalLang"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "服务列表请求结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Service"
+                },
+                "examples": {
+                  "successGetServicesListExample": {
+                    "$ref": "#/components/examples/successGetServicesListExample"
+                  },
+                  "missingKeyExample": {
+                    "$ref": "#/components/examples/missingKeyExample"
+                  },
+                  "incorrectKeyExample": {
+                    "$ref": "#/components/examples/incorrectKeyExample"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getOperators": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "请求可用的操作员",
+        "description": "返回运算符列表",
+        "operationId": "getOperators",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSAOptionalCountry"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "请求操作员列表的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operators"
+                },
+                "examples": {
+                  "successfulGetOperatorsExample": {
+                    "$ref": "#/components/examples/successfulGetOperatorsExample"
+                  },
+                  "operatorsNotFoundExample": {
+                    "$ref": "#/components/examples/operatorsNotFoundExample"
+                  },
+                  "sqlServerErrorExample": {
+                    "$ref": "#/components/examples/sqlServerErrorExample"
+                  },
+                  "missingKeyExample": {
+                    "$ref": "#/components/examples/missingKeyExample"
+                  },
+                  "incorrectKeyExample": {
+                    "$ref": "#/components/examples/incorrectKeyExample"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getPrices": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取当前价格",
+        "description": "按国家和服务返回价格和可用客房数量",
+        "operationId": "getPrices",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSAOptionalService"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalCountry"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "获取当前价格的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PricesByCountry"
+                },
+                "examples": {
+                  "successGetPrices": {
+                    "$ref": "#/components/examples/successGetPrices"
+                  },
+                  "incorrectServiceExample": {
+                    "$ref": "#/components/examples/incorrectServiceExample"
+                  },
+                  "incorrectCountryExample": {
+                    "$ref": "#/components/examples/incorrectCountryExample"
+                  },
+                  "badActionExample": {
+                    "$ref": "#/components/examples/badActionExample"
+                  },
+                  "missingKeyExample": {
+                    "$ref": "#/components/examples/missingKeyExample"
+                  },
+                  "incorrectKeyExample": {
+                    "$ref": "#/components/examples/incorrectKeyExample"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getTopCountriesByService": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "按服务获取排名靠前的国家/地区",
+        "description": "此方法已弃用。请使用 GET activations/offers 方法",
+        "operationId": "getTopCountriesByService",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSAOptionalService"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalFreePrice"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "按服务获取排名靠前国家的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopCountriesByService"
+                },
+                "examples": {
+                  "topCountriesAllServicesExample": {
+                    "$ref": "#/components/examples/topCountriesAllServicesExample"
+                  },
+                  "topCountriesOneServiceExample": {
+                    "$ref": "#/components/examples/topCountriesOneServiceExample"
+                  },
+                  "missingKeyExample": {
+                    "$ref": "#/components/examples/missingKeyExample"
+                  },
+                  "incorrectKeyExample": {
+                    "$ref": "#/components/examples/incorrectKeyExample"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true,
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getTopCountriesByServiceRank": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "根据用户排名获取按服务排名靠前的国家/地区",
+        "description": "此方法已弃用。请使用 GET activations/offers 方法",
+        "operationId": "getTopCountriesByServiceRank",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSAOptionalService"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalFreePrice"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "按服务获取排名靠前国家的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopCountriesByService"
+                },
+                "examples": {
+                  "topCountriesAllServicesExample": {
+                    "$ref": "#/components/examples/topCountriesAllServicesExample"
+                  },
+                  "topCountriesOneServiceExample": {
+                    "$ref": "#/components/examples/topCountriesOneServiceExample"
+                  },
+                  "missingKeyExample": {
+                    "$ref": "#/components/examples/missingKeyExample"
+                  },
+                  "incorrectKeyExample": {
+                    "$ref": "#/components/examples/incorrectKeyExample"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true,
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=serviceCountRent": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取按服务分类的最新租赁价格和数量",
+        "description": "返回所选服务租赁的可用号码价格和数量",
+        "operationId": "serviceCountRent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredService"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalCountry"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalOperator"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalCurrency"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "获取当前价格和租赁数量的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RentCountByService"
+                },
+                "examples": {
+                  "数据已成功接收": {
+                    "$ref": "#/components/examples/successServiceCountRent"
+                  },
+                  "暂无数据": {
+                    "$ref": "#/components/examples/emptyServiceCountRent"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/rentParamsBadRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getRentServicesAndCountries": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取各国当前的租赁价格和数量",
+        "description": "退款价格、各服务可用号码数量以及运营商列表",
+        "operationId": "getRentServicesAndCountries",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredCountry"
+          },
+          {
+            "$ref": "#/components/parameters/qpSARequiredDuration"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "结果成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/getRentServicesAndCountries"
+                },
+                "examples": {
+                  "successGetRentServicesAndCountriesExample": {
+                    "$ref": "#/components/examples/successGetRentServicesAndCountriesExample"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/rentParamsBadRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "422": {
+            "$ref": "#/components/responses/unprocessableEntityResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "?action=getRentNumber": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "请求租赁号码",
+        "description": "请求指定服务和国家的电话号码，期限为指定时间。",
+        "operationId": "getRentNumber",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredService"
+          },
+          {
+            "$ref": "#/components/parameters/qpSARequiredCountry"
+          },
+          {
+            "$ref": "#/components/parameters/qpSARequiredDuration"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalOperator"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalCurrency"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalRef"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "号码租赁请求结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/successfulNumberv2Response"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/rentParamsBadRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "402": {
+            "$ref": "#/components/responses/paymentRequiredResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/noNumbersResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=getAllSms": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "获取指定激活的所有短信",
+        "description": "请求指定激活的所有短信。",
+        "operationId": "getAllSms",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalSize"
+          },
+          {
+            "$ref": "#/components/parameters/qpSAOptionalPage"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "所有 OTP 请求的结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/OtpListResponse"
+                    },
+                    "meta": {
+                      "schema": "ResponseMeta",
+                      "description": "响应元数据",
+                      "properties": {
+                        "total": {
+                          "description": "记录总数",
+                          "type": "integer",
+                          "example": 42
+                        },
+                        "service": {
+                          "description": "服务代码",
+                          "type": "string",
+                          "example": "full"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/badRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "409": {
+            "$ref": "#/components/responses/activationNotActiveResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=finishActivation": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "完成激活工作",
+        "operationId": "finishActivation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/badRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "409": {
+            "$ref": "#/components/responses/activationFinishConflictResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    },
+    "?action=cancelActivation": {
+      "get": {
+        "tags": [
+          "SMS-Activate"
+        ],
+        "summary": "取消激活购买",
+        "operationId": "cancelActivation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/qpSARequiredActivationID"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/badRequestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/unauthorizedResponse"
+          },
+          "403": {
+            "$ref": "#/components/responses/forbiddenResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/activationNotFoundResponse"
+          },
+          "409": {
+            "$ref": "#/components/responses/activationCancelConflictResponse"
+          },
+          "500": {
+            "$ref": "#/components/responses/SAServerErrorResponse"
+          }
+        },
+        "security": [
+          {
+            "apiKeyQuery": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://hero-sms.com/stubs/handler_api.php",
+            "description": "SMS-Activate API 兼容服务器"
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActivationsOffersSchema": {
+        "additionalProperties": {
+          "title": "服务",
+          "type": "object",
+          "additionalProperties": {
+            "title": "国家 ID",
+            "properties": {
+              "prices": {
+                "properties": {
+                  "default": {
+                    "type": "number",
+                    "format": "float",
+                    "example": 1.1
+                  },
+                  "retail": {
+                    "type": "number",
+                    "format": "float",
+                    "example": 1.1
+                  },
+                  "min": {
+                    "$ref": "#/components/schemas/MinPrice"
+                  }
+                },
+                "type": "object"
+              },
+              "counts": {
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "example": 101
+                  },
+                  "physical": {
+                    "type": "integer",
+                    "example": 51
+                  },
+                  "defaultPrice": {
+                    "type": "integer",
+                    "example": 50
+                  }
+                },
+                "type": "object"
+              },
+              "map": {
+                "type": "object",
+                "additionalProperties": {
+                  "title": "价格",
+                  "description": "价格 -> 数量",
+                  "type": "int"
+                }
+              }
+            },
+            "type": "object"
+          }
+        }
+      },
+      "ActivationsOffersMetaData": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PaginationMetaData"
+          },
+          {
+            "properties": {
+              "order": {
+                "description": "数据显示顺序",
+                "type": "object",
+                "additionalProperties": {
+                  "description": "指定排序类型的服务和国家/地区的显示顺序",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "filters": {
+                "description": "应用于样品的过滤器",
+                "properties": {
+                  "countries": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "services": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "EmailActivationCreateDTO": {
+        "required": [
+          "userId",
+          "site",
+          "email",
+          "status",
+          "cost",
+          "domain",
+          "rank"
+        ],
+        "properties": {
+          "userId": {
+            "type": "integer",
+            "example": 123
+          },
+          "site": {
+            "type": "string",
+            "example": "example.com"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "example": "test@example.com"
+          },
+          "status": {
+            "type": "integer",
+            "example": 1
+          },
+          "cost": {
+            "type": "number",
+            "format": "float",
+            "example": 0.25
+          },
+          "domain": {
+            "type": "string",
+            "example": "gmail.com"
+          }
+        },
+        "type": "object"
+      },
+      "EmailActivation": {
+        "description": "通过邮箱激活",
+        "required": [
+          "id",
+          "status",
+          "cost",
+          "currency",
+          "date"
+        ],
+        "properties": {
+          "id": {
+            "description": "ID",
+            "type": "integer"
+          },
+          "site": {
+            "description": "购买的激活适用于哪个网站",
+            "type": "string"
+          },
+          "email": {
+            "description": "邮箱",
+            "type": "string"
+          },
+          "status": {
+            "description": "激活状态",
+            "type": "string",
+            "enum": [
+              "WAIT",
+              "CANCEL",
+              "SUCCESS"
+            ]
+          },
+          "value": {
+            "description": "验证码",
+            "type": "string"
+          },
+          "cost": {
+            "description": "价格",
+            "type": "number",
+            "format": "float"
+          },
+          "currency": {
+            "$ref": "#/components/schemas/Currency"
+          },
+          "date": {
+            "$ref": "#/components/schemas/dateISO8601",
+            "description": "创建日期"
+          },
+          "message": {
+            "description": "邮件全部文本",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "EmailSite": {
+        "description": "购买的激活适用于哪个网站",
+        "type": "string",
+        "example": "telegram.com"
+      },
+      "EmailDomain": {
+        "description": "邮箱域名",
+        "type": "string",
+        "example": "gmail.com"
+      },
+      "PaginationMetaData": {
+        "description": "分页的元数据",
+        "required": [
+          "page",
+          "size",
+          "sort",
+          "total"
+        ],
+        "properties": {
+          "page": {
+            "description": "包含数据的页面号",
+            "type": "integer",
+            "example": 1
+          },
+          "size": {
+            "description": "包含数据的页面大小",
+            "type": "integer",
+            "example": 10
+          },
+          "sort": {
+            "description": "按多个字段排序数据",
+            "type": "object",
+            "additionalProperties": {
+              "description": "排序方向",
+              "type": "enum",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          "total": {
+            "description": "总数量",
+            "type": "integer",
+            "example": 100
+          },
+          "hasMore": {
+            "description": "有下一页吗",
+            "type": "boolean",
+            "example": true
+          },
+          "search": {
+            "description": "搜索栏",
+            "type": "string",
+            "example": "8800"
+          },
+          "filters": {
+            "description": "用于选择的可用过滤器值。键集取决于端点",
+            "type": "object",
+            "example": {
+              "countries": [
+                "ru",
+                "ua"
+              ],
+              "services": [
+                "go",
+                "tg"
+              ]
+            }
+          }
+        },
+        "type": "object"
+      },
+      "CountryId": {
+        "description": "国家 ID",
+        "type": "integer",
+        "maximum": 999,
+        "minimum": 0,
+        "example": 2
+      },
+      "CountryName": {
+        "description": "根据所选语言的国家/地区名称",
+        "type": "string",
+        "example": "哈萨克斯坦"
+      },
+      "ServiceId": {
+        "description": "服务代码",
+        "type": "string",
+        "maxLength": 4,
+        "minLength": 2,
+        "example": "tg"
+      },
+      "OperatorId": {
+        "description": "操作员代码",
+        "type": "string",
+        "default": "any",
+        "example": "axis"
+      },
+      "MaxPrice": {
+        "description": "最大激活成本",
+        "type": "number",
+        "format": "float",
+        "example": 0.4321
+      },
+      "MinPrice": {
+        "description": "最低的个人价格",
+        "type": "float",
+        "example": 0.4321
+      },
+      "ActivationId": {
+        "description": "激活 ID",
+        "type": "string",
+        "example": "123456"
+      },
+      "Currency": {
+        "description": "ISO 货币代码",
+        "type": "integer",
+        "default": 840,
+        "enum": [
+          840,
+          978,
+          156
+        ],
+        "example": 840
+      },
+      "SMSText": {
+        "description": "短信",
+        "type": [
+          "string",
+          "null"
+        ],
+        "example": "Your code is 12345"
+      },
+      "SMSCode": {
+        "description": "短信代码",
+        "type": [
+          "string",
+          "null"
+        ],
+        "example": "12345"
+      },
+      "dateISO8601": {
+        "description": "ISO 8601 格式的日期",
+        "type": "string",
+        "format": "date-time",
+        "example": "2025-12-16T10:30:00.000000Z"
+      },
+      "dateRFC3339": {
+        "description": "RFC3339 格式日期",
+        "type": "string",
+        "format": "date-time",
+        "example": "2026-02-19T10:37:46+00:00"
+      },
+      "ActivationStatusV2": {
+        "properties": {
+          "verificationType": {
+            "type": "integer",
+            "example": 2
+          },
+          "sms": {
+            "properties": {
+              "dateTime": {
+                "type": "string",
+                "format": "date-time",
+                "example": "0000-00-00 00:00:00"
+              },
+              "code": {
+                "type": "string",
+                "example": "code"
+              },
+              "text": {
+                "type": "string",
+                "example": "sms text"
+              }
+            },
+            "type": "object"
+          },
+          "call": {
+            "properties": {
+              "from": {
+                "type": "string",
+                "example": "phone"
+              },
+              "text": {
+                "type": "string",
+                "example": "voice text"
+              },
+              "code": {
+                "type": "string",
+                "example": "12345"
+              },
+              "dateTime": {
+                "type": "string",
+                "format": "date-time",
+                "example": "0000-00-00 00:00:00"
+              },
+              "url": {
+                "type": "string",
+                "example": "voice file url"
+              },
+              "parsingCount": {
+                "type": "integer",
+                "example": 1
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "ActiveActivation": {
+        "properties": {
+          "activationId": {
+            "$ref": "#/components/schemas/ActivationId"
+          },
+          "serviceCode": {
+            "$ref": "#/components/schemas/ServiceId"
+          },
+          "phoneNumber": {
+            "type": "string",
+            "example": "79********1"
+          },
+          "activationCost": {
+            "type": "number",
+            "example": 12.5
+          },
+          "activationStatus": {
+            "type": "string",
+            "example": "4"
+          },
+          "smsCode": {
+            "$ref": "#/components/schemas/SMSCode"
+          },
+          "smsText": {
+            "$ref": "#/components/schemas/SMSText"
+          },
+          "activationTime": {
+            "$ref": "#/components/schemas/dateISO8601"
+          },
+          "discount": {
+            "type": "string",
+            "example": "0.00"
+          },
+          "repeated": {
+            "type": "string",
+            "example": "0"
+          },
+          "countryCode": {
+            "$ref": "#/components/schemas/CountryId"
+          },
+          "countryName": {
+            "type": "string",
+            "example": "Kazakhstan"
+          },
+          "canGetAnotherSms": {
+            "type": "string",
+            "example": "1"
+          },
+          "currency": {
+            "$ref": "#/components/schemas/Currency"
+          }
+        },
+        "type": "object"
+      },
+      "ActiveActivations": {
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActiveActivation"
+            },
+            "minItems": 0
+          }
+        },
+        "type": "object"
+      },
+      "ActivationsHistory": {
+        "type": "array",
+        "items": {
+          "properties": {
+            "id": {
+              "type": "string",
+              "example": "635468024"
+            },
+            "date": {
+              "type": "string",
+              "format": "date-time",
+              "example": "0000-00-00 00:00:00"
+            },
+            "phone": {
+              "type": "string",
+              "example": "7*********0"
+            },
+            "sms": {
+              "type": "string",
+              "example": "Your code is ****"
+            },
+            "cost": {
+              "type": "number",
+              "example": 0
+            },
+            "status": {
+              "type": "string",
+              "example": "4"
+            },
+            "currency": {
+              "$ref": "#/components/schemas/Currency"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "TopCountriesOneService": {
+        "properties": {
+          "physicalTotalCount": {
+            "type": "integer",
+            "example": 9405
+          },
+          "physicalCountForDefaultPrice": {
+            "type": "integer",
+            "example": 4066
+          },
+          "physicalPriceMap": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number",
+              "example": 0.018
+            }
+          },
+          "retail_price": {
+            "type": "number",
+            "example": 0.2
+          },
+          "country": {
+            "type": "integer",
+            "example": 6
+          },
+          "price": {
+            "type": "number",
+            "example": 0.045
+          },
+          "count": {
+            "type": "integer",
+            "example": 4528
+          }
+        },
+        "type": "object"
+      },
+      "TopCountriesAllServices": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/TopCountriesOneService"
+        }
+      },
+      "TopCountriesByService": {
+        "type": "object",
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "$ref": "#/components/schemas/TopCountriesAllServices"
+            },
+            {
+              "$ref": "#/components/schemas/TopCountriesOneService"
+            }
+          ]
+        }
+      },
+      "PricesByCountry": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": {
+            "properties": {
+              "cost": {
+                "type": "number",
+                "example": 0.5
+              },
+              "count": {
+                "type": "integer",
+                "example": 10
+              },
+              "physicalCount": {
+                "type": "integer",
+                "example": 10
+              }
+            },
+            "type": "object"
+          }
+        }
+      },
+      "RentCountByService": {
+        "type": "object",
+        "additionalProperties": {
+          "description": "国家（键 — 数字标识符）",
+          "type": "object",
+          "pattern": "^[0-9]+$",
+          "additionalProperties": {
+            "description": "持续时间（键 - 数字标识符）",
+            "required": [
+              "count",
+              "price"
+            ],
+            "properties": {
+              "price": {
+                "description": "租金费用",
+                "type": "number",
+                "example": 0.5432
+              },
+              "count": {
+                "description": "可用房间数量",
+                "type": "integer",
+                "example": 10
+              }
+            },
+            "type": "object",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "getRentServicesAndCountries": {
+        "properties": {
+          "operators": {
+            "description": "操作员",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "services": {
+            "description": "服务",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "example": "tg",
+              "additionalProperties": {
+                "properties": {
+                  "quantity": {
+                    "type": "number",
+                    "example": 2
+                  },
+                  "price": {
+                    "type": "integer",
+                    "example": 0.6
+                  },
+                  "retail_price": {
+                    "type": "integer",
+                    "example": 0.6
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "type": "object"
+      },
+      "Country": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/CountryId"
+          },
+          "rus": {
+            "description": "俄语的国家名称",
+            "type": "string",
+            "example": "哈萨克斯坦"
+          },
+          "eng": {
+            "description": "英语的国家名称",
+            "type": "string",
+            "example": "Kazakhstan"
+          },
+          "chn": {
+            "description": "中文的国家名称",
+            "type": "string",
+            "example": "Kazakhstan"
+          },
+          "visible": {
+            "description": "1 - 可用，0 - 不可用",
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ],
+            "example": 1
+          },
+          "retry": {
+            "description": "1 - 可用，0 - 不可用",
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ],
+            "example": 1
+          }
+        },
+        "type": "object"
+      },
+      "Service": {
+        "properties": {
+          "code": {
+            "description": "服务编号",
+            "type": "string",
+            "example": "aoo"
+          },
+          "name": {
+            "description": "服务名称",
+            "type": "string",
+            "example": "Pegasus Airlines"
+          }
+        },
+        "type": "object"
+      },
+      "Operators": {
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "countryOperators": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "type": "object"
+      },
+      "AccountBannedInfo": {
+        "required": [
+          "scope",
+          "banned_until",
+          "retry_after_seconds"
+        ],
+        "properties": {
+          "scope": {
+            "description": "封锁范围：全部或特定位置",
+            "type": "string",
+            "enum": [
+              "global",
+              "specific"
+            ]
+          },
+          "banned_until": {
+            "description": "禁令结束 Unix 时间戳",
+            "type": "integer"
+          },
+          "retry_after_seconds": {
+            "description": "多少秒后可以重试请求",
+            "type": "integer"
+          },
+          "readable_date": {
+            "$ref": "#/components/schemas/dateRFC3339"
+          }
+        },
+        "type": "object"
+      },
+      "successfulNumberv2Response": {
+        "properties": {
+          "activationId": {
+            "$ref": "#/components/schemas/ActivationId"
+          },
+          "phoneNumber": {
+            "description": "不带 + 号的电话号码",
+            "type": "string",
+            "example": "79991234567"
+          },
+          "activationCost": {
+            "description": "激活费用",
+            "type": "number",
+            "format": "float",
+            "example": 15.5
+          },
+          "currency": {
+            "$ref": "#/components/schemas/Currency"
+          },
+          "countryCode": {
+            "$ref": "#/components/schemas/CountryId"
+          },
+          "countryPhoneCode": {
+            "description": "国家电话代码",
+            "type": "number",
+            "example": 62
+          },
+          "canGetAnotherSms": {
+            "description": "重新发送短信",
+            "type": "boolean",
+            "example": true
+          },
+          "activationTime": {
+            "$ref": "#/components/schemas/dateRFC3339",
+            "description": "开始日期和时间"
+          },
+          "activationEndTime": {
+            "$ref": "#/components/schemas/dateRFC3339",
+            "description": "到期日期和时间"
+          },
+          "activationOperator": {
+            "description": "运营商",
+            "type": "string",
+            "example": "tele2"
+          }
+        },
+        "type": "object",
+        "examples": {
+          "successfulNumberv2Example": {
+            "$ref": "#/components/examples/successfulNumberv2Example"
+          }
+        }
+      },
+      "reactivationPriceResponse": {
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "required": [
+              "price"
+            ],
+            "properties": {
+              "price": {
+                "type": "number",
+                "format": "float",
+                "example": 1.4522
+              },
+              "currency": {
+                "$ref": "#/components/schemas/Currency"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object",
+        "examples": {
+          "success": {
+            "$ref": "#/components/examples/successfulReactivationPriceExample"
+          }
+        }
+      },
+      "prolongationPriceListResponse": {
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "description": "租赁延长费用：小时 - 价格",
+            "type": "object",
+            "additionalProperties": {
+              "description": "指定小时数的费用",
+              "type": "number",
+              "format": "float",
+              "example": 0.2134
+            }
+          }
+        },
+        "type": "object",
+        "examples": {
+          "success": {
+            "$ref": "#/components/examples/successfulProlongationPriceExample"
+          }
+        }
+      },
+      "prolongationHistoryListResponse": {
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "description": "延长记录数组。可能为空。",
+            "type": "array",
+            "items": {
+              "required": [
+                "userPrice",
+                "hours",
+                "createDate",
+                "payerType"
+              ],
+              "properties": {
+                "userPrice": {
+                  "description": "价格",
+                  "type": "number",
+                  "format": "float",
+                  "example": 0.4621
+                },
+                "hours": {
+                  "description": "租金期限",
+                  "type": "number",
+                  "example": 24
+                },
+                "createDate": {
+                  "$ref": "#/components/schemas/dateRFC3339",
+                  "description": "创建日期"
+                },
+                "payerType": {
+                  "description": "延长类型",
+                  "type": "string",
+                  "enum": [
+                    "client",
+                    "partner"
+                  ],
+                  "example": "client"
+                }
+              },
+              "type": "object"
+            },
+            "minItems": 0
+          }
+        },
+        "type": "object",
+        "examples": {
+          "success": {
+            "$ref": "#/components/examples/successfulProlongationHistoryExample"
+          }
+        }
+      },
+      "OtpListResponse": {
+        "description": "消息数组。可能为空。",
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/OtpItem"
+        },
+        "minItems": 0,
+        "examples": {
+          "successfulOtpListExample": {
+            "$ref": "#/components/examples/successfulOtpListExample"
+          }
+        }
+      },
+      "OtpItem": {
+        "required": [
+          "id",
+          "phoneFrom",
+          "service",
+          "date",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "description": "识别码",
+            "type": "string",
+            "example": "3416693217"
+          },
+          "phoneFrom": {
+            "description": "OTP 来源",
+            "type": "string",
+            "example": "Telegram"
+          },
+          "code": {
+            "$ref": "#/components/schemas/SMSCode"
+          },
+          "text": {
+            "$ref": "#/components/schemas/SMSText"
+          },
+          "service": {
+            "$ref": "#/components/schemas/ServiceId"
+          },
+          "date": {
+            "$ref": "#/components/schemas/dateRFC3339",
+            "description": "创建日期"
+          },
+          "type": {
+            "description": "OTP 类型",
+            "type": "string",
+            "enum": [
+              "sms",
+              "call"
+            ],
+            "example": "sms"
+          }
+        },
+        "type": "object"
+      },
+      "ActivationExtendOptionSchema": {
+        "required": [
+          "price",
+          "duration"
+        ],
+        "properties": {
+          "price": {
+            "type": "number",
+            "format": "float",
+            "example": 1.4324
+          },
+          "duration": {
+            "$ref": "#/components/schemas/ActivationExtendDurationSchema"
+          }
+        },
+        "type": "object"
+      },
+      "ActivationExtendDurationSchema": {
+        "required": [
+          "unit",
+          "value"
+        ],
+        "properties": {
+          "unit": {
+            "type": "string",
+            "enum": [
+              "minute",
+              "hour"
+            ],
+            "example": "hour"
+          },
+          "value": {
+            "type": "integer",
+            "example": 24
+          }
+        },
+        "type": "object"
+      },
+      "BaseErrorResponse": {
+        "description": "基本错误响应结构",
+        "required": [
+          "title",
+          "details"
+        ],
+        "properties": {
+          "title": {
+            "description": "错误代码",
+            "type": "string"
+          },
+          "details": {
+            "description": "错误详细",
+            "type": "string"
+          },
+          "info": {
+            "description": "扩展信息",
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "type": "object"
+      }
+    },
+    "responses": {
+      "EmailActivationSuccessResponse": {
+        "description": "OK",
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "data"
+              ],
+              "properties": {
+                "data": {
+                  "$ref": "#/components/schemas/EmailActivation"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "EmailActivationBatchSuccessResponse": {
+        "description": "OK",
+        "content": {
+          "application/json": {
+            "schema": {
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EmailActivationCreateDTO"
+                  }
+                },
+                "meta": {
+                  "properties": {
+                    "info": {
+                      "type": "string",
+                      "example": "电子邮件激活成功"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "example": 3
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "ServerErrorResponse": {
+        "description": "SERVER_ERROR",
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "title",
+                "details"
+              ],
+              "properties": {
+                "title": {
+                  "description": "错误代码",
+                  "type": "string",
+                  "enum": [
+                    "SERVER_ERROR"
+                  ]
+                },
+                "details": {
+                  "description": "错误详细",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "TooManyRequestsResponse": {
+        "description": "TOO_MANY_REQUESTS",
+        "headers": {
+          "Retry-After": {
+            "description": "以秒为单位的值",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "title",
+                "details"
+              ],
+              "properties": {
+                "title": {
+                  "description": "错误代码",
+                  "type": "string",
+                  "enum": [
+                    "RATE_LIMIT"
+                  ]
+                },
+                "details": {
+                  "description": "错误详细",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "UnprocessableEntityResponse": {
+        "description": "UNPROCESSABLE_ENTITY",
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "title",
+                "details",
+                "errors"
+              ],
+              "properties": {
+                "title": {
+                  "description": "错误代码",
+                  "type": "string"
+                },
+                "details": {
+                  "description": "错误详细",
+                  "type": "string"
+                },
+                "errors": {
+                  "type": "object",
+                  "example": {
+                    "parameter1": [
+                      "The parameter1 is required.",
+                      "The parameter1 must be a number."
+                    ],
+                    "parameter2": [
+                      "The parameter2 must be a number."
+                    ]
+                  },
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "NotFoundResponse": {
+        "description": "NOT_FOUND",
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "title",
+                "details"
+              ],
+              "properties": {
+                "title": {
+                  "description": "错误代码",
+                  "type": "string"
+                },
+                "details": {
+                  "description": "错误详细",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "UnauthorizedResponse": {
+        "description": "UNAUTHORIZED",
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "title",
+                "details"
+              ],
+              "properties": {
+                "title": {
+                  "description": "错误代码",
+                  "type": "string",
+                  "enum": [
+                    "Unauthenticated"
+                  ]
+                },
+                "details": {
+                  "description": "错误详细",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "OfferNotFoundResponse": {
+        "description": "NOT_FOUND",
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "title",
+                "details"
+              ],
+              "properties": {
+                "title": {
+                  "description": "错误代码",
+                  "type": "string",
+                  "enum": [
+                    "OFFER_NOT_FOUND"
+                  ]
+                },
+                "details": {
+                  "description": "错误详细",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "TooEarlyRequestResponse": {
+        "description": "TOO_EARLY",
+        "headers": {
+          "Retry-After": {
+            "description": "以秒为单位的值",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "title",
+                "details"
+              ],
+              "properties": {
+                "title": {
+                  "description": "错误代码",
+                  "type": "string",
+                  "enum": [
+                    "TOO_EARLY"
+                  ]
+                },
+                "details": {
+                  "description": "错误详细",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      "SAServerErrorResponse": {
+        "description": "内部服务错误",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "SAServerErrorExample": {
+                "$ref": "#/components/examples/SAServerErrorExample"
+              }
+            }
+          }
+        }
+      },
+      "methodNotFoundResponse": {
+        "description": "方法未找到",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "methodNotFoundExample": {
+                "$ref": "#/components/examples/methodNotFoundExample"
+              }
+            }
+          }
+        }
+      },
+      "activationNotFoundResponse": {
+        "description": "未找到激活",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "activationNotFoundExample": {
+                "$ref": "#/components/examples/activationNotFoundExample"
+              },
+              "methodNotFoundExample": {
+                "$ref": "#/components/examples/methodNotFoundExample"
+              }
+            }
+          }
+        }
+      },
+      "unauthorizedResponse": {
+        "description": "无效的 API 密钥",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "unauthorizedExample": {
+                "$ref": "#/components/examples/unauthorizedExample"
+              }
+            }
+          }
+        }
+      },
+      "rentParamsBadRequestResponse": {
+        "description": "请求参数无效",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "badDurationExample": {
+                "$ref": "#/components/examples/badDurationExample"
+              },
+              "wrongCountryIdExample": {
+                "$ref": "#/components/examples/wrongCountryIdExample"
+              },
+              "wrongServiceExample": {
+                "$ref": "#/components/examples/wrongServiceExample"
+              },
+              "wrongCurrencyExample": {
+                "$ref": "#/components/examples/wrongCurrencyExample"
+              }
+            }
+          }
+        }
+      },
+      "reactivationForbiddenResponse": {
+        "description": "访问被拒绝",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "serviceUnavailableExample": {
+                "$ref": "#/components/examples/serviceUnavailableExample"
+              },
+              "simOfflineExample": {
+                "$ref": "#/components/examples/simOfflineExample"
+              },
+              "simTemporaryOfflineExample": {
+                "$ref": "#/components/examples/simTemporaryOfflineExample"
+              }
+            }
+          }
+        }
+      },
+      "prolongationBadRequestResponse": {
+        "description": "访问被拒绝",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "simOfflineExample": {
+                "$ref": "#/components/examples/simOfflineExample"
+              },
+              "simTemporaryOfflineExample": {
+                "$ref": "#/components/examples/simTemporaryOfflineExample"
+              },
+              "maxHoursExceedExample": {
+                "$ref": "#/components/examples/maxHoursExceedExample"
+              },
+              "badDurationExample": {
+                "$ref": "#/components/examples/badDurationExample"
+              },
+              "activationNotAvailableExample": {
+                "$ref": "#/components/examples/activationNotAvailableExample"
+              },
+              "freezePeriodNotReachedExample": {
+                "$ref": "#/components/examples/freezePeriodNotReachedExample"
+              }
+            }
+          }
+        }
+      },
+      "prolongationInfoBadRequestResponse": {
+        "description": "访问被拒绝",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "simOfflineExample": {
+                "$ref": "#/components/examples/simOfflineExample"
+              },
+              "simTemporaryOfflineExample": {
+                "$ref": "#/components/examples/simTemporaryOfflineExample"
+              },
+              "maxHoursExceedExample": {
+                "$ref": "#/components/examples/maxHoursExceedExample"
+              },
+              "activationNotAvailableExample": {
+                "$ref": "#/components/examples/activationNotAvailableExample"
+              },
+              "freezePeriodNotReachedExample": {
+                "$ref": "#/components/examples/freezePeriodNotReachedExample"
+              }
+            }
+          }
+        }
+      },
+      "badRequestResponse": {
+        "description": "请求参数无效",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "badStatusExampleJson": {
+                "$ref": "#/components/examples/badStatusExampleJson"
+              }
+            }
+          }
+        }
+      },
+      "getNumberBadRequestResponse": {
+        "description": "请求参数无效",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "wrongMaxPriceExampleJson": {
+                "$ref": "#/components/examples/wrongMaxPriceExampleJson"
+              }
+            }
+          }
+        }
+      },
+      "unprocessableEntityResponse": {
+        "description": "请求参数无效",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "unprocessableEntityExample": {
+                "$ref": "#/components/examples/unprocessableEntityExample"
+              }
+            }
+          }
+        }
+      },
+      "forbiddenResponse": {
+        "description": "访问被拒绝",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "threadsReachedExample": {
+                "$ref": "#/components/examples/threadsReachedExample"
+              },
+              "serviceRestrictedExample": {
+                "$ref": "#/components/examples/serviceRestrictedExample"
+              },
+              "globalBanExample": {
+                "$ref": "#/components/examples/globalBanExample"
+              },
+              "specificBanExample": {
+                "$ref": "#/components/examples/specificBanExample"
+              },
+              "inactiveAccountExample": {
+                "$ref": "#/components/examples/inactiveAccountExample"
+              }
+            }
+          }
+        }
+      },
+      "paymentRequiredResponse": {
+        "description": "资金不足",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "paymentRequiredExample": {
+                "$ref": "#/components/examples/paymentRequiredExample"
+              }
+            }
+          }
+        }
+      },
+      "noNumbersResponse": {
+        "description": "没有可售号码",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "noNumbersExample": {
+                "$ref": "#/components/examples/noNumbersExample"
+              }
+            }
+          }
+        }
+      },
+      "activationNotActiveResponse": {
+        "description": "激活未激活。操作不可能",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "activationNotActiveExample": {
+                "$ref": "#/components/examples/activationNotActiveExample"
+              }
+            }
+          }
+        }
+      },
+      "activationFinishConflictResponse": {
+        "description": "无法完成激活",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "activationNewOtpReceivedExample": {
+                "$ref": "#/components/examples/activationNewOtpReceivedExample"
+              },
+              "activationNotActiveExample": {
+                "$ref": "#/components/examples/activationNotActiveExample"
+              }
+            }
+          }
+        }
+      },
+      "activationCancelConflictResponse": {
+        "description": "无法取消激活",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BaseErrorResponse"
+            },
+            "examples": {
+              "activationNewOtpReceivedExample": {
+                "$ref": "#/components/examples/activationNewOtpReceivedExample"
+              },
+              "freeCancellationExpiredExample": {
+                "$ref": "#/components/examples/freeCancellationExpiredExample"
+              },
+              "activationOtpReceivedExample": {
+                "$ref": "#/components/examples/activationOtpReceivedExample"
+              },
+              "activationNotActiveExample": {
+                "$ref": "#/components/examples/activationNotActiveExample"
+              },
+              "earlyCancellationExample": {
+                "$ref": "#/components/examples/earlyCancellationExample"
+              }
+            }
+          }
+        }
+      },
+      "ActivationExtendOptionsSuccessResponse": {
+        "description": "成功响应",
+        "content": {
+          "application/json": {
+            "schema": {
+              "required": [
+                "data"
+              ],
+              "properties": {
+                "data": {
+                  "required": [
+                    "options"
+                  ],
+                  "properties": {
+                    "options": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ActivationExtendOptionSchema"
+                      },
+                      "minItems": 0
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object",
+              "examples": {
+                "success": {
+                  "$ref": "#/components/examples/successExtendActivationOptionsExample"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "parameters": {
+      "emailId": {
+        "name": "emailId",
+        "in": "path",
+        "description": "邮箱激活 ID",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        },
+        "example": 123456789
+      },
+      "search": {
+        "name": "search",
+        "in": "query",
+        "description": "搜索栏",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "size": {
+        "name": "size",
+        "in": "query",
+        "description": "包含数据的页面大小",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "page": {
+        "name": "page",
+        "in": "query",
+        "description": "包含数据的页面号",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "sort": {
+        "name": "sort",
+        "in": "query",
+        "description": "按多个字段排序数据",
+        "required": false,
+        "style": "deepObject",
+        "explode": true,
+        "schema": {
+          "properties": {
+            "id": {
+              "description": "用于列表中筛选与导航的参数",
+              "type": "string",
+              "default": "desc",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "from": {
+        "name": "from",
+        "in": "query",
+        "description": "开始日期，格式为 ISO 8601：YYYY-MM-DDTHH:MM:SSZ",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "to": {
+        "name": "to",
+        "in": "query",
+        "description": "期间前的日期，格式为 ISO 8601 YYYY-MM-DDTHH:MM:SSZ",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "servicesPath": {
+        "name": "services",
+        "in": "query",
+        "description": "服务代码",
+        "schema": {
+          "type": "string",
+          "example": "tg,go,ig"
+        }
+      },
+      "countriesPath": {
+        "name": "countries",
+        "in": "query",
+        "description": "国家/地区 ID",
+        "schema": {
+          "type": "string",
+          "example": "6,33,50"
+        }
+      },
+      "qpSARequiredService": {
+        "name": "service",
+        "in": "query",
+        "description": "[服务编号](https://hero-sms.com/stubs/handler_api.php?action=getServicesList)",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "example": "tg"
+      },
+      "qpSAOptionalService": {
+        "name": "service",
+        "in": "query",
+        "description": "[服务编号](https://hero-sms.com/stubs/handler_api.php?action=getServicesList)",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "tg"
+      },
+      "qpSARequiredCountry": {
+        "name": "country",
+        "in": "query",
+        "description": "[国家 ID](https://hero-sms.com/stubs/handler_api.php?action=getCountries)",
+        "required": true,
+        "schema": {
+          "type": "number"
+        },
+        "example": 2
+      },
+      "qpSAOptionalCountry": {
+        "name": "country",
+        "in": "query",
+        "description": "[国家 ID](https://hero-sms.com/stubs/handler_api.php?action=getCountries)",
+        "required": false,
+        "schema": {
+          "type": "number"
+        },
+        "example": 2
+      },
+      "qpSAOptionalFreePrice": {
+        "name": "freePrice",
+        "in": "query",
+        "description": "使用免费价格",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        },
+        "example": true
+      },
+      "qpSAOptionalLang": {
+        "name": "lang",
+        "in": "query",
+        "description": "语言ID",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "default": "en",
+          "enum": [
+            "cn",
+            "de",
+            "en",
+            "es",
+            "fr",
+            "pt",
+            "ru",
+            "id",
+            "vi",
+            "tr"
+          ]
+        },
+        "example": "en"
+      },
+      "qpSAOptionalOperator": {
+        "name": "operator",
+        "in": "query",
+        "description": "[所需电信运营商列表](https://hero-sms.com/stubs/handler_api.php?action=getOperators)（用逗号分隔，不带空格）",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "tele2,beeline"
+      },
+      "qpSARequiredDuration": {
+        "name": "duration",
+        "in": "query",
+        "description": "租赁时间（小时）",
+        "required": true,
+        "schema": {
+          "type": "number"
+        },
+        "example": 24
+      },
+      "qpSADuration": {
+        "name": "duration",
+        "in": "query",
+        "description": "租赁时间（小时）",
+        "required": false,
+        "schema": {
+          "type": "number"
+        },
+        "example": 24
+      },
+      "qpSAOptionalCurrency": {
+        "name": "currency",
+        "in": "query",
+        "description": "显示货币",
+        "required": false,
+        "schema": {
+          "type": "number",
+          "default": 840,
+          "enum": [
+            643,
+            840,
+            978,
+            156
+          ]
+        },
+        "example": 840
+      },
+      "qpSAOptionalSize": {
+        "name": "size",
+        "in": "query",
+        "description": "包含数据的页面大小",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "qpSAOptionalPage": {
+        "name": "page",
+        "in": "query",
+        "description": "包含数据的页面号",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "qpSAOptionalMaxPrice": {
+        "name": "maxPrice",
+        "in": "query",
+        "description": "最高价格",
+        "required": false,
+        "schema": {
+          "type": "number"
+        },
+        "example": 2
+      },
+      "qpSAOptionalFixedPrice": {
+        "name": "fixedPrice",
+        "in": "query",
+        "description": "嚴格按照指定的最高價格（maxPrice）購買。請與 maxPrice 參數一起使用。",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "true"
+      },
+      "qpSAOptionalRef": {
+        "name": "ref",
+        "in": "query",
+        "description": "转介人标识符",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "123456789"
+      },
+      "qpSAOptionalPhoneException": {
+        "name": "phoneException",
+        "in": "query",
+        "description": "排除前缀。您将不会获得带有指定前缀的号码。最多20个前缀。",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "7934,7900"
+      },
+      "qpSARequiredActivationID": {
+        "name": "id",
+        "in": "query",
+        "description": "激活 ID",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        },
+        "example": 123456789
+      },
+      "qpSARequiredActivationStatus": {
+        "name": "status",
+        "in": "query",
+        "description": "激活状态",
+        "required": true,
+        "schema": {
+          "default": 3,
+          "oneOf": [
+            {
+              "title": "请求代码",
+              "type": "integer",
+              "enum": [
+                3
+              ]
+            },
+            {
+              "title": "完成激活",
+              "type": "integer",
+              "enum": [
+                6
+              ]
+            },
+            {
+              "title": "取消激活",
+              "type": "integer",
+              "enum": [
+                8
+              ]
+            }
+          ]
+        },
+        "example": 1
+      }
+    },
+    "examples": {
+      "ActivationsOffersExample": {
+        "summary": "无过滤器",
+        "value": {
+          "data": {
+            "go": {
+              "6": {
+                "prices": {
+                  "default": 0.03,
+                  "retail": 0.03,
+                  "min": 0.03
+                },
+                "counts": {
+                  "total": 19459,
+                  "physical": 10221,
+                  "defaultPrice": 13610
+                },
+                "map": {
+                  "0.0300": 1171867,
+                  "0.0589": 3453473,
+                  "0.1510": 3771610
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.15,
+                  "retail": 0.15,
+                  "min": 0.15
+                },
+                "counts": {
+                  "total": 10446,
+                  "physical": 1821,
+                  "defaultPrice": 4654
+                },
+                "map": {
+                  "0.1500": 14460,
+                  "0.1553": 28887,
+                  "0.6143": 670031
+                }
+              },
+              "50": {
+                "prices": {
+                  "default": 0.35,
+                  "retail": 0.35,
+                  "min": 0.35
+                },
+                "counts": {
+                  "total": 31871,
+                  "physical": 14454,
+                  "defaultPrice": 14206
+                },
+                "map": {
+                  "0.3500": 14306,
+                  "0.8226": 612179,
+                  "0.9308": 817343
+                }
+              }
+            },
+            "ig": {
+              "6": {
+                "prices": {
+                  "default": 0.0334,
+                  "retail": 0.0334,
+                  "min": 0.0334
+                },
+                "counts": {
+                  "total": 39166,
+                  "physical": 25787,
+                  "defaultPrice": 31838
+                },
+                "map": {
+                  "0.0334": 10184181,
+                  "0.0335": 10976322,
+                  "0.0338": 11802947
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.06,
+                  "retail": 0.06,
+                  "min": 0.06
+                },
+                "counts": {
+                  "total": 5266,
+                  "physical": 197,
+                  "defaultPrice": 1509
+                },
+                "map": {
+                  "0.0600": 7524,
+                  "0.0725": 12963,
+                  "0.2942": 204854
+                }
+              },
+              "50": {
+                "prices": {
+                  "default": 0.075,
+                  "retail": 0.075,
+                  "min": 0.075
+                },
+                "counts": {
+                  "total": 36384,
+                  "physical": 8404,
+                  "defaultPrice": 8211
+                },
+                "map": {
+                  "0.0750": 8211,
+                  "0.0942": 24639,
+                  "0.0948": 49334
+                }
+              }
+            },
+            "tg": {
+              "6": {
+                "prices": {
+                  "default": 0.15,
+                  "retail": 0.15,
+                  "min": 0.15
+                },
+                "counts": {
+                  "total": 22598,
+                  "physical": 12352,
+                  "defaultPrice": 4787
+                },
+                "map": {
+                  "0.1500": 286896,
+                  "0.1765": 327454,
+                  "1.7648": 5814269
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.9,
+                  "retail": 0.9,
+                  "min": 0.9
+                },
+                "counts": {
+                  "total": 4076,
+                  "physical": 896,
+                  "defaultPrice": 0
+                },
+                "map": {
+                  "1.0483": 204,
+                  "1.1593": 793,
+                  "2.4831": 46024
+                }
+              },
+              "50": {
+                "prices": {
+                  "default": 1,
+                  "retail": 1,
+                  "min": 1
+                },
+                "counts": {
+                  "total": 48641,
+                  "physical": 15336,
+                  "defaultPrice": 183
+                },
+                "map": {
+                  "1.0000": 183,
+                  "1.2504": 15885,
+                  "2.9412": 1411078
+                }
+              }
+            }
+          },
+          "meta": {
+            "page": null,
+            "size": null,
+            "sort": {
+              "rate": "asc"
+            },
+            "total": null,
+            "hasMore": false,
+            "order": {
+              "rate": {
+                "services": [
+                  "go",
+                  "ig",
+                  "tg"
+                ],
+                "countries": {
+                  "go": [
+                    "6",
+                    "48",
+                    "50"
+                  ],
+                  "ig": [
+                    "6",
+                    "48",
+                    "50"
+                  ],
+                  "tg": [
+                    "6",
+                    "48",
+                    "50"
+                  ]
+                }
+              }
+            },
+            "filters": {
+              "countries": [],
+              "services": []
+            }
+          }
+        }
+      },
+      "ActivationsOffersServicesFilterExample": {
+        "summary": "按服务过滤",
+        "value": {
+          "data": {
+            "go": {
+              "6": {
+                "prices": {
+                  "default": 0.03,
+                  "retail": 0.03,
+                  "min": 0.03
+                },
+                "counts": {
+                  "total": 19459,
+                  "physical": 10221,
+                  "defaultPrice": 13610
+                },
+                "map": {
+                  "0.0300": 1171867,
+                  "0.0589": 3453473,
+                  "0.1510": 3771610
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.15,
+                  "retail": 0.15,
+                  "min": 0.15
+                },
+                "counts": {
+                  "total": 10446,
+                  "physical": 1821,
+                  "defaultPrice": 4654
+                },
+                "map": {
+                  "0.1500": 14460,
+                  "0.1553": 28887,
+                  "0.6143": 670031
+                }
+              },
+              "50": {
+                "prices": {
+                  "default": 0.35,
+                  "retail": 0.35,
+                  "min": 0.35
+                },
+                "counts": {
+                  "total": 31871,
+                  "physical": 14454,
+                  "defaultPrice": 14206
+                },
+                "map": {
+                  "0.3500": 14306,
+                  "0.8226": 612179,
+                  "0.9308": 817343
+                }
+              }
+            },
+            "tg": {
+              "6": {
+                "prices": {
+                  "default": 0.15,
+                  "retail": 0.15,
+                  "min": 0.15
+                },
+                "counts": {
+                  "total": 22598,
+                  "physical": 12352,
+                  "defaultPrice": 4787
+                },
+                "map": {
+                  "0.1500": 286896,
+                  "0.1765": 327454,
+                  "1.7648": 5814269
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.9,
+                  "retail": 0.9,
+                  "min": 0.9
+                },
+                "counts": {
+                  "total": 4076,
+                  "physical": 896,
+                  "defaultPrice": 0
+                },
+                "map": {
+                  "1.0483": 204,
+                  "1.1593": 793,
+                  "2.4831": 46024
+                }
+              },
+              "50": {
+                "prices": {
+                  "default": 1,
+                  "retail": 1,
+                  "min": 1
+                },
+                "counts": {
+                  "total": 48641,
+                  "physical": 15336,
+                  "defaultPrice": 183
+                },
+                "map": {
+                  "1.0000": 183,
+                  "1.2504": 15885,
+                  "2.9412": 1411078
+                }
+              }
+            }
+          },
+          "meta": {
+            "page": null,
+            "size": null,
+            "sort": {
+              "rate": "asc"
+            },
+            "total": null,
+            "hasMore": false,
+            "order": {
+              "rate": {
+                "services": [
+                  "go",
+                  "tg"
+                ],
+                "countries": {
+                  "go": [
+                    "6",
+                    "48",
+                    "50"
+                  ],
+                  "tg": [
+                    "6",
+                    "48",
+                    "50"
+                  ]
+                }
+              }
+            },
+            "filters": {
+              "countries": [],
+              "services": [
+                "go",
+                "tg"
+              ]
+            }
+          }
+        }
+      },
+      "ActivationsOffersCountriesFilterExample": {
+        "summary": "按国家过滤",
+        "value": {
+          "data": {
+            "go": {
+              "6": {
+                "prices": {
+                  "default": 0.03,
+                  "retail": 0.03,
+                  "min": 0.03
+                },
+                "counts": {
+                  "total": 19459,
+                  "physical": 10221,
+                  "defaultPrice": 13610
+                },
+                "map": {
+                  "0.0300": 1171867,
+                  "0.0589": 3453473,
+                  "0.1510": 3771610
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.15,
+                  "retail": 0.15,
+                  "min": 0.15
+                },
+                "counts": {
+                  "total": 10446,
+                  "physical": 1821,
+                  "defaultPrice": 4654
+                },
+                "map": {
+                  "0.1500": 14460,
+                  "0.1553": 28887,
+                  "0.6143": 670031
+                }
+              }
+            },
+            "ig": {
+              "6": {
+                "prices": {
+                  "default": 0.0334,
+                  "retail": 0.0334,
+                  "min": 0.0334
+                },
+                "counts": {
+                  "total": 39166,
+                  "physical": 25787,
+                  "defaultPrice": 31838
+                },
+                "map": {
+                  "0.0334": 10184181,
+                  "0.0335": 10976322,
+                  "0.0338": 11802947
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.06,
+                  "retail": 0.06,
+                  "min": 0.06
+                },
+                "counts": {
+                  "total": 5266,
+                  "physical": 197,
+                  "defaultPrice": 1509
+                },
+                "map": {
+                  "0.0600": 7524,
+                  "0.0725": 12963,
+                  "0.2942": 204854
+                }
+              }
+            },
+            "tg": {
+              "6": {
+                "prices": {
+                  "default": 0.15,
+                  "retail": 0.15,
+                  "min": 0.15
+                },
+                "counts": {
+                  "total": 22598,
+                  "physical": 12352,
+                  "defaultPrice": 4787
+                },
+                "map": {
+                  "0.1500": 286896,
+                  "0.1765": 327454,
+                  "1.7648": 5814269
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.9,
+                  "retail": 0.9,
+                  "min": 0.9
+                },
+                "counts": {
+                  "total": 4076,
+                  "physical": 896,
+                  "defaultPrice": 0
+                },
+                "map": {
+                  "1.0483": 204,
+                  "1.1593": 793,
+                  "2.4831": 46024
+                }
+              }
+            }
+          },
+          "meta": {
+            "page": null,
+            "size": null,
+            "sort": {
+              "rate": "asc"
+            },
+            "total": null,
+            "hasMore": false,
+            "order": {
+              "rate": {
+                "services": [
+                  "go",
+                  "ig",
+                  "tg"
+                ],
+                "countries": {
+                  "go": [
+                    "6",
+                    "48"
+                  ],
+                  "ig": [
+                    "6",
+                    "48"
+                  ],
+                  "tg": [
+                    "6",
+                    "48"
+                  ]
+                }
+              }
+            },
+            "filters": {
+              "countries": [
+                "6",
+                "48"
+              ],
+              "services": []
+            }
+          }
+        }
+      },
+      "ActivationsOffersServicesCountriesFiltersExample": {
+        "summary": "按服务和国家/地区过滤",
+        "value": {
+          "data": {
+            "ig": {
+              "6": {
+                "prices": {
+                  "default": 0.0334,
+                  "retail": 0.0334,
+                  "min": 0.0334
+                },
+                "counts": {
+                  "total": 39166,
+                  "physical": 25787,
+                  "defaultPrice": 31838
+                },
+                "map": {
+                  "0.0334": 10184181,
+                  "0.0335": 10976322,
+                  "0.0338": 11802947
+                }
+              },
+              "50": {
+                "prices": {
+                  "default": 0.075,
+                  "retail": 0.075,
+                  "min": 0.075
+                },
+                "counts": {
+                  "total": 36384,
+                  "physical": 8404,
+                  "defaultPrice": 8211
+                },
+                "map": {
+                  "0.0750": 8211,
+                  "0.0942": 24639,
+                  "0.0948": 49334
+                }
+              }
+            },
+            "tg": {
+              "6": {
+                "prices": {
+                  "default": 0.15,
+                  "retail": 0.15,
+                  "min": 0.15
+                },
+                "counts": {
+                  "total": 22598,
+                  "physical": 12352,
+                  "defaultPrice": 4787
+                },
+                "map": {
+                  "0.1500": 286896,
+                  "0.1765": 327454,
+                  "1.7648": 5814269
+                }
+              },
+              "48": {
+                "prices": {
+                  "default": 0.9,
+                  "retail": 0.9,
+                  "min": 0.9
+                },
+                "counts": {
+                  "total": 4076,
+                  "physical": 896,
+                  "defaultPrice": 0
+                },
+                "map": {
+                  "1.0483": 204,
+                  "1.1593": 793,
+                  "2.4831": 46024
+                }
+              }
+            }
+          },
+          "meta": {
+            "page": null,
+            "size": null,
+            "sort": {
+              "rate": "asc"
+            },
+            "total": null,
+            "hasMore": false,
+            "order": {
+              "rate": {
+                "services": [
+                  "ig",
+                  "tg"
+                ],
+                "countries": {
+                  "ig": [
+                    "6",
+                    "48"
+                  ],
+                  "tg": [
+                    "6",
+                    "48"
+                  ]
+                }
+              }
+            },
+            "filters": {
+              "countries": [
+                "6",
+                "48"
+              ],
+              "services": [
+                "ig",
+                "tg"
+              ]
+            }
+          }
+        }
+      },
+      "badActionExample": {
+        "summary": "不正确的操作",
+        "value": "BAD_ACTION"
+      },
+      "sqlServerErrorExample": {
+        "summary": "服务器错误",
+        "value": "ERROR_SQL"
+      },
+      "bannedExample": {
+        "summary": "该用户被封锁，直至指定的日期",
+        "value": "BANNED:'YYYY-m-d H-i-s'"
+      },
+      "channelsLimitExample": {
+        "summary": "账号被封锁",
+        "value": "CHANNELS_LIMIT"
+      },
+      "missingKeyExample": {
+        "summary": "没有 API 密钥",
+        "value": "NO_KEY"
+      },
+      "incorrectKeyExample": {
+        "summary": "API 密钥不正确",
+        "value": "BAD_KEY"
+      },
+      "badStatusExample": {
+        "summary": "状态不正确",
+        "value": "BAD_STATUS"
+      },
+      "numbersNotFoundExample": {
+        "summary": "未找到号码",
+        "value": "NO_NUMBERS"
+      },
+      "badServiceExample": {
+        "summary": "指定的服务不正确",
+        "value": "BAD_SERVICE"
+      },
+      "wrongMaxPriceExample": {
+        "summary": "指定的最大值小于可接受的值。答案表示最低价格",
+        "value": "WRONG_MAX_PRICE:0.025"
+      },
+      "wrongMaxPriceExampleJson": {
+        "summary": "指定的最大值小于可接受的值。答案表示最低价格",
+        "value": {
+          "title": "WRONG_MAX_PRICE",
+          "details": "The maximum price is less than the permitted price",
+          "info": {
+            "min": 0.1234
+          }
+        }
+      },
+      "wrongActivationIdExample": {
+        "summary": "激活 ID 不正确",
+        "value": "WRONG_ACTIVATION_ID"
+      },
+      "badStatusExampleJson": {
+        "summary": "状态不正确",
+        "value": {
+          "title": "BAD_STATUS",
+          "details": "Wrong status code"
+        }
+      },
+      "unprocessableEntityExample": {
+        "summary": "无效的请求",
+        "value": {
+          "title": "UNPROCESSABLE_ENTITY",
+          "details": "Validation failed",
+          "info": {
+            "field": "service",
+            "code": "REQUIRED",
+            "message": "Param 'service' is required."
+          }
+        }
+      },
+      "wrongCountryIdExample": {
+        "summary": "国家 ID 无效",
+        "value": {
+          "title": "WRONG_COUNTRY",
+          "details": ""
+        }
+      },
+      "wrongServiceExample": {
+        "summary": "服务名称不正确",
+        "value": {
+          "title": "WRONG_SERVICE",
+          "details": "Unsupported service"
+        }
+      },
+      "wrongCurrencyExample": {
+        "summary": "不支持的货币",
+        "value": {
+          "title": "WRONG_CURRENCY",
+          "details": "Unsupported Currency"
+        }
+      },
+      "globalBanExample": {
+        "summary": "全局临时封锁",
+        "value": {
+          "title": "BANNED",
+          "details": "Your account is temporarily suspended from making any purchases.",
+          "info": {
+            "scope": "global",
+            "banned_until": 1739448000,
+            "retry_after_seconds": 3600,
+            "readable_date": "2026-02-13T12:00:00+00:00"
+          }
+        }
+      },
+      "specificBanExample": {
+        "summary": "对传输位置的临时封锁",
+        "value": {
+          "title": "BANNED",
+          "details": "Account temporarily suspended for this specific country/service pair.",
+          "info": {
+            "scope": "specific",
+            "banned_until": 1739448000,
+            "retry_after_seconds": 3600,
+            "readable_date": "2026-02-20T15:00:00+00:00"
+          }
+        }
+      },
+      "successfulAccessReadyExample": {
+        "summary": "确认号码已准备好了",
+        "value": "ACCESS_READY"
+      },
+      "successfulRetryGetExample": {
+        "summary": "等待新短信",
+        "value": "ACCESS_RETRY_GET"
+      },
+      "successfulAccessActivationExample": {
+        "summary": "服务已成功激活",
+        "value": "ACCESS_ACTIVATION"
+      },
+      "successfulAccessCancelExample": {
+        "summary": "激活已取消",
+        "value": "ACCESS_CANCEL"
+      },
+      "earlyCancelDeniedExample": {
+        "summary": "你在前 2分钟内无法取消号码",
+        "value": "EARLY_CANCEL_DENIED"
+      },
+      "noActivationExample": {
+        "summary": "激活 ID 不存在",
+        "value": "NO_ACTIVATION"
+      },
+      "successfulWaitCodeExample": {
+        "summary": "等待短信",
+        "value": "STATUS_WAIT_CODE"
+      },
+      "successfulWaitRetryExample": {
+        "summary": "等待验证码确认",
+        "value": "STATUS_WAIT_RETRY:100001"
+      },
+      "successfulWaitResendExample": {
+        "summary": "等待重新发送短信",
+        "value": "STATUS_WAIT_RESEND"
+      },
+      "successfulCancelExample": {
+        "summary": "激活已取消",
+        "value": "STATUS_CANCEL"
+      },
+      "successfulOKExample": {
+        "summary": "已收到验证码",
+        "value": "STATUS_OK:100001"
+      },
+      "incorrectServiceExample": {
+        "summary": "输入的地址有错",
+        "value": {
+          "status": "false",
+          "msg": "service is incorrect"
+        }
+      },
+      "incorrectCountryExample": {
+        "summary": "输入的国家有错",
+        "value": {
+          "status": "false",
+          "msg": "country is incorrect"
+        }
+      },
+      "successfulBalanceExample": {
+        "summary": "余额收到成功",
+        "value": "ACCESS_BALANCE:100.5"
+      },
+      "successfulNumberExample": {
+        "summary": "号码接收成功",
+        "value": "ACCESS_NUMBER:123456789:7*********0"
+      },
+      "successfulNumberv2Example": {
+        "summary": "号码接收成功",
+        "value": {
+          "activationId": "635468024",
+          "phoneNumber": "79584******",
+          "activationCost": 12.5,
+          "currency": 840,
+          "countryCode": 6,
+          "countryPhoneCode": 62,
+          "canGetAnotherSms": true,
+          "activationTime": "2026-02-18T16:11:33+00:00",
+          "activationEndTime": "2026-02-18T18:11:23+00:00",
+          "activationOperator": "any"
+        }
+      },
+      "successfulReactivationPriceExample": {
+        "summary": "费用收到成功",
+        "value": {
+          "data": {
+            "price": 0.1234
+          }
+        }
+      },
+      "successfulProlongationPriceExample": {
+        "summary": "费用获取成功",
+        "value": {
+          "data": {
+            "2": 0.1234,
+            "4": 0.2234,
+            "24": 1.2234,
+            "168": 3.6432
+          }
+        }
+      },
+      "successfulProlongationHistoryExample": {
+        "summary": "延长历史已成功获取",
+        "value": {
+          "data": [
+            {
+              "hours": 2,
+              "userPrice": 0.1442,
+              "createDate": "2026-04-01T22:00:58+3:00",
+              "payerType": "client"
+            },
+            {
+              "hours": 24,
+              "userPrice": 0,
+              "createDate": "2026-04-02T00:00:58+3:00",
+              "payerType": "partner"
+            }
+          ]
+        }
+      },
+      "successfulActivationV2Example": {
+        "summary": "激活状态已成功收到",
+        "value": {
+          "verificationType": 2,
+          "sms": {
+            "dateTime": "0000-00-00 00:00:00",
+            "code": "code",
+            "text": "sms text"
+          },
+          "call": {
+            "from": "phone",
+            "text": "voice text",
+            "code": "12345",
+            "dateTime": "0000-00-00 00:00:00",
+            "url": "voice file url",
+            "parsingCount": 1
+          }
+        }
+      },
+      "activationsSuccessfulExample": {
+        "summary": "激活列表已成功接收",
+        "value": {
+          "status": "success",
+          "data": [
+            {
+              "activationId": "635468021",
+              "serviceCode": "vk",
+              "phoneNumber": "79********1",
+              "activationCost": 12.5,
+              "activationStatus": "4",
+              "smsCode": "12345",
+              "smsText": "Your code is 12345",
+              "activationTime": "2022-06-01 16:59:16",
+              "discount": "0.00",
+              "repeated": "0",
+              "countryCode": "2",
+              "countryName": "Kazakhstan",
+              "canGetAnotherSms": "1",
+              "currency": 840
+            }
+          ]
+        }
+      },
+      "successfulActivationsHistoryExample": {
+        "summary": "激活历史记录已成功收到",
+        "value": [
+          {
+            "id": "635468024",
+            "date": "0000-00-00 00:00:00",
+            "phone": "7*********0",
+            "sms": "Your code is ****",
+            "cost": 0,
+            "status": "4",
+            "currency": 840
+          }
+        ]
+      },
+      "successGetPrices": {
+        "summary": "当前价格已成功收到",
+        "value": [
+          {
+            "baa": {
+              "cost": 0.08,
+              "count": 25370,
+              "physicalCount": 14528
+            }
+          }
+        ]
+      },
+      "topCountriesAllServicesExample": {
+        "summary": "已成功获取未指定参数的按服务排名靠前的国家/地区",
+        "value": [
+          {
+            "ig": [
+              {
+                "physicalTotalCount": 7933,
+                "physicalCountForDefaultPrice": 5198,
+                "physicalPriceMap": {
+                  "0.04": 24,
+                  "0.0415": 439,
+                  "0.0419": 3229
+                },
+                "retail_price": 0.2,
+                "country": 6,
+                "price": 0.045,
+                "count": 5477
+              }
+            ]
+          }
+        ]
+      },
+      "topCountriesOneServiceExample": {
+        "summary": "按服务排名靠前的国家/地区表明已成功接收“服务”参数",
+        "value": [
+          {
+            "physicalTotalCount": 7933,
+            "physicalCountForDefaultPrice": 5198,
+            "physicalPriceMap": {
+              "0.04": 24,
+              "0.0415": 439,
+              "0.0419": 3229
+            },
+            "retail_price": 0.2,
+            "country": 6,
+            "price": 0.045,
+            "count": 5477
+          }
+        ]
+      },
+      "successServiceCountRent": {
+        "summary": "数据已成功接收",
+        "value": {
+          "6": {
+            "2": {
+              "count": 25370,
+              "price": 0.18,
+              "retail_price": 0.18
+            },
+            "12": {
+              "count": 400,
+              "price": 0.4568,
+              "retail_price": 0.4568
+            },
+            "48": {
+              "count": 4523,
+              "price": 0.8575,
+              "retail_price": 0.8575
+            }
+          }
+        }
+      },
+      "emptyServiceCountRent": {
+        "summary": "暂无数据",
+        "value": "{}"
+      },
+      "successGetRentServicesAndCountriesExample": {
+        "summary": "数据已成功接收",
+        "value": {
+          "operators": {
+            "1": "tmobile",
+            "2": "three"
+          },
+          "services": {
+            "abc": {
+              "quantity": 2,
+              "price": 0.6,
+              "retail_price": 0.6
+            },
+            "tg": {
+              "quantity": 2,
+              "price": 1.2,
+              "retail_price": 1.2
+            }
+          }
+        }
+      },
+      "successExtendActivationOptionsExample": {
+        "summary": "数据已成功接收",
+        "value": {
+          "data": {
+            "options": [
+              {
+                "duration": {
+                  "value": 2,
+                  "unit": "hour"
+                },
+                "price": 0.2145
+              },
+              {
+                "duration": {
+                  "value": 24,
+                  "unit": "hour"
+                },
+                "price": 1.4324
+              }
+            ]
+          }
+        }
+      },
+      "successGetCountriesExample": {
+        "summary": "国家名单",
+        "value": [
+          {
+            "id": 2,
+            "rus": "Казахстан",
+            "eng": "Kazakhstan",
+            "chn": "哈萨克斯坦",
+            "visible": 1,
+            "retry": 1
+          }
+        ]
+      },
+      "successGetServicesListExample": {
+        "summary": "服务清单",
+        "value": {
+          "status": "success",
+          "services": [
+            {
+              "code": "aoo",
+              "name": "Pegasus Airlines"
+            }
+          ]
+        }
+      },
+      "successfulGetOperatorsExample": {
+        "summary": "运营商名单",
+        "value": {
+          "status": "success",
+          "countryOperators": {
+            "175": [
+              "optus",
+              "vodafone",
+              "telstra",
+              "lebara"
+            ]
+          }
+        }
+      },
+      "operatorsNotFoundExample": {
+        "summary": "未找到运营商",
+        "value": "OPERATORS_NOT_FOUND"
+      },
+      "successfulRentNumberExample": {
+        "summary": "成功获得租赁号码",
+        "value": {
+          "id": "635468024",
+          "phoneNumber": "79584******",
+          "cost": 1.5333,
+          "currency": 840,
+          "lockCancelTime": 120,
+          "endDate": "2022-06-01T22:00:58+30:00",
+          "operator": "mtt"
+        }
+      },
+      "successfulOtpListExample": {
+        "summary": "OTP 列表已成功接收",
+        "value": {
+          "data": [
+            {
+              "id": "3416693217",
+              "phoneFrom": "Telegram",
+              "code": "123456",
+              "text": "Telegram code 123456",
+              "service": "tg",
+              "date": "2026-02-16T12:36:59+03:00",
+              "type": "sms"
+            },
+            {
+              "id": "3416693218",
+              "phoneFrom": "213421421431",
+              "service": "tg",
+              "date": "2026-02-16T12:36:59+03:00",
+              "type": "call"
+            }
+          ]
+        }
+      },
+      "badDurationExample": {
+        "summary": "租赁时间无效",
+        "value": {
+          "title": "BAD_DURATION",
+          "details": "Duration must be integer.",
+          "info": {
+            "min": 2,
+            "max": 720,
+            "intraday": [
+              2,
+              4,
+              12
+            ],
+            "byDays": 24
+          }
+        }
+      },
+      "serviceUnavailableExample": {
+        "summary": "服务不可用",
+        "value": {
+          "title": "SERVICE_NOT_AVAILABLE",
+          "details": "Service not available for sale. Contact the technical support."
+        }
+      },
+      "simOfflineExample": {
+        "summary": "号码不再可用",
+        "value": {
+          "title": "SIM_OFFLINE",
+          "details": "Sim offline."
+        }
+      },
+      "simTemporaryOfflineExample": {
+        "summary": "号码暂时不可用，请稍后再试。",
+        "value": {
+          "title": "SIM_TEMPORARY_OFFLINE",
+          "details": "Sim temporary offline. Try later."
+        }
+      },
+      "maxHoursExceedExample": {
+        "summary": "请求的延长时长超过最大允许限制。",
+        "value": {
+          "title": "MAX_HOURS_EXCEED",
+          "details": "Requested extension duration exceeds the maximum allowed hours.",
+          "info": {
+            "max": 336
+          }
+        }
+      },
+      "activationNotAvailableExample": {
+        "summary": "该操作对提供的激活不可用。",
+        "value": {
+          "title": "ACTION_NOT_AVAILABLE",
+          "details": "Action not available for this activation. Try '/reactivate' method."
+        }
+      },
+      "freezePeriodNotReachedExample": {
+        "summary": "冻结期内无法续租。",
+        "value": {
+          "title": "FREEZE_PERIOD_NOT_REACHED",
+          "details": "Action not available while freeze period is active.",
+          "info": {
+            "retry_after_seconds": 3600,
+            "readable_date": "2026-01-01T10:00:00+00:00"
+          }
+        }
+      },
+      "threadsReachedExample": {
+        "summary": "线程限制",
+        "value": {
+          "title": "CHANNELS_LIMIT",
+          "details": "You have reached the maximum number of concurrent threads (purchases) allowed for your account. Contact the technical support.",
+          "info": {
+            "current_threads": 0,
+            "max_allowed": -1
+          }
+        }
+      },
+      "serviceRestrictedExample": {
+        "summary": "位置不可售",
+        "value": {
+          "title": "SERVICE_NOT_AVAILABLE",
+          "details": "Service not available for sale. Contact the technical support."
+        }
+      },
+      "inactiveAccountExample": {
+        "summary": "需要验证账户",
+        "value": {
+          "title": "ACCOUNT_INACTIVE",
+          "details": "Activate your account"
+        }
+      },
+      "activationFinishedExample": {
+        "summary": "激活已完成",
+        "value": {
+          "title": "FINISHED",
+          "details": "Activation finished."
+        }
+      },
+      "activationRefundedExample": {
+        "summary": "激活费用已退还",
+        "value": {
+          "title": "REFUNDED",
+          "details": "Activation blocked. Funds refunded."
+        }
+      },
+      "activationCanceledExample": {
+        "summary": "激活已取消。费用已退还给您。",
+        "value": {
+          "title": "CANCELED",
+          "details": "Activation canceled."
+        }
+      },
+      "freeCancellationExpiredExample": {
+        "summary": "无法取消激活",
+        "value": {
+          "title": "FREE_CANCELLATION_EXPIRED",
+          "details": "Cannot terminate activation - time limit exceeded (20 minutes)"
+        }
+      },
+      "earlyCancellationExample": {
+        "summary": "无法取消激活",
+        "value": {
+          "title": "EARLY_CANCEL_DENIED",
+          "details": "Activation cannot be cancelled at this time. Minimum activation period must pass.",
+          "info": {
+            "minActivationTime": 120
+          }
+        }
+      },
+      "activationOtpReceivedExample": {
+        "summary": "无法取消激活 - 已收到 otp",
+        "value": {
+          "title": "OTP_RECEIVED",
+          "details": "Cannot terminate activation - OTP has been received on this number"
+        }
+      },
+      "paymentRequiredExample": {
+        "summary": "资金不足",
+        "value": {
+          "title": "NO_BALANCE",
+          "details": "Payment Required"
+        }
+      },
+      "noNumbersExample": {
+        "summary": "没有可售号码",
+        "value": {
+          "title": "NO_NUMBERS",
+          "details": "Numbers Gone. Try Later"
+        }
+      },
+      "activationNotActiveExample": {
+        "summary": "激活未激活",
+        "value": {
+          "title": "ACTIVATION_NOT_ACTIVE",
+          "details": "Activation is terminated/refunded and Otp cannot be retrieved"
+        }
+      },
+      "SAServerErrorExample": {
+        "summary": "内部服务错误",
+        "value": {
+          "title": "SERVER_ERROR",
+          "details": "Server Gone"
+        }
+      },
+      "methodNotFoundExample": {
+        "summary": "方法未找到",
+        "value": {
+          "title": "BAD_ACTION",
+          "details": "Method Not Found"
+        }
+      },
+      "activationNotFoundExample": {
+        "summary": "未找到激活",
+        "value": {
+          "title": "NOT_FOUND",
+          "details": "Activation Not Found"
+        }
+      },
+      "unauthorizedExample": {
+        "summary": "无效的 API 密钥",
+        "value": {
+          "title": "BAD_KEY",
+          "details": "Unauthorized"
+        }
+      },
+      "activationNewOtpReceivedExample": {
+        "summary": "无法完成激活 - 已收到 OTP",
+        "value": {
+          "title": "NEW_OTP_RECEIVED",
+          "details": "Otp was received on this number. Please confirm termination.",
+          "info": {
+            "data": [
+              {
+                "id": "3416693217",
+                "phoneFrom": "Telegram",
+                "code": "123456",
+                "text": "Telegram code 123456",
+                "service": "tg",
+                "date": "2026-02-16T12:36:59+03:00",
+                "type": "sms"
+              },
+              {
+                "id": "3416693218",
+                "phoneFrom": "213421421431",
+                "service": "tg",
+                "date": "2026-02-16T12:36:59+03:00",
+                "type": "call"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "apiKeyAuth": {
+        "type": "apiKey",
+        "description": "格式：ApiKey {your_token}",
+        "name": "Authorization",
+        "in": "header"
+      },
+      "apiKeyQuery": {
+        "type": "apiKey",
+        "name": "api_key",
+        "in": "query"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Emails",
+      "description": "HeroSMS 电子邮件激活"
+    },
+    {
+      "name": "Activations",
+      "description": "HeroSMS OTP 激活"
+    },
+    {
+      "name": "SMS-Activate",
+      "description": "API 与短信激活兼容"
+    },
+    {
+      "name": "Webhooks",
+      "description": "##### 实时事件通知机制。\n购买号码后，无需重复请求激活状态即可接收传入的短信。\n该服务使用 POST 方法将 SMS 内容发送到指定的 HTTPS URL。\n\n最多可同时支持 3 个 Webhook URL。\nURL 在帐户个人信息中指定。\n每个 Webhook 调用都是针对每个指定的 URL 独立执行的。\n- 方法：POST\n- 内容类型：application/json\n- 响应超时：3秒\n- 如果没有响应代码200，则认为调用不成功：\n    - 重试次数 - 至少 7 次\n    - 重试之间的延迟 - 20–30 秒\n    - 尝试总持续时间 - 至少 3 分钟\n\n强烈建议您回复 200 代码，即使短信已在接收方处理完毕。\n\n##### Webhook 请求的源 IP 地址\n为了保证正常的性能，请将以下IP地址添加到白名单中：\n-``84.32.223.53````\n-``185.138.88.87````"
+    }
+  ],
+  "webhooks": {
+    "sms-incoming": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Webhook：传入短信",
+        "description": "该事件在收到传入 SMS 后发送到与活动激活链接的号码",
+        "operationId": "smsIncoming",
+        "requestBody": {
+          "description": "包含有关收到的 SMS 的数据的 JSON",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "required": [
+                  "activationId",
+                  "service",
+                  "text",
+                  "country",
+                  "receivedAt"
+                ],
+                "properties": {
+                  "activationId": {
+                    "$ref": "#/components/schemas/ActivationId"
+                  },
+                  "service": {
+                    "$ref": "#/components/schemas/ServiceId"
+                  },
+                  "text": {
+                    "$ref": "#/components/schemas/SMSText"
+                  },
+                  "code": {
+                    "$ref": "#/components/schemas/SMSCode"
+                  },
+                  "country": {
+                    "$ref": "#/components/schemas/CountryId"
+                  },
+                  "receivedAt": {
+                    "$ref": "#/components/schemas/dateISO8601",
+                    "description": "短信到达时间"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Webhook 成功接收（推荐响应）"
+          },
+          "default": {
+            "description": "Webhook 不被接受，最多重试 7 次"
+          }
+        }
+      }
+    }
+  }
+}

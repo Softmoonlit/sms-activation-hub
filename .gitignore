@@ -1,0 +1,6 @@
+.agents/
+skills-lock.json
+.env
+node_modules/
+dist/
+coverage/
