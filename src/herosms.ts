@@ -53,6 +53,7 @@ export interface HeroSmsActivationRecord {
 
 export interface HeroSmsActivationStatus {
   delivered: boolean;
+  providerStatus?: 'cancelled';
   receivedAt?: Date;
   code?: string;
   text?: string;
@@ -311,6 +312,7 @@ export class HeroSmsHttpAdapter implements HeroSms {
   async activationStatus(activationId: string): Promise<HeroSmsActivationStatus> {
     const value = await this.request('getStatusV2', { id: activationId });
     if (value === 'STATUS_WAIT_CODE') return { delivered: false };
+    if (value === 'STATUS_CANCEL') return { delivered: false, providerStatus: 'cancelled' };
     const fields = objectEntries(value) ? Object.fromEntries(objectEntries(value)!) : undefined;
     const smsFields = fields && objectEntries(fields.sms) ? Object.fromEntries(objectEntries(fields.sms)!) : undefined;
     if (!smsFields) throw new HeroSmsResponseError('response');

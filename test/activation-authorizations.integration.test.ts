@@ -482,6 +482,95 @@ if (!databaseUrl) {
     }
   });
 
+  test('轮询恢复遗漏的异常短信，管理员仅在号码有效窗口内查看正文，后续结构化验证码自动更新', async () => {
+    let now = new Date('2026-08-10T00:00:00.000Z');
+    const activationId = `poll-${randomUUID()}`;
+    let polledCode: string | undefined;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({ activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) }),
+      activationStatus: async () => ({ delivered: true, receivedAt: new Date('2026-08-10T00:03:00.000Z'), text: 'OpenAI unusual delivery body', ...(polledCode ? { code: polledCode } : {}) }),
+    });
+    const opened = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(opened.app);
+      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+
+      now = new Date('2026-08-10T00:03:00.000Z');
+      await opened.app.close();
+      const recovered = await openApplication(heroSms, () => now);
+      try {
+        const recipient = await recovered.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+        assert.match(recipient.body, /短信已收到，暂时无法显示验证码，请联系发送者/);
+        assert.match(recipient.body, /location\.reload/);
+        assert.doesNotMatch(recipient.body, /OpenAI unusual delivery body/);
+
+        const recoveredSession = await login(recovered.app);
+        const home = await recovered.app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: recoveredSession.cookie } });
+        const detailPath = home.body.match(/href="(\/control7\/authorizations\/[0-9a-f-]{36})"/)?.[1]; assert.ok(detailPath);
+        const detail = await recovered.app.inject({ method: 'GET', url: detailPath, headers: { cookie: recoveredSession.cookie } });
+        assert.match(detail.body, /OpenAI unusual delivery body/);
+
+        polledCode = '731904';
+        await recovered.app.close();
+        const structured = await openApplication(heroSms, () => new Date('2026-08-10T00:04:01.000Z'));
+        try {
+          const page = await structured.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+          assert.match(page.body, /731904|复制验证码/);
+        } finally { await structured.app.close(); }
+
+        now = new Date('2026-08-10T00:20:00.001Z');
+        const expired = await openApplication(heroSms, () => now);
+        try {
+          const expiredSession = await login(expired.app);
+          const expiredHome = await expired.app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: expiredSession.cookie } });
+          const expiredDetailPath = expiredHome.body.match(/href="(\/control7\/authorizations\/[0-9a-f-]{36})"/)?.[1]; assert.ok(expiredDetailPath);
+          const detail = await expired.app.inject({ method: 'GET', url: expiredDetailPath, headers: { cookie: expiredSession.cookie } });
+          assert.doesNotMatch(detail.body, /OpenAI unusual delivery body|731904/);
+        } finally { await expired.app.close(); }
+      } finally { await recovered.app.close().catch(() => undefined); }
+    } finally { await opened.app.close().catch(() => undefined); }
+  });
+
+  test('供应商完成失败会持久重试，应用重启后继续且不影响验证码展示', async () => {
+    const now = new Date('2026-08-11T00:00:00.000Z');
+    const activationId = `finish-retry-${randomUUID()}`;
+    let finishCalls = 0;
+    let reconciliationCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({ activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now }),
+      activationStatus: async () => { reconciliationCalls += 1; return { delivered: true, text: 'structured body', code: '482913' }; },
+      finishActivation: async () => { finishCalls += 1; if (finishCalls === 1) throw new HeroSmsResponseError('uncertain'); },
+    });
+    const opened = await openApplication(heroSms, () => now);
+    let token = '';
+    let recipientCookie = '';
+    try {
+      const session = await login(opened.app);
+      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      const claimed = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      await opened.app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload: {
+        activationId, service: 'openai', country: 1, receivedAt: '2026-08-11T00:03:00.000Z', code: '482913', text: 'structured body',
+      } });
+      await new Promise((resolve) => setImmediate(resolve));
+      const page = await opened.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /482913/);
+      assert.equal(finishCalls, 1);
+      assert.equal(reconciliationCalls, 1, '完成结果不明确时应查询供应商状态对账');
+    } finally { await opened.app.close(); }
+
+    const restarted = await openApplication(heroSms, () => now);
+    try {
+      assert.equal(finishCalls, 2, '重启应恢复完成确认任务');
+      const state = await restarted.database.pool.query<{ status: string }>('SELECT status FROM supplier_activations WHERE provider_activation_id = $1', [activationId]);
+      assert.equal(state.rows[0]?.status, 'completed');
+    } finally { await restarted.app.close(); }
+  });
+
   test('管理员撤销待领取授权后，真实链接在 24 小时内显示统一不可用，截止后返回 404', async () => {
     let now = new Date('2026-08-03T00:00:00.000Z');
     const { app } = await openApplication(scriptedHeroSms(), () => now);

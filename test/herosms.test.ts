@@ -246,6 +246,34 @@ test('HeroSMS adapter 读取结构化短信状态并完成供应商激活', asyn
   ]);
 });
 
+test('HeroSMS adapter 解析已结束状态并分类轮询与完成错误响应', async () => {
+  const ended = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response('STATUS_CANCEL'),
+  });
+  assert.deepEqual(await ended.activationStatus('activation-42'), { delivered: false, providerStatus: 'cancelled' });
+
+  const malformedStatus = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response(JSON.stringify({ sms: { code: '482913' } })),
+  });
+  await assert.rejects(malformedStatus.activationStatus('activation-42'), (error: unknown) => {
+    assert.ok(error instanceof HeroSmsResponseError);
+    assert.equal(error.kind, 'response');
+    return true;
+  });
+
+  const uncertainFinish = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => { throw new TypeError('connection reset'); },
+  });
+  await assert.rejects(uncertainFinish.finishActivation('activation-42'), (error: unknown) => {
+    assert.ok(error instanceof HeroSmsResponseError);
+    assert.equal(error.kind, 'uncertain');
+    return true;
+  });
+});
+
 test('HeroSMS adapter 拒绝格式错误的成功响应', async () => {
   const adapter = new HeroSmsHttpAdapter({
     apiKey: 'test-api-key',

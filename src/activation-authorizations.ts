@@ -30,6 +30,19 @@ export interface AuthorizationSummary {
   expiresAt: Date;
 }
 
+export interface AuthorizationDetail {
+  id: string;
+  recipientIdentifier: string;
+  status: AuthorizationSummary['status'];
+  expiresAt: Date;
+  activation?: {
+    countryName: string;
+    status: 'acquisition_confirming' | 'waiting_sms' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed';
+    numberExpiresAt: Date;
+    unrecognizedSmsText?: string;
+  };
+}
+
 export type RecipientAuthorizationState = 'available' | 'claimed' | 'unavailable' | 'not-found';
 
 export interface RecipientAuthorizationView {
@@ -176,6 +189,36 @@ export class ActivationAuthorizations {
     return this.database.revokeUnclaimedAuthorization(id, this.now());
   }
 
+  async detail(id: string): Promise<AuthorizationDetail | undefined> {
+    const result = await this.database.pool.query<{
+      id: string; recipient_identifier: string; authorization_status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired';
+      authorization_expires_at: Date; country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
+      sms_code: string | null; sms_text: string | null;
+    }>(
+      `SELECT auth.id, auth.recipient_identifier, auth.status AS authorization_status, auth.expires_at AS authorization_expires_at,
+              candidate.country_name, activation.status AS activation_status, activation.expires_at AS number_expires_at,
+              activation.sms_code, activation.sms_text
+       FROM activation_authorizations auth
+       LEFT JOIN LATERAL (
+         SELECT * FROM supplier_activations item WHERE item.authorization_id = auth.id ORDER BY item.acquired_at DESC LIMIT 1
+       ) activation ON true
+       LEFT JOIN authorization_candidate_countries candidate
+         ON candidate.authorization_id = auth.id AND candidate.country_id = activation.country_id
+       WHERE auth.id = $1`,
+      [id],
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    const labels = { unclaimed: '待领取', in_progress: '进行中', sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期' } as const;
+    return {
+      id: row.id, recipientIdentifier: row.recipient_identifier, status: labels[row.authorization_status], expiresAt: row.authorization_expires_at,
+      ...(row.country_name && row.activation_status && row.number_expires_at ? { activation: {
+        countryName: row.country_name, status: row.activation_status, numberExpiresAt: row.number_expires_at,
+        ...(!row.sms_code && row.sms_text && row.number_expires_at > this.now() ? { unrecognizedSmsText: row.sms_text } : {}),
+      } } : {}),
+    };
+  }
+
   async recipientState(token: string, sessionToken?: string): Promise<RecipientAuthorizationView> {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { state: 'not-found' };
     const result = await this.database.pool.query<{
@@ -191,7 +234,7 @@ export class ActivationAuthorizations {
               (SELECT count(*) FROM authorization_candidate_countries used WHERE used.authorization_id = auth.id AND used.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status
        FROM activation_authorizations auth
-       LEFT JOIN supplier_activations activation ON activation.authorization_id = auth.id AND activation.status IN ('waiting_sms', 'sms_delivered', 'completion_confirming', 'completed')
+       LEFT JOIN supplier_activations activation ON activation.authorization_id = auth.id AND activation.status IN ('waiting_sms', 'sms_delivered', 'completion_confirming', 'completed', 'manual_reconciliation')
        LEFT JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id AND candidate.country_id = activation.country_id
        LEFT JOIN LATERAL (
          SELECT status FROM number_acquisition_requests request
@@ -246,11 +289,18 @@ export class ActivationAuthorizations {
       if (!inserted.rowCount || current.expires_at <= this.now()) return 'accepted';
       if (current.status === 'waiting_sms') {
         await client.query(
-          `UPDATE supplier_activations SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4
+          `UPDATE supplier_activations SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4, sms_poll_after = NULL
            WHERE id = $1 AND status = 'waiting_sms'`,
           [current.id, event.code ?? null, event.text, event.receivedAt],
         );
         await client.query("UPDATE activation_authorizations SET status = 'sms_delivered' WHERE id = $1 AND status = 'in_progress'", [current.authorization_id]);
+      } else if (event.code && ['completion_confirming', 'completed'].includes(current.status)) {
+        // 轮询可能先取得正文，后续才取得供应商提供的结构化验证码。
+        await client.query(
+          `UPDATE supplier_activations SET sms_code = COALESCE(sms_code, $2), sms_text = COALESCE(sms_text, $3), sms_received_at = COALESCE(sms_received_at, $4), sms_poll_after = NULL
+           WHERE id = $1 AND status IN ('completion_confirming', 'completed')`,
+          [current.id, event.code, event.text, event.receivedAt],
+        );
       }
       return 'accepted';
     });
@@ -276,7 +326,18 @@ export class ActivationAuthorizations {
           "UPDATE supplier_activations SET status = 'completed', completed_at = $2, completion_claimed_at = NULL WHERE id = $1 AND status = 'completion_confirming'",
           [activation.id, this.now()],
         );
-      } catch {
+      } catch (error) {
+        if (error instanceof HeroSmsResponseError && error.kind === 'uncertain') {
+          // 完成请求结果不明确时读取供应商状态；已结束则确认完成，仍可查询短信则保留任务重试。
+          const reconciled = await this.heroSms.activationStatus(activation.provider_activation_id).catch(() => undefined);
+          if (reconciled?.providerStatus === 'cancelled') {
+            await this.database.pool.query(
+              "UPDATE supplier_activations SET status = 'manual_reconciliation', completion_claimed_at = NULL WHERE id = $1 AND status = 'completion_confirming'",
+              [activation.id],
+            );
+            continue;
+          }
+        }
         await this.database.pool.query(
           "UPDATE supplier_activations SET completion_claimed_at = NULL WHERE id = $1 AND status = 'completion_confirming'",
           [activation.id],
@@ -287,10 +348,20 @@ export class ActivationAuthorizations {
   }
 
   async pollWaitingActivations(): Promise<void> {
-    const waiting = await this.database.pool.query<{ provider_activation_id: string; country_id: number }>(
-      "SELECT provider_activation_id, country_id FROM supplier_activations WHERE status = 'waiting_sms' ORDER BY acquired_at",
+    const now = this.now();
+    const polled = await this.database.pool.query<{ provider_activation_id: string; country_id: number }>(
+      `UPDATE supplier_activations SET sms_poll_after = $2
+       WHERE id IN (
+         SELECT id FROM supplier_activations
+         WHERE status IN ('waiting_sms', 'completion_confirming', 'completed')
+           AND expires_at > $1 AND (sms_code IS NULL OR status = 'waiting_sms')
+           AND (sms_poll_after IS NULL OR sms_poll_after <= $1)
+         ORDER BY acquired_at FOR UPDATE SKIP LOCKED
+       )
+       RETURNING provider_activation_id, country_id`,
+      [now, new Date(now.getTime() + 60_000)],
     );
-    for (const activation of waiting.rows) {
+    for (const activation of polled.rows) {
       try {
         const status = await this.heroSms.activationStatus(activation.provider_activation_id);
         if (status.delivered && status.text) {
@@ -683,8 +754,8 @@ export class ActivationAuthorizations {
     const expiresAt = number.activationEndTime ?? new Date(acquiredAt.getTime() + 20 * 60 * 1000);
     await client.query(
       `INSERT INTO supplier_activations
-        (authorization_id, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at)
-       VALUES ($1, $2, $3, 'waiting_sms', $4, $5, $6, $7, $8, $9)`,
+        (authorization_id, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_poll_after)
+       VALUES ($1, $2, $3, 'waiting_sms', $4, $5, $6, $7, $8, $9, $7)`,
       [authorizationId, countryId, number.activationId, number.phoneNumber,
         number.activationCost ?? fallbackPrice, number.currency ?? 'UNKNOWN', acquiredAt,
         new Date(acquiredAt.getTime() + 2 * 60 * 1000), expiresAt],
