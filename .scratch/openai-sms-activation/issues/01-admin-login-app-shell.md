@@ -18,3 +18,4 @@
 
 - 2026-07-31：已实现 Fastify/TypeScript 单体、PostgreSQL 会话持久化和管理员登录骨架。`npm run typecheck`、`npm run build` 与 `npm test` 已运行；本机未配置 PostgreSQL，集成测试明确跳过，需在 Compose 或 CI 中设置 `TEST_DATABASE_URL` 后执行真实数据库验收。
 - 2026-07-31：实现已提交并经双轴代码审查通过。
+- 2026-07-31：PostgreSQL Docker 服务就绪后，使用独立测试库 `sms_website_test` 执行 `TEST_DATABASE_URL=postgres://sms_website:local-development-only@127.0.0.1:5432/sms_website_test node --import tsx --test --test-concurrency=1 test/admin-auth.integration.test.ts`；6 项管理员认证与真实 PostgreSQL 集成测试全部通过。
