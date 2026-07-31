@@ -53,14 +53,15 @@ async function loginMaterial(app: FastifyInstance): Promise<LoginMaterial> {
   return { csrf: csrfValue(response.body), csrfCookie: cookieValue(response, 'admin_csrf') };
 }
 
-async function submitLogin(app: FastifyInstance, material: LoginMaterial, password: string): Promise<InjectionResponse> {
+async function submitLogin(app: FastifyInstance, material: LoginMaterial, password: string, requestOrigin = origin, fetchSite?: string): Promise<InjectionResponse> {
   return app.inject({
     method: 'POST',
     url: `/${config.adminPath}/login`,
     headers: {
       cookie: `admin_csrf=${material.csrfCookie}`,
       'content-type': 'application/x-www-form-urlencoded',
-      origin,
+      origin: requestOrigin,
+      ...(fetchSite ? { 'sec-fetch-site': fetchSite } : {}),
     },
     payload: `csrf=${encodeURIComponent(material.csrf)}&password=${encodeURIComponent(password)}`,
   });
@@ -119,6 +120,16 @@ if (!databaseUrl) {
       assert.equal(loggedOut.statusCode, 303);
       const afterLogout = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: `admin_session=${session.adminCookie}` } });
       assert.match(afterLogout.body, /管理员登录/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('同源表单的 null Origin 仍受 CSRF token 保护并可登录', async () => {
+    const { app } = await openApplication();
+    try {
+      const response = await submitLogin(app, await loginMaterial(app), config.adminPassword, 'null', 'same-origin');
+      assert.equal(response.statusCode, 303);
     } finally {
       await app.close();
     }

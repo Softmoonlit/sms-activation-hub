@@ -116,7 +116,8 @@ function loginFailure(reply: FastifyReply, adminPath: string, statusCode: number
 }
 
 function isSameOrigin(request: FastifyRequest, config: AppConfig): boolean {
-  return request.headers.origin === config.publicOrigin;
+  return request.headers.origin === config.publicOrigin
+    || (request.headers.origin === 'null' && request.headers['sec-fetch-site'] === 'same-origin');
 }
 
 function setLoginCsrf(reply: FastifyReply, csrfToken: string): void {
