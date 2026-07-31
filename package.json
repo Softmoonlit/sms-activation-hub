@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
-    "test": "node --import tsx --test test/**/*.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts"
   },
   "engines": {
     "node": ">=22"
