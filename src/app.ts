@@ -164,9 +164,9 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   const deadline = view.expiresAt!.toISOString();
   const remaining = `<span data-countdown="${deadline}">${escapeHtml(deadline)}</span>`;
   const countdownScript = `<script>(()=>{const element=document.querySelector('[data-countdown]');if(!element)return;const update=()=>{const seconds=Math.max(0,Math.floor((Date.parse(element.dataset.countdown)-Date.now())/1000));const hours=Math.floor(seconds/3600);const minutes=Math.floor(seconds%3600/60);element.textContent=hours+'小时 '+minutes+'分钟';};update();setInterval(update,30000);})();</script>`;
-  const acquisitionForm = `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">获取号码</button></form>`;
+  const acquisitionForm = (label = '获取号码') => `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">${label}</button></form>`;
   if (view.state === 'available') {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm}</section></main>${countdownScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm()}</section></main>${countdownScript}`);
   }
   if (view.state === 'claimed' && view.smsDelivered) {
     const delivery = view.verificationCode
@@ -178,6 +178,9 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   if (view.state === 'claimed' && view.replacementInProgress) {
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在更换号码</p><ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
   }
+  if (view.state === 'claimed' && view.activationTimeoutInProgress) {
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在确认激活超时</p><ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
+  }
   if (view.state === 'claimed' && view.phoneNumber) {
     const e164 = view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`;
     const smsPollingScript = '<script>setTimeout(()=>location.reload(),5000)</script>';
@@ -188,7 +191,11 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     const status = view.acquisitionState === 'manual' ? '号码获取结果待发送者处理' : '正在确认号码获取结果';
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p><p>${status}</p></section></main>${countdownScript}`);
   }
-  const terminalMessage = view.remainingNumberCount === 0 ? '<p>可用号码次数已用尽</p>' : acquisitionForm;
+  const terminalMessage = view.remainingNumberCount === 0
+    ? '<p>可用号码次数已用尽</p>'
+    : view.nextNumberAvailable
+      ? '<p>当前激活已超时。</p>' + acquisitionForm('获取下一个号码')
+      : acquisitionForm();
   return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${terminalMessage}</section></main>${countdownScript}`);
 }
 
@@ -287,6 +294,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   const defaultCandidateLocations = new DefaultCandidateLocations(database, heroSms, config.openAiServiceCode);
   const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, dependencies.now);
   await activationAuthorizations.reconcilePendingRequests();
+  await activationAuthorizations.reconcileTimedOutActivations();
   await activationAuthorizations.reconcileCancellationConfirmations();
   await activationAuthorizations.runPendingReplacementAcquisitions();
   await activationAuthorizations.pollWaitingActivations();
@@ -326,7 +334,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await activationAuthorizations.receiveHeroSmsWebhook({
       activationId, serviceCode, text, countryId, receivedAt, ...(code ? { code } : {}),
     });
-    setImmediate(() => { void activationAuthorizations.finishDeliveredActivations(); });
+    setImmediate(() => { void activationAuthorizations.finishDeliveredActivations().catch(() => undefined); });
     return reply.code(200).send();
   });
 
@@ -564,16 +572,24 @@ export async function createApp(config: AppConfig, database = new Database(confi
     return reply.redirect(adminRoot, 303);
   });
 
+  const runBackgroundTasks = async (): Promise<void> => {
+    await database.expireDueAuthorizations(dependencies.now?.() ?? new Date());
+    await activationAuthorizations.reconcilePendingRequests();
+    // 超时收尾必须先于取消对账，避免刚到二十分钟的取消确认自动创建后继激活。
+    await activationAuthorizations.reconcileTimedOutActivations();
+    await activationAuthorizations.reconcileCancellationConfirmations();
+    await activationAuthorizations.runPendingReplacementAcquisitions();
+    await activationAuthorizations.pollWaitingActivations();
+    await activationAuthorizations.finishDeliveredActivations();
+    await activationAuthorizations.deleteExpiredSensitiveDeliveryData();
+  };
+  let backgroundTasksRunning = false;
   const expirationSweep = setInterval(() => {
-    void Promise.all([
-      database.expireDueAuthorizations(dependencies.now?.() ?? new Date()),
-      activationAuthorizations.reconcilePendingRequests(),
-      activationAuthorizations.reconcileCancellationConfirmations(),
-      activationAuthorizations.runPendingReplacementAcquisitions(),
-      activationAuthorizations.pollWaitingActivations(),
-      activationAuthorizations.finishDeliveredActivations(),
-      activationAuthorizations.deleteExpiredSensitiveDeliveryData(),
-    ]).catch(() => undefined);
+    if (backgroundTasksRunning) return;
+    backgroundTasksRunning = true;
+    void runBackgroundTasks()
+      .catch(() => undefined)
+      .finally(() => { backgroundTasksRunning = false; });
   }, 60_000);
   expirationSweep.unref();
 

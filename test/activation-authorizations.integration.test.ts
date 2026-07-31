@@ -547,6 +547,9 @@ if (!databaseUrl) {
       finishActivation: async () => { finishCalls += 1; if (finishCalls === 1) throw new HeroSmsResponseError('uncertain'); },
     });
     const opened = await openApplication(heroSms, () => now);
+    // 同一隔离数据库中的更早授权也会在启动时恢复；从此处起只观察本用例的供应商完成任务。
+    finishCalls = 0;
+    reconciliationCalls = 0;
     let token = '';
     let recipientCookie = '';
     try {
@@ -565,9 +568,10 @@ if (!databaseUrl) {
       assert.equal(reconciliationCalls, 1, '完成结果不明确时应查询供应商状态对账');
     } finally { await opened.app.close(); }
 
+    const finishCallsBeforeRestart = finishCalls;
     const restarted = await openApplication(heroSms, () => now);
     try {
-      assert.equal(finishCalls, 2, '重启应恢复完成确认任务');
+      assert.ok(finishCalls > finishCallsBeforeRestart, '重启应恢复完成确认任务');
       const state = await restarted.database.pool.query<{ status: string }>('SELECT status FROM supplier_activations WHERE provider_activation_id = $1', [activationId]);
       assert.equal(state.rows[0]?.status, 'completed');
     } finally { await restarted.app.close(); }
@@ -717,8 +721,134 @@ if (!databaseUrl) {
     } finally { await restarted.app.close(); }
   });
 
+  test('激活超时后持久对账退款但不自动获取，接收者可在原浏览器手动获取下一个号码', async () => {
+    let now = new Date('2026-08-14T00:00:00.000Z');
+    const timedOutActivationId = `timeout-${randomUUID()}`;
+    const nextActivationId = `after-timeout-${randomUUID()}`;
+    let getNumberCalls = 0;
+    let refundConfirmed = false;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: getNumberCalls === 1 ? timedOutActivationId : nextActivationId,
+          phoneNumber: getNumberCalls === 1 ? '+14155550123' : '+442079460123',
+          activationCost: 0.8, currency: 'USD', activationTime: now,
+          activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      activationStatus: async (activationId) => {
+        assert.equal(activationId, timedOutActivationId);
+        return { delivered: false, providerStatus: 'cancelled' };
+      },
+      activationHistory: async () => refundConfirmed ? [{
+        activationId: timedOutActivationId, phoneNumber: '+1********23', activationCost: 0,
+        currency: 'USD', activationTime: now, status: '4',
+      }] : [],
+    });
+    const { app: initial } = await openApplication(heroSms, () => now);
+    let token = '';
+    let recipientCookie = '';
+    try {
+      const session = await login(initial);
+      const created = await createAuthorization(initial, session, { recipientIdentifier: randomUUID() });
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      const claimed = await initial.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      now = new Date('2026-08-14T00:19:59.999Z');
+      const justBeforeTimeout = await initial.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(justBeforeTimeout.body, /\+1 415 555 0123/);
+    } finally { await initial.close(); }
+
+    now = new Date('2026-08-14T00:20:00.000Z');
+    const { app: timedOut } = await openApplication(heroSms, () => now);
+    try {
+      assert.equal(getNumberCalls, 1, '激活超时不得在接收者离开页面后自动获取后继号码');
+      const page = await timedOut.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /获取下一个号码/);
+      assert.doesNotMatch(page.body, /\+1 415 555 0123/);
+      const next = await timedOut.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
+      assert.equal(next.statusCode, 303);
+      assert.equal(getNumberCalls, 2, '只有接收者再次点击才获取下一个号码');
+    } finally { await timedOut.close(); }
+
+    refundConfirmed = true;
+    const { app: reconciled } = await openApplication(heroSms, () => now);
+    try {
+      const page = await reconciled.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /\+44 20 7946 0123/, '重启后继续处理退款对账不会改变接收者当前激活');
+    } finally { await reconciled.close(); }
+  });
+
+  test('窗口后的迟到短信不会恢复敏感交付数据，接收者仍可手动获取下一个号码', async () => {
+    let now = new Date('2026-08-15T00:00:00.000Z');
+    const activationId = `timeout-delivered-${randomUUID()}`;
+    let getNumberCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+          activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      activationStatus: async () => ({
+        delivered: true, receivedAt: new Date('2026-08-15T00:20:01.000Z'), text: 'Your code is 482913', code: '482913',
+      }),
+    });
+    const { app: initial } = await openApplication(heroSms, () => now);
+    let token = '';
+    let recipientCookie = '';
+    try {
+      const session = await login(initial);
+      const created = await createAuthorization(initial, session, { recipientIdentifier: randomUUID() });
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      const claimed = await initial.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+    } finally { await initial.close(); }
+
+    now = new Date('2026-08-15T00:20:00.000Z');
+    const { app: restarted } = await openApplication(heroSms, () => now);
+    try {
+      const page = await restarted.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /获取下一个号码/);
+      assert.doesNotMatch(page.body, /482913|Your code is|\+1 415 555 0123/);
+      assert.equal(getNumberCalls, 1);
+    } finally { await restarted.close(); }
+  });
+
+  test('HeroSMS 尚未返回最终状态时，激活超时继续对账而不开放后继号码', async () => {
+    let now = new Date('2026-08-16T06:00:00.000Z');
+    const activationId = `timeout-waiting-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+        activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => ({ delivered: false }),
+    });
+    const { app: initial } = await openApplication(heroSms, () => now);
+    let token = '';
+    let recipientCookie = '';
+    try {
+      const session = await login(initial);
+      const created = await createAuthorization(initial, session, { recipientIdentifier: randomUUID() });
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      const claimed = await initial.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+    } finally { await initial.close(); }
+
+    now = new Date('2026-08-16T06:20:00.000Z');
+    const { app: restarted } = await openApplication(heroSms, () => now);
+    try {
+      const page = await restarted.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /正在确认激活超时/);
+      assert.doesNotMatch(page.body, /获取下一个号码|获取号码/);
+    } finally { await restarted.close(); }
+  });
+
   test('管理员撤销待领取授权后，真实链接在 24 小时内显示统一不可用，截止后返回 404', async () => {
-    let now = new Date('2026-08-03T00:00:00.000Z');
+    let now = new Date('2026-08-18T00:00:00.000Z');
     const { app } = await openApplication(scriptedHeroSms(), () => now);
     try {
       const session = await login(app);
@@ -731,7 +861,7 @@ if (!databaseUrl) {
       assert.equal(unavailable.statusCode, 200);
       assert.match(unavailable.body, /此链接不可用，请联系发送者/);
 
-      now = new Date('2026-08-04T00:00:00.001Z');
+      now = new Date('2026-08-19T00:00:00.001Z');
       const restarted = await openApplication(scriptedHeroSms(), () => now);
       try {
         const stored = await restarted.database.pool.query<{ token_hash: string | null }>('SELECT token_hash FROM activation_authorizations WHERE id = $1', [id]);

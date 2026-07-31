@@ -89,7 +89,7 @@ export class Database {
         authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
         country_id INTEGER NOT NULL,
         provider_activation_id TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'cancelled', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed')),
+        status TEXT NOT NULL CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'cancelled', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed', 'timed_out')),
         phone_number TEXT,
         activation_cost NUMERIC NOT NULL CHECK (activation_cost >= 0),
         currency TEXT NOT NULL,
@@ -102,7 +102,7 @@ export class Database {
 
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_status_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_status_check
-        CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'cancelled', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed'));
+        CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'cancelled', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed', 'timed_out'));
       ALTER TABLE supplier_activations ALTER COLUMN phone_number DROP NOT NULL;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_code TEXT;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_text TEXT;
@@ -111,6 +111,15 @@ export class Database {
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS completion_claimed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_poll_after TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS replacement_pending BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS supplier_cancelled_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timed_out_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS refund_reconciliation_status TEXT NOT NULL DEFAULT 'resolved';
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_final_status_confirmed_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_reconciliation_claimed_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_reconciliation_claim_token TEXT;
+      ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_refund_reconciliation_status_check;
+      ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_refund_reconciliation_status_check
+        CHECK (refund_reconciliation_status IN ('pending', 'resolved'));
 
       DROP INDEX IF EXISTS supplier_activations_current_idx;
       CREATE UNIQUE INDEX supplier_activations_current_idx
@@ -120,6 +129,17 @@ export class Database {
       CREATE INDEX IF NOT EXISTS supplier_activations_replacement_pending_idx
         ON supplier_activations (acquired_at)
         WHERE status = 'cancelled' AND replacement_pending;
+
+      CREATE INDEX IF NOT EXISTS supplier_activations_timeout_reconciliation_idx
+        ON supplier_activations (expires_at)
+        WHERE status = 'timed_out' AND refund_reconciliation_status = 'pending';
+
+      CREATE TABLE IF NOT EXISTS supplier_activation_refunds (
+        supplier_activation_id UUID PRIMARY KEY REFERENCES supplier_activations(id) ON DELETE RESTRICT,
+        amount NUMERIC NOT NULL CHECK (amount >= 0),
+        currency TEXT NOT NULL,
+        confirmed_at TIMESTAMPTZ NOT NULL
+      );
 
       CREATE TABLE IF NOT EXISTS hero_sms_events (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
