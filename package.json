@@ -9,7 +9,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
-    "test": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts",
+    "test:e2e": "playwright test"
   },
   "engines": {
     "node": ">=22"
@@ -22,6 +23,7 @@
     "pg": "^8.13.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^22.10.7",
     "@types/pg": "^8.11.10",
     "tsx": "^4.19.2",

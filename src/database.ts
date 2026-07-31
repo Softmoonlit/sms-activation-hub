@@ -62,6 +62,13 @@ export class Database {
         ON activation_authorizations (normalized_recipient_identifier)
         WHERE status IN ('unclaimed', 'in_progress');
 
+      ALTER TABLE activation_authorizations
+        ADD COLUMN IF NOT EXISTS recipient_session_hash TEXT;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_recipient_session_idx
+        ON activation_authorizations (recipient_session_hash)
+        WHERE recipient_session_hash IS NOT NULL;
+
       CREATE TABLE IF NOT EXISTS authorization_candidate_countries (
         authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
         position SMALLINT NOT NULL CHECK (position BETWEEN 1 AND 3),
@@ -69,9 +76,33 @@ export class Database {
         country_name TEXT NOT NULL,
         quoted_price NUMERIC NOT NULL CHECK (quoted_price >= 0),
         quoted_stock INTEGER NOT NULL CHECK (quoted_stock > 0),
+        used_at TIMESTAMPTZ,
         PRIMARY KEY (authorization_id, position),
         UNIQUE (authorization_id, country_id)
       );
+
+      ALTER TABLE authorization_candidate_countries
+        ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ;
+
+      CREATE TABLE IF NOT EXISTS supplier_activations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
+        country_id INTEGER NOT NULL,
+        provider_activation_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK (status IN ('waiting_sms')),
+        phone_number TEXT NOT NULL,
+        activation_cost NUMERIC NOT NULL CHECK (activation_cost >= 0),
+        currency TEXT NOT NULL,
+        acquired_at TIMESTAMPTZ NOT NULL,
+        cancel_available_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        CHECK (expires_at > acquired_at),
+        CHECK (cancel_available_at >= acquired_at)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS supplier_activations_current_idx
+        ON supplier_activations (authorization_id)
+        WHERE status = 'waiting_sms';
     `);
 
     // 每次进程初始化都使旧 Cookie 失效，避免部署重启后保留管理权限。

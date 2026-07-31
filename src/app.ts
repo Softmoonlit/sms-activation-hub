@@ -5,7 +5,7 @@ import formbody from '@fastify/formbody';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
-import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AuthorizationPreflight, type AuthorizationSummary } from './activation-authorizations.js';
+import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AuthorizationPreflight, type AuthorizationSummary, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
@@ -13,6 +13,7 @@ import { HeroSmsHttpAdapter, type HeroSms } from './herosms.js';
 
 const ADMIN_COOKIE = 'admin_session';
 const CSRF_COOKIE = 'admin_csrf';
+const RECIPIENT_COOKIE = 'recipient_session';
 const HEROSMS_COMPATIBILITY_URL = 'https://hero-sms.com/stubs/handler_api.php';
 
 interface LoginBody {
@@ -78,6 +79,9 @@ function htmlPage(title: string, content: string): string {
     .danger { background: #a12424; }
     .token { overflow-wrap: anywhere; padding: 12px; background: #edf3f1; border-radius: 4px; }
     .recipient { width: min(calc(100% - 32px), 520px); }
+    .number { margin: 12px 0; color: #17202a; font-size: clamp(28px, 8vw, 40px); font-weight: 700; letter-spacing: .02em; overflow-wrap: anywhere; }
+    .facts { display: grid; gap: 10px; margin: 20px 0; padding: 0; list-style: none; color: #53616c; }
+    .recipient button { width: 100%; }
   </style>
 </head>
 <body>${content}</body>
@@ -124,8 +128,28 @@ function authorizationCreatedPage(path: string, csrfToken: string, authorization
   return adminPage('激活授权已创建', '激活授权已创建', path, csrfToken, `/${path}`, '返回首页', content);
 }
 
-function recipientPage(expiresAt: Date): string {
-  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI 短信激活</h1><p>授权有效至 ${escapeHtml(expiresAt.toISOString())}</p><button type="button" disabled>获取号码（后续步骤提供）</button></section></main>`);
+function formatInternationalNumber(value: string): string {
+  const e164 = value.startsWith('+') ? value : `+${value}`;
+  if (/^\+44\d{10}$/.test(e164)) return `${e164.slice(0, 3)} ${e164.slice(3, 5)} ${e164.slice(5, 9)} ${e164.slice(9)}`;
+  if (/^\+1\d{10}$/.test(e164)) return `${e164.slice(0, 2)} ${e164.slice(2, 5)} ${e164.slice(5, 8)} ${e164.slice(8)}`;
+  return e164.replace(/(\d{3})(?=\d)/g, '$1 ').trim();
+}
+
+function recipientPage(token: string, view: RecipientAuthorizationView, message?: string): string {
+  const action = `/a/${encodeURIComponent(token)}/numbers`;
+  const errorMarkup = message ? `<p class="error" role="alert">${escapeHtml(message)}</p>` : '';
+  const deadline = view.expiresAt!.toISOString();
+  const remaining = `<span data-countdown="${deadline}">${escapeHtml(deadline)}</span>`;
+  const countdownScript = `<script>(()=>{const element=document.querySelector('[data-countdown]');if(!element)return;const update=()=>{const seconds=Math.max(0,Math.floor((Date.parse(element.dataset.countdown)-Date.now())/1000));const hours=Math.floor(seconds/3600);const minutes=Math.floor(seconds%3600/60);element.textContent=hours+'小时 '+minutes+'分钟';};update();setInterval(update,30000);})();</script>`;
+  const acquisitionForm = `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">获取号码</button></form>`;
+  if (view.state === 'available') {
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm}</section></main>${countdownScript}`);
+  }
+  if (view.state === 'claimed' && view.phoneNumber) {
+    const e164 = view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`;
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p>${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制号码</button><ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：<time datetime="${view.numberExpiresAt!.toISOString()}">${escapeHtml(view.numberExpiresAt!.toISOString())}</time></li><li>可换号时间：<time datetime="${view.cancelAvailableAt!.toISOString()}">${escapeHtml(view.cancelAvailableAt!.toISOString())}</time></li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}`);
+  }
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm}</section></main>${countdownScript}`);
 }
 
 function unavailableRecipientPage(): string {
@@ -313,10 +337,25 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
 
   app.get<{ Params: { token: string } }>('/a/:token', async (request, reply) => {
-    const result = await activationAuthorizations.recipientState(request.params.token);
+    const result = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage());
-    return reply.type('text/html; charset=utf-8').send(recipientPage(result.expiresAt!));
+    return reply.type('text/html; charset=utf-8').send(recipientPage(request.params.token, result));
+  });
+
+  app.post<{ Params: { token: string } }>('/a/:token/numbers', async (request, reply) => {
+    const result = await activationAuthorizations.claimAndGetNumber(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
+    reply.setCookie(RECIPIENT_COOKIE, result.sessionToken, {
+      httpOnly: true, maxAge: 24 * 60 * 60, path: `/a/${request.params.token}`, sameSite: 'strict', secure: true,
+    });
+    if (result.state === 'claimed') return reply.redirect(`/a/${request.params.token}`, 303);
+    const view = await activationAuthorizations.recipientState(request.params.token, result.sessionToken);
+    const message = result.state === 'no-numbers'
+      ? '当前暂无可用号码，请联系发送者'
+      : '暂时无法获取号码，请联系发送者';
+    return reply.code(result.state === 'no-numbers' ? 409 : 503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, message));
   });
 
   app.get(`${adminRoot}/settings`, async (request, reply) => {

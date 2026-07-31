@@ -49,6 +49,33 @@ test('HeroSMS adapter 查询余额、服务、地区和 OpenAI 报价', async ()
   assert.equal(requests[3]?.searchParams.get('service'), 'aoo');
 });
 
+test('HeroSMS adapter 兼容 getNumber 成功文本与 getNumberV2 JSON 响应', async () => {
+  const responses = [
+    response(example<string>('successfulNumberExample')),
+    response(JSON.stringify(example('successfulNumberv2Example'))),
+  ];
+  const adapter = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key',
+    baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async (input) => {
+      const url = new URL(input.toString());
+      assert.equal(url.searchParams.get('action'), 'getNumberV2');
+      assert.equal(url.searchParams.get('service'), 'openai');
+      assert.equal(url.searchParams.get('country'), '6');
+      return responses.shift()!;
+    },
+  });
+
+  assert.deepEqual(await adapter.getNumber('openai', 6), {
+    activationId: '123456789', phoneNumber: '7*********0',
+  });
+  assert.deepEqual(await adapter.getNumber('openai', 6), {
+    activationId: '635468024', phoneNumber: '79584******', activationCost: 12.5,
+    currency: '840', activationTime: new Date('2026-02-18T16:11:33+00:00'),
+    activationEndTime: new Date('2026-02-18T18:11:23+00:00'),
+  });
+});
+
 test('HeroSMS adapter 将兼容文本和 JSON 错误归类且不包含请求 URL', async () => {
   const textErrorAdapter = new HeroSmsHttpAdapter({
     apiKey: 'secret-key',
@@ -71,6 +98,16 @@ test('HeroSMS adapter 将兼容文本和 JSON 错误归类且不包含请求 URL
     assert.ok(error instanceof HeroSmsResponseError);
     assert.equal(error.kind, 'request');
     assert.doesNotMatch(error.message, /secret-key|hero-sms\.test/);
+    return true;
+  });
+
+  const noNumbersAdapter = new HeroSmsHttpAdapter({
+    apiKey: 'secret-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response(example<string>('numbersNotFoundExample')),
+  });
+  await assert.rejects(noNumbersAdapter.getNumber('openai', 1), (error: unknown) => {
+    assert.ok(error instanceof HeroSmsResponseError);
+    assert.equal(error.kind, 'no-numbers');
     return true;
   });
 });

@@ -1,4 +1,4 @@
-export type HeroSmsErrorKind = 'authentication' | 'provider' | 'request' | 'response';
+export type HeroSmsErrorKind = 'authentication' | 'no-numbers' | 'provider' | 'request' | 'response';
 
 export class HeroSmsResponseError extends Error {
   constructor(readonly kind: HeroSmsErrorKind) {
@@ -22,11 +22,21 @@ export interface HeroSmsQuote {
   stock: number;
 }
 
+export interface HeroSmsNumber {
+  activationId: string;
+  phoneNumber: string;
+  activationCost?: number;
+  currency?: string;
+  activationTime?: Date;
+  activationEndTime?: Date;
+}
+
 export interface HeroSms {
   balance(): Promise<number>;
   services(): Promise<HeroSmsService[]>;
   countries(): Promise<HeroSmsCountry[]>;
   quotes(serviceCode: string): Promise<HeroSmsQuote[]>;
+  getNumber(serviceCode: string, countryId: number): Promise<HeroSmsNumber>;
 }
 
 export interface HeroSmsHttpAdapterOptions {
@@ -39,6 +49,8 @@ function messageFor(kind: HeroSmsErrorKind): string {
   switch (kind) {
     case 'authentication':
       return 'HeroSMS 认证失败';
+    case 'no-numbers':
+      return 'HeroSMS 当前无可用号码';
     case 'request':
       return 'HeroSMS 请求无效';
     case 'provider':
@@ -57,6 +69,9 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 function errorKind(value: unknown): HeroSmsErrorKind | undefined {
+  if (value === 'NO_NUMBERS' || (value && typeof value === 'object' && 'title' in value && value.title === 'NO_NUMBERS')) {
+    return 'no-numbers';
+  }
   if (value === 'NO_KEY' || value === 'BAD_KEY') {
     return 'authentication';
   }
@@ -166,6 +181,41 @@ export class HeroSmsHttpAdapter implements HeroSms {
       }
     }
     return quotes;
+  }
+
+  async getNumber(serviceCode: string, countryId: number): Promise<HeroSmsNumber> {
+    const value = await this.request('getNumberV2', { service: serviceCode, country: countryId.toString() });
+    if (typeof value === 'string') {
+      const match = /^ACCESS_NUMBER:([^:]+):(.+)$/.exec(value);
+      if (!match?.[1] || !match[2]) throw new HeroSmsResponseError('response');
+      return { activationId: match[1], phoneNumber: match[2] };
+    }
+    const entries = objectEntries(value);
+    if (!entries) throw new HeroSmsResponseError('response');
+    const fields = Object.fromEntries(entries);
+    const activationId = nonEmptyString(fields.activationId);
+    const phoneNumber = nonEmptyString(fields.phoneNumber);
+    const activationCost = nonNegativeNumber(fields.activationCost);
+    const currencyValue = fields.currency;
+    const currency = typeof currencyValue === 'number' && Number.isFinite(currencyValue)
+      ? currencyValue.toString()
+      : nonEmptyString(currencyValue);
+    const activationTime = typeof fields.activationTime === 'string' ? new Date(fields.activationTime) : undefined;
+    const activationEndTime = typeof fields.activationEndTime === 'string' ? new Date(fields.activationEndTime) : undefined;
+    if (!activationId || !phoneNumber
+      || (fields.activationCost !== undefined && activationCost === undefined)
+      || (fields.currency !== undefined && !currency)
+      || (activationTime && Number.isNaN(activationTime.getTime()))
+      || (activationEndTime && Number.isNaN(activationEndTime.getTime()))) {
+      throw new HeroSmsResponseError('response');
+    }
+    return {
+      activationId, phoneNumber,
+      ...(activationCost !== undefined ? { activationCost } : {}),
+      ...(currency ? { currency } : {}),
+      ...(activationTime ? { activationTime } : {}),
+      ...(activationEndTime ? { activationEndTime } : {}),
+    };
   }
 
   private async request(action: string, parameters: Record<string, string> = {}): Promise<unknown> {

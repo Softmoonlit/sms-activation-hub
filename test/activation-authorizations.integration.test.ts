@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { createApp } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
-import type { HeroSms } from '../src/herosms.js';
+import { HeroSmsResponseError, type HeroSms, type HeroSmsNumber } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const origin = 'https://test.example';
@@ -17,16 +17,25 @@ const config: AppConfig = {
   port: 3000, publicOrigin: origin, sessionSecret: 'test-session-secret-that-is-at-least-32-characters', trustedProxy: false,
 };
 
-function scriptedHeroSms(overrides: Partial<{ balance: number; stock: number }> = {}): HeroSms {
+function scriptedHeroSms(overrides: Partial<{
+  balance: number;
+  stock: number;
+  quotes: HeroSms['quotes'];
+  getNumber: HeroSms['getNumber'];
+}> = {}): HeroSms {
   return {
     balance: async () => overrides.balance ?? 10,
     services: async () => [{ code: 'openai', name: 'OpenAI' }],
     countries: async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }],
-    quotes: async () => [
+    quotes: overrides.quotes ?? (async () => [
       { countryId: 1, price: 0.8, stock: overrides.stock ?? 3 },
       { countryId: 2, price: 1.2, stock: 2 },
       { countryId: 3, price: 1.5, stock: 1 },
-    ],
+    ]),
+    getNumber: overrides.getNumber ?? (async (_serviceCode, countryId): Promise<HeroSmsNumber> => ({
+      activationId: `activation-${countryId}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+      activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),
+    })),
   };
 }
 
@@ -94,7 +103,7 @@ if (!databaseUrl) {
       const firstGet = await app.inject({ method: 'GET', url: `/a/${token}` });
       const secondGet = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(firstGet.statusCode, 200);
-      assert.match(firstGet.body, /获取号码（后续步骤提供）/);
+      assert.match(firstGet.body, /获取号码/);
       assert.equal(secondGet.statusCode, 200, '链接预览和重复 GET 不应领取授权');
       assert.equal(firstGet.headers['referrer-policy'], 'no-referrer');
       assert.match(String(firstGet.headers['x-robots-tag']), /noindex/);
@@ -125,6 +134,104 @@ if (!databaseUrl) {
         assert.match(response.body, message);
       } finally { await opened.app.close(); }
     }
+  });
+
+  test('首次领取原子绑定浏览器，按实时价格和库存获取号码并可由绑定浏览器恢复', async () => {
+    const fixedNow = new Date('2026-08-01T00:00:00.000Z');
+    const attemptedCountries: number[] = [];
+    const activationId = `act-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      quotes: async () => [
+        { countryId: 1, price: 1.3, stock: 2 },
+        { countryId: 2, price: 0.4, stock: 1 },
+        { countryId: 3, price: 0.9, stock: 3 },
+      ],
+      getNumber: async (_serviceCode, countryId) => {
+        attemptedCountries.push(countryId);
+        if (countryId === 2) throw new HeroSmsResponseError('no-numbers');
+        return {
+          activationId, phoneNumber: '+442079460123', activationCost: 0.9, currency: 'USD',
+          activationTime: fixedNow, activationEndTime: new Date('2026-08-01T00:20:00.000Z'),
+        };
+      },
+    });
+    const { app, database } = await openApplication(heroSms, () => fixedNow);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+
+      const initial = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(initial.body, /OpenAI/);
+      assert.match(initial.body, /data-countdown=.*正在获取号码/);
+      assert.doesNotMatch(initial.body, /美国|英国|法国|HeroSMS|价格|库存/);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      assert.deepEqual(attemptedCountries, [2, 3], '应按实时价格排序，并在明确无库存后尝试下一地区');
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+
+      const numberPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.equal(numberPage.statusCode, 200);
+      assert.match(numberPage.body, /法国|\+44 20 7946 0123/);
+      assert.match(numberPage.body, /data-copy-value="\+442079460123"/);
+      assert.match(numberPage.body, /授权剩余时间|号码有效至|可换号时间|剩余可用号码次数：2/);
+      assert.doesNotMatch(numberPage.body, new RegExp(`${activationId}|HeroSMS|价格|库存`));
+
+      const lostCookie = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(lostCookie.body, /此链接不可用，请联系发送者/);
+      const cannotRebind = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(cannotRebind.statusCode, 409);
+      assert.match(cannotRebind.body, /此链接不可用，请联系发送者/);
+
+      const stored = await database.pool.query<{ used_at: Date | null }>(
+        `SELECT candidate.used_at FROM authorization_candidate_countries candidate
+         WHERE candidate.authorization_id = (SELECT authorization_id FROM supplier_activations WHERE provider_activation_id = $1)
+         ORDER BY candidate.position`,
+        [activationId],
+      );
+      assert.deepEqual(stored.rows.map((row) => row.used_at !== null), [false, false, true], '只有成功取得号码的地区才被消耗');
+    } finally { await app.close(); }
+  });
+
+  test('PostgreSQL 全局串行号码获取，并在调用前重新检查授权期限', async () => {
+    let now = new Date('2026-08-01T00:00:00.000Z');
+    let activeCalls = 0;
+    let maximumActiveCalls = 0;
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let calls = 0;
+    const activationPrefix = randomUUID();
+    const heroSms = scriptedHeroSms({
+      getNumber: async (_serviceCode, countryId) => {
+        calls += 1; activeCalls += 1; maximumActiveCalls = Math.max(maximumActiveCalls, activeCalls);
+        if (calls === 1) await firstBlocked;
+        activeCalls -= 1;
+        return { activationId: `${activationPrefix}-${calls}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) };
+      },
+    });
+    const opened = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(opened.app);
+      const first = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const second = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const firstToken = first.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(firstToken);
+      const secondToken = second.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(secondToken);
+      const firstClaim = opened.app.inject({ method: 'POST', url: `/a/${firstToken}/numbers` });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const secondClaim = opened.app.inject({ method: 'POST', url: `/a/${secondToken}/numbers` });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(calls, 1, '第二个请求应等待 PostgreSQL 全局锁');
+      releaseFirst();
+      assert.equal((await firstClaim).statusCode, 303);
+      assert.equal((await secondClaim).statusCode, 303);
+      assert.equal(maximumActiveCalls, 1);
+
+      const third = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const thirdToken = third.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(thirdToken);
+      now = new Date('2026-08-02T00:00:00.001Z');
+      assert.equal((await opened.app.inject({ method: 'POST', url: `/a/${thirdToken}/numbers` })).statusCode, 404);
+      assert.equal(calls, 2, '截止后不得调用 HeroSMS');
+    } finally { await opened.app.close(); }
   });
 
   test('管理员撤销待领取授权后，真实链接在 24 小时内显示统一不可用，截止后返回 404', async () => {
