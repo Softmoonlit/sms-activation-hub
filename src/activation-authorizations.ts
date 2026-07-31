@@ -42,6 +42,17 @@ export interface RecipientAuthorizationView {
   numberExpiresAt?: Date;
   remainingNumberCount?: number;
   acquisitionState?: 'confirming' | 'manual';
+  smsDelivered?: boolean;
+  verificationCode?: string;
+}
+
+export interface HeroSmsWebhookEvent {
+  activationId: string;
+  serviceCode: string;
+  countryId: number;
+  receivedAt: Date;
+  text: string;
+  code?: string;
 }
 
 export type ClaimResult =
@@ -171,15 +182,16 @@ export class ActivationAuthorizations {
       id: string; status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired';
       expires_at: Date; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
       acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string;
-      acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
+      acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; sms_code: string | null;
     }>(
       `SELECT auth.id, auth.status, auth.expires_at, auth.recipient_session_hash,
               candidate.country_name, activation.phone_number, activation.acquired_at,
               activation.cancel_available_at, activation.expires_at AS number_expires_at,
+              activation.status AS activation_status, activation.sms_code,
               (SELECT count(*) FROM authorization_candidate_countries used WHERE used.authorization_id = auth.id AND used.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status
        FROM activation_authorizations auth
-       LEFT JOIN supplier_activations activation ON activation.authorization_id = auth.id AND activation.status = 'waiting_sms'
+       LEFT JOIN supplier_activations activation ON activation.authorization_id = auth.id AND activation.status IN ('waiting_sms', 'sms_delivered', 'completion_confirming', 'completed')
        LEFT JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id AND candidate.country_id = activation.country_id
        LEFT JOIN LATERAL (
          SELECT status FROM number_acquisition_requests request
@@ -209,7 +221,94 @@ export class ActivationAuthorizations {
       ...(authorization.number_expires_at ? { numberExpiresAt: authorization.number_expires_at } : {}),
       remainingNumberCount: 3 - Number(authorization.used_count),
       ...(authorization.acquisition_status ? { acquisitionState: authorization.acquisition_status === 'manual' ? 'manual' as const : 'confirming' as const } : {}),
+      ...(authorization.activation_status && authorization.activation_status !== 'waiting_sms' ? { smsDelivered: true } : {}),
+      ...(authorization.sms_code ? { verificationCode: authorization.sms_code } : {}),
     };
+  }
+
+  async receiveHeroSmsWebhook(event: HeroSmsWebhookEvent): Promise<'accepted' | 'ignored'> {
+    const payloadDigest = createHash('sha256').update(JSON.stringify({
+      activationId: event.activationId, serviceCode: event.serviceCode, countryId: event.countryId,
+      receivedAt: event.receivedAt.toISOString(), text: event.text, code: event.code ?? null,
+    })).digest('hex');
+    return this.database.transaction(async (client) => {
+      const activation = await client.query<{ id: string; authorization_id: string; country_id: number; status: string; expires_at: Date }>(
+        'SELECT id, authorization_id, country_id, status, expires_at FROM supplier_activations WHERE provider_activation_id = $1 FOR UPDATE',
+        [event.activationId],
+      );
+      const current = activation.rows[0];
+      if (!current || current.country_id !== event.countryId || event.serviceCode !== this.openAiServiceCode) return 'ignored';
+      const inserted = await client.query(
+        `INSERT INTO hero_sms_events (provider_activation_id, received_at, payload_digest, created_at)
+         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+        [event.activationId, event.receivedAt, payloadDigest, this.now()],
+      );
+      if (!inserted.rowCount || current.expires_at <= this.now()) return 'accepted';
+      if (current.status === 'waiting_sms') {
+        await client.query(
+          `UPDATE supplier_activations SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4
+           WHERE id = $1 AND status = 'waiting_sms'`,
+          [current.id, event.code ?? null, event.text, event.receivedAt],
+        );
+        await client.query("UPDATE activation_authorizations SET status = 'sms_delivered' WHERE id = $1 AND status = 'in_progress'", [current.authorization_id]);
+      }
+      return 'accepted';
+    });
+  }
+
+  async finishDeliveredActivations(): Promise<void> {
+    for (;;) {
+      const claimed = await this.database.pool.query<{ id: string; provider_activation_id: string }>(
+        `UPDATE supplier_activations SET completion_claimed_at = $1
+         WHERE id = (
+           SELECT id FROM supplier_activations
+           WHERE status = 'completion_confirming'
+             AND (completion_claimed_at IS NULL OR completion_claimed_at <= $2)
+           ORDER BY sms_received_at LIMIT 1 FOR UPDATE SKIP LOCKED
+         ) RETURNING id, provider_activation_id`,
+        [this.now(), new Date(this.now().getTime() - 5 * 60 * 1000)],
+      );
+      const activation = claimed.rows[0];
+      if (!activation) return;
+      try {
+        await this.heroSms.finishActivation(activation.provider_activation_id);
+        await this.database.pool.query(
+          "UPDATE supplier_activations SET status = 'completed', completed_at = $2, completion_claimed_at = NULL WHERE id = $1 AND status = 'completion_confirming'",
+          [activation.id, this.now()],
+        );
+      } catch {
+        await this.database.pool.query(
+          "UPDATE supplier_activations SET completion_claimed_at = NULL WHERE id = $1 AND status = 'completion_confirming'",
+          [activation.id],
+        );
+        return;
+      }
+    }
+  }
+
+  async pollWaitingActivations(): Promise<void> {
+    const waiting = await this.database.pool.query<{ provider_activation_id: string; country_id: number }>(
+      "SELECT provider_activation_id, country_id FROM supplier_activations WHERE status = 'waiting_sms' ORDER BY acquired_at",
+    );
+    for (const activation of waiting.rows) {
+      try {
+        const status = await this.heroSms.activationStatus(activation.provider_activation_id);
+        if (status.delivered && status.text) {
+          await this.receiveHeroSmsWebhook({
+            activationId: activation.provider_activation_id, serviceCode: this.openAiServiceCode, countryId: activation.country_id,
+            receivedAt: status.receivedAt ?? this.now(), text: status.text, ...(status.code ? { code: status.code } : {}),
+          });
+        }
+      } catch { /* 轮询是 Webhook 的恢复机制，失败留待下次任务。 */ }
+    }
+  }
+
+  async deleteExpiredSensitiveDeliveryData(): Promise<void> {
+    await this.database.pool.query(
+      `UPDATE supplier_activations SET phone_number = NULL, sms_code = NULL, sms_text = NULL
+       WHERE expires_at <= $1 AND (phone_number IS NOT NULL OR sms_code IS NOT NULL OR sms_text IS NOT NULL)`,
+      [this.now()],
+    );
   }
 
   async claimAndGetNumber(token: string, existingSessionToken?: string): Promise<ClaimResult> {

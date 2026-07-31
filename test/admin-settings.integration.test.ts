@@ -16,6 +16,9 @@ const config: AppConfig = {
   adminPath: 'control7',
   databaseUrl: databaseUrl ?? '',
   heroSmsApiKey: 'test-api-key',
+  heroSmsWebhookAllowedIps: ['127.0.0.1'],
+  heroSmsWebhookPath: 'test-webhook-secret-path-1234567890',
+  heroSmsWebhookRequestsPerMinute: 120,
   loginMaxAttempts: 3,
   loginWindowSeconds: 900,
   openAiServiceCode: 'openai',
@@ -43,6 +46,8 @@ const heroSms: HeroSms = {
   getNumber: async () => { throw new Error('设置测试不应获取号码'); },
   activeActivations: async () => [],
   activationHistory: async () => [],
+  activationStatus: async () => ({ delivered: false }),
+  finishActivation: async () => undefined,
 };
 
 type LoginMaterial = { csrf: string; csrfCookie: string };

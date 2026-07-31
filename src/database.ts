@@ -89,8 +89,8 @@ export class Database {
         authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
         country_id INTEGER NOT NULL,
         provider_activation_id TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation')),
-        phone_number TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed')),
+        phone_number TEXT,
         activation_cost NUMERIC NOT NULL CHECK (activation_cost >= 0),
         currency TEXT NOT NULL,
         acquired_at TIMESTAMPTZ NOT NULL,
@@ -102,12 +102,27 @@ export class Database {
 
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_status_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_status_check
-        CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation'));
+        CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed'));
+      ALTER TABLE supplier_activations ALTER COLUMN phone_number DROP NOT NULL;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_code TEXT;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_text TEXT;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_received_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS completion_claimed_at TIMESTAMPTZ;
 
       DROP INDEX IF EXISTS supplier_activations_current_idx;
       CREATE UNIQUE INDEX supplier_activations_current_idx
         ON supplier_activations (authorization_id)
-        WHERE status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation');
+        WHERE status IN ('acquisition_confirming', 'waiting_sms', 'manual_reconciliation', 'sms_delivered', 'completion_confirming');
+
+      CREATE TABLE IF NOT EXISTS hero_sms_events (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        provider_activation_id TEXT NOT NULL,
+        received_at TIMESTAMPTZ NOT NULL,
+        payload_digest TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (provider_activation_id, received_at, payload_digest)
+      );
 
       CREATE TABLE IF NOT EXISTS number_acquisition_requests (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

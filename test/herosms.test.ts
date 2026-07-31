@@ -224,6 +224,28 @@ test('HeroSMS adapter 读取活动激活与历史供号码获取对账', async (
   assert.equal(requests[1]?.searchParams.get('end'), '1771434000');
 });
 
+test('HeroSMS adapter 读取结构化短信状态并完成供应商激活', async () => {
+  const requests: URL[] = [];
+  const adapter = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async (input) => {
+      const url = new URL(input.toString()); requests.push(url);
+      if (url.searchParams.get('action') === 'getStatusV2') {
+        return response(JSON.stringify({ verificationType: 2, sms: { dateTime: '2026-08-01 00:03:00', code: '482913', text: 'Your code is 482913' } }));
+      }
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  assert.deepEqual(await adapter.activationStatus('activation-42'), {
+    delivered: true, receivedAt: new Date('2026-08-01T00:03:00.000Z'), code: '482913', text: 'Your code is 482913',
+  });
+  await adapter.finishActivation('activation-42');
+  assert.deepEqual(requests.map((url) => [url.searchParams.get('action'), url.searchParams.get('id')]), [
+    ['getStatusV2', 'activation-42'], ['finishActivation', 'activation-42'],
+  ]);
+});
+
 test('HeroSMS adapter 拒绝格式错误的成功响应', async () => {
   const adapter = new HeroSmsHttpAdapter({
     apiKey: 'test-api-key',

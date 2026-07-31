@@ -12,20 +12,27 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const origin = 'http://127.0.0.1:32123';
 const config: AppConfig = {
   adminPassword: 'correct-deployment-password', adminPath: 'control7', databaseUrl: databaseUrl ?? '',
-  heroSmsApiKey: 'test-api-key', loginMaxAttempts: 3, loginWindowSeconds: 900, openAiServiceCode: 'openai',
+  heroSmsApiKey: 'test-api-key', heroSmsWebhookAllowedIps: ['127.0.0.1'], heroSmsWebhookPath: 'test-webhook-secret-path-1234567890', heroSmsWebhookRequestsPerMinute: 120,
+  loginMaxAttempts: 3, loginWindowSeconds: 900, openAiServiceCode: 'openai',
   port: 32123, publicOrigin: origin, sessionSecret: `playwright-${randomUUID()}-session-secret`, trustedProxy: false,
 };
+let latestActivationId = '';
 const heroSms: HeroSms = {
   balance: async () => 10,
   services: async () => [{ code: 'openai', name: 'OpenAI' }],
   countries: async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }],
   quotes: async () => [{ countryId: 1, price: 1.2, stock: 1 }, { countryId: 2, price: 0.6, stock: 1 }, { countryId: 3, price: 0.9, stock: 1 }],
-  getNumber: async () => ({
-    activationId: `pw-${randomUUID()}`, phoneNumber: '+442079460123', activationCost: 0.6, currency: 'USD',
-    activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),
-  }),
+  getNumber: async () => {
+    latestActivationId = `pw-${randomUUID()}`;
+    return {
+      activationId: latestActivationId, phoneNumber: '+442079460123', activationCost: 0.6, currency: 'USD',
+      activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),
+    };
+  },
   activeActivations: async () => [],
   activationHistory: async () => [],
+  activationStatus: async () => ({ delivered: false }),
+  finishActivation: async () => undefined,
 };
 
 test.skip(!databaseUrl, '需要 TEST_DATABASE_URL');
@@ -58,6 +65,19 @@ test('移动视口完成领取、浏览器绑定、号码显示和复制', async
     await expect(page.getByText('剩余可用号码次数：2')).toBeVisible();
     await page.getByRole('button', { name: '复制号码' }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('+442079460123');
+
+    const webhook = await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload: {
+      activationId: latestActivationId, service: 'openai', country: 2, receivedAt: '2026-08-01T00:03:00.000Z',
+      code: '482913', text: 'Your code is 482913',
+    } });
+    assert.equal(webhook.statusCode, 200);
+    await page.reload();
+    await expect(page.locator('#verification-code')).toHaveText('482913');
+    await expect(page.getByRole('button', { name: '复制验证码' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '获取号码' })).toHaveCount(0);
+    await expect(page.getByText('可换号时间')).toHaveCount(0);
+    await page.getByRole('button', { name: '复制验证码' }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('482913');
 
     const otherContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const otherPage = await otherContext.newPage();

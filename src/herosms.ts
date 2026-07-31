@@ -51,6 +51,13 @@ export interface HeroSmsActivationRecord {
   status: string;
 }
 
+export interface HeroSmsActivationStatus {
+  delivered: boolean;
+  receivedAt?: Date;
+  code?: string;
+  text?: string;
+}
+
 export interface HeroSms {
   balance(): Promise<number>;
   services(): Promise<HeroSmsService[]>;
@@ -59,6 +66,8 @@ export interface HeroSms {
   getNumber(serviceCode: string, countryId: number): Promise<HeroSmsNumber>;
   activeActivations(): Promise<HeroSmsActivationRecord[]>;
   activationHistory(start: Date, end: Date): Promise<HeroSmsActivationRecord[]>;
+  activationStatus(activationId: string): Promise<HeroSmsActivationStatus>;
+  finishActivation(activationId: string): Promise<void>;
 }
 
 export interface HeroSmsHttpAdapterOptions {
@@ -299,6 +308,23 @@ export class HeroSmsHttpAdapter implements HeroSms {
     };
   }
 
+  async activationStatus(activationId: string): Promise<HeroSmsActivationStatus> {
+    const value = await this.request('getStatusV2', { id: activationId });
+    if (value === 'STATUS_WAIT_CODE') return { delivered: false };
+    const fields = objectEntries(value) ? Object.fromEntries(objectEntries(value)!) : undefined;
+    const smsFields = fields && objectEntries(fields.sms) ? Object.fromEntries(objectEntries(fields.sms)!) : undefined;
+    if (!smsFields) throw new HeroSmsResponseError('response');
+    const code = nonEmptyString(smsFields.code);
+    const text = nonEmptyString(smsFields.text);
+    const receivedAt = dateValue(smsFields.dateTime);
+    if (!text) throw new HeroSmsResponseError('response');
+    return { delivered: true, text, ...(code ? { code } : {}), ...(receivedAt ? { receivedAt } : {}) };
+  }
+
+  async finishActivation(activationId: string): Promise<void> {
+    await this.request('finishActivation', { id: activationId }, [204]);
+  }
+
   async activeActivations(): Promise<HeroSmsActivationRecord[]> {
     const all: HeroSmsActivationRecord[] = [];
     for (let start = 0; ; start += 100) {
@@ -328,7 +354,7 @@ export class HeroSmsHttpAdapter implements HeroSms {
     }
   }
 
-  private async request(action: string, parameters: Record<string, string> = {}): Promise<unknown> {
+  private async request(action: string, parameters: Record<string, string> = {}, emptySuccessStatuses: number[] = []): Promise<unknown> {
     const url = new URL(this.options.baseUrl);
     url.search = new URLSearchParams({ action, api_key: this.options.apiKey, ...parameters }).toString();
 
@@ -345,6 +371,7 @@ export class HeroSmsHttpAdapter implements HeroSms {
       clearTimeout(timeout);
     }
 
+    if (emptySuccessStatuses.includes(response.status) && response.ok) return undefined;
     const value = parseBody(text);
     if (action === 'getNumberV2' && (response.status === 408 || response.status === 504)) {
       throw new HeroSmsResponseError('uncertain');

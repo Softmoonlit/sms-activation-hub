@@ -13,7 +13,8 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const origin = 'https://test.example';
 const config: AppConfig = {
   adminPassword: 'correct-deployment-password', adminPath: 'control7', databaseUrl: databaseUrl ?? '',
-  heroSmsApiKey: 'test-api-key', loginMaxAttempts: 3, loginWindowSeconds: 900, openAiServiceCode: 'openai',
+  heroSmsApiKey: 'test-api-key', heroSmsWebhookAllowedIps: ['127.0.0.1'], heroSmsWebhookPath: 'test-webhook-secret-path-1234567890', heroSmsWebhookRequestsPerMinute: 120,
+  loginMaxAttempts: 3, loginWindowSeconds: 900, openAiServiceCode: 'openai',
   port: 3000, publicOrigin: origin, sessionSecret: 'test-session-secret-that-is-at-least-32-characters', trustedProxy: false,
 };
 
@@ -24,6 +25,8 @@ function scriptedHeroSms(overrides: Partial<{
   getNumber: HeroSms['getNumber'];
   activeActivations: HeroSms['activeActivations'];
   activationHistory: HeroSms['activationHistory'];
+  activationStatus: HeroSms['activationStatus'];
+  finishActivation: HeroSms['finishActivation'];
 }> = {}): HeroSms {
   return {
     balance: async () => overrides.balance ?? 10,
@@ -40,6 +43,8 @@ function scriptedHeroSms(overrides: Partial<{
     })),
     activeActivations: overrides.activeActivations ?? (async () => []),
     activationHistory: overrides.activationHistory ?? (async () => []),
+    activationStatus: overrides.activationStatus ?? (async () => ({ delivered: false })),
+    finishActivation: overrides.finishActivation ?? (async () => undefined),
   };
 }
 
@@ -423,6 +428,56 @@ if (!databaseUrl) {
       const page = await restarted.app.inject({ method: 'GET', url: `/a/${token!}`, headers: { cookie: recipientCookie! } });
       assert.match(page.body, /\+1 415 555 0123/);
     } finally { await restarted.app.close(); }
+  });
+
+  test('受保护 Webhook 持久化结构化验证码、幂等终止后继操作并异步完成供应商激活', async () => {
+    let now = new Date('2026-08-09T00:00:00.000Z');
+    const activationId = `sms-${randomUUID()}`;
+    let finishCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({ activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) }),
+      finishActivation: async (id) => { assert.equal(id, activationId); finishCalls += 1; },
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      const payload = { activationId, service: 'openai', country: 1, receivedAt: '2026-08-09T00:03:00.000Z', code: '482913', text: 'Your code is 482913' };
+
+      assert.equal((await app.inject({ method: 'POST', url: '/wrong-webhook-path', payload })).statusCode, 404);
+      assert.equal((await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, remoteAddress: '192.0.2.10', payload })).statusCode, 404);
+      const delivered = await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload });
+      assert.equal(delivered.statusCode, 200);
+      assert.equal((await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload })).statusCode, 200, '重复投递应幂等成功');
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /验证码|482913|复制验证码/);
+      assert.doesNotMatch(page.body, /换号|获取号码|Your code is/);
+      assert.equal(finishCalls, 1);
+      const state = await database.pool.query<{ authorization_status: string; activation_status: string; events: string }>(
+        `SELECT auth.status AS authorization_status, activation.status AS activation_status,
+                (SELECT count(*) FROM hero_sms_events event WHERE event.provider_activation_id = activation.provider_activation_id)::text AS events
+         FROM supplier_activations activation JOIN activation_authorizations auth ON auth.id = activation.authorization_id
+         WHERE activation.provider_activation_id = $1`, [activationId],
+      );
+      assert.deepEqual(state.rows[0], { authorization_status: 'sms_delivered', activation_status: 'completed', events: '1' });
+
+      now = new Date('2026-08-09T00:20:00.001Z');
+      await app.close();
+      const restarted = await openApplication(heroSms, () => now);
+      try {
+        const sensitive = await restarted.database.pool.query<{ phone_number: string | null; sms_code: string | null; sms_text: string | null }>(
+          'SELECT phone_number, sms_code, sms_text FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
+        );
+        assert.deepEqual(sensitive.rows[0], { phone_number: null, sms_code: null, sms_text: null });
+      } finally { await restarted.app.close(); }
+    } finally {
+      await app.close().catch(() => undefined);
+    }
   });
 
   test('管理员撤销待领取授权后，真实链接在 24 小时内显示统一不可用，截止后返回 404', async () => {

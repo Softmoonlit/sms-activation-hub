@@ -23,6 +23,9 @@ export interface AppConfig {
   adminPath: string;
   databaseUrl: string;
   heroSmsApiKey: string;
+  heroSmsWebhookAllowedIps: string[];
+  heroSmsWebhookPath: string;
+  heroSmsWebhookRequestsPerMinute: number;
   loginMaxAttempts: number;
   loginWindowSeconds: number;
   openAiServiceCode: string;
@@ -64,6 +67,13 @@ export function readConfig(environment = process.env): AppConfig {
     throw new Error('OPENAI_SERVICE_CODE 必须是 1 至 32 位字母或数字');
   }
 
+  const heroSmsWebhookPath = required(environment, 'HEROSMS_WEBHOOK_PATH');
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(heroSmsWebhookPath)) {
+    throw new Error('HEROSMS_WEBHOOK_PATH 必须是 32 至 128 位随机字母、数字、下划线或连字符');
+  }
+  const heroSmsWebhookAllowedIps = required(environment, 'HEROSMS_WEBHOOK_ALLOWED_IPS').split(',').map((value) => value.trim()).filter(Boolean);
+  if (heroSmsWebhookAllowedIps.length === 0) throw new Error('HEROSMS_WEBHOOK_ALLOWED_IPS 至少需要一个来源 IP');
+
   const sessionSecret = required(environment, 'SESSION_SECRET');
   if (sessionSecret.length < 32) {
     throw new Error('SESSION_SECRET 至少需要 32 个字符');
@@ -79,6 +89,9 @@ export function readConfig(environment = process.env): AppConfig {
     adminPath,
     databaseUrl: required(environment, 'DATABASE_URL'),
     heroSmsApiKey: required(environment, 'HEROSMS_API_KEY'),
+    heroSmsWebhookAllowedIps,
+    heroSmsWebhookPath,
+    heroSmsWebhookRequestsPerMinute: positiveInteger(environment.HEROSMS_WEBHOOK_REQUESTS_PER_MINUTE, 120, 'HEROSMS_WEBHOOK_REQUESTS_PER_MINUTE'),
     loginMaxAttempts: positiveInteger(environment.LOGIN_MAX_ATTEMPTS, 5, 'LOGIN_MAX_ATTEMPTS'),
     loginWindowSeconds: positiveInteger(environment.LOGIN_WINDOW_SECONDS, 900, 'LOGIN_WINDOW_SECONDS'),
     openAiServiceCode,

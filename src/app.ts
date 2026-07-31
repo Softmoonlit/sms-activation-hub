@@ -31,6 +31,15 @@ interface SettingsBody extends CsrfBody {
   candidate3?: string;
 }
 
+interface HeroSmsWebhookBody {
+  activationId?: unknown;
+  service?: unknown;
+  text?: unknown;
+  code?: unknown;
+  country?: unknown;
+  receivedAt?: unknown;
+}
+
 interface AuthorizationBody extends CsrfBody {
   recipientIdentifier?: string;
   internalNote?: string;
@@ -149,9 +158,16 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   if (view.state === 'available') {
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm}</section></main>${countdownScript}`);
   }
+  if (view.state === 'claimed' && view.smsDelivered) {
+    const delivery = view.verificationCode
+      ? `<p>验证码</p><p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制验证码</button>`
+      : '<p>短信已收到，暂时无法显示验证码，请联系发送者</p>';
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${delivery}<ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}`);
+  }
   if (view.state === 'claimed' && view.phoneNumber) {
     const e164 = view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`;
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p>${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制号码</button><ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：<time datetime="${view.numberExpiresAt!.toISOString()}">${escapeHtml(view.numberExpiresAt!.toISOString())}</time></li><li>可换号时间：<time datetime="${view.cancelAvailableAt!.toISOString()}">${escapeHtml(view.cancelAvailableAt!.toISOString())}</time></li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}`);
+    const smsPollingScript = '<script>setTimeout(()=>location.reload(),5000)</script>';
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p>${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制号码</button><ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：<time datetime="${view.numberExpiresAt!.toISOString()}">${escapeHtml(view.numberExpiresAt!.toISOString())}</time></li><li>可换号时间：<time datetime="${view.cancelAvailableAt!.toISOString()}">${escapeHtml(view.cancelAvailableAt!.toISOString())}</time></li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
   }
   if (view.state === 'claimed' && view.acquisitionState) {
     const status = view.acquisitionState === 'manual' ? '号码获取结果待发送者处理' : '正在确认号码获取结果';
@@ -251,6 +267,9 @@ export async function createApp(config: AppConfig, database = new Database(confi
   const defaultCandidateLocations = new DefaultCandidateLocations(database, heroSms, config.openAiServiceCode);
   const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, dependencies.now);
   await activationAuthorizations.reconcilePendingRequests();
+  await activationAuthorizations.pollWaitingActivations();
+  await activationAuthorizations.finishDeliveredActivations();
+  await activationAuthorizations.deleteExpiredSensitiveDeliveryData();
   const app = Fastify({ logger: false, trustProxy: config.trustedProxy });
   await app.register(cookie);
   await app.register(formbody);
@@ -262,6 +281,32 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
+
+  const webhookRequests = new Map<string, { minute: number; count: number }>();
+  app.post<{ Body: HeroSmsWebhookBody }>(`/${config.heroSmsWebhookPath}`, { bodyLimit: 16 * 1024 }, async (request, reply) => {
+    if (!config.heroSmsWebhookAllowedIps.includes(request.ip)) return reply.code(404).send();
+    const minute = Math.floor((dependencies.now?.() ?? new Date()).getTime() / 60_000);
+    const rate = webhookRequests.get(request.ip);
+    const count = rate?.minute === minute ? rate.count + 1 : 1;
+    webhookRequests.set(request.ip, { minute, count });
+    if (count > config.heroSmsWebhookRequestsPerMinute) return reply.code(429).send();
+
+    const body = request.body;
+    const activationId = typeof body?.activationId === 'string' && body.activationId.trim() ? body.activationId.trim() : undefined;
+    const serviceCode = typeof body?.service === 'string' && body.service.trim() ? body.service.trim() : undefined;
+    const text = typeof body?.text === 'string' && body.text.length <= 10_000 ? body.text : undefined;
+    const code = typeof body?.code === 'string' && body.code.trim() && body.code.length <= 256 ? body.code.trim() : undefined;
+    const countryId = typeof body?.country === 'number' ? body.country : typeof body?.country === 'string' ? Number(body.country) : NaN;
+    const receivedAt = typeof body?.receivedAt === 'string' ? new Date(body.receivedAt) : new Date(NaN);
+    if (!activationId || !serviceCode || text === undefined || !Number.isSafeInteger(countryId) || countryId < 0 || Number.isNaN(receivedAt.getTime())) {
+      return reply.code(400).send();
+    }
+    await activationAuthorizations.receiveHeroSmsWebhook({
+      activationId, serviceCode, text, countryId, receivedAt, ...(code ? { code } : {}),
+    });
+    setImmediate(() => { void activationAuthorizations.finishDeliveredActivations(); });
+    return reply.code(200).send();
+  });
 
   const adminRoot = `/${config.adminPath}`;
   app.get(adminRoot, async (request, reply) => {
@@ -464,6 +509,9 @@ export async function createApp(config: AppConfig, database = new Database(confi
     void Promise.all([
       database.expireDueAuthorizations(dependencies.now?.() ?? new Date()),
       activationAuthorizations.reconcilePendingRequests(),
+      activationAuthorizations.pollWaitingActivations(),
+      activationAuthorizations.finishDeliveredActivations(),
+      activationAuthorizations.deleteExpiredSensitiveDeliveryData(),
     ]).catch(() => undefined);
   }, 60_000);
   expirationSweep.unref();

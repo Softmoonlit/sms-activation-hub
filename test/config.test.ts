@@ -8,6 +8,8 @@ const environment = {
   ADMIN_PATH: 'control7',
   DATABASE_URL: 'postgres://test:test@localhost:5432/test',
   HEROSMS_API_KEY: 'test-hero-sms-api-key',
+  HEROSMS_WEBHOOK_PATH: 'test-webhook-secret-path-1234567890',
+  HEROSMS_WEBHOOK_ALLOWED_IPS: '127.0.0.1',
   OPENAI_SERVICE_CODE: 'openai',
   PUBLIC_ORIGIN: 'https://test.example',
   SESSION_SECRET: 'test-session-secret-that-is-at-least-32-characters',
