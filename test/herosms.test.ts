@@ -76,6 +76,38 @@ test('HeroSMS adapter 兼容 getNumber 成功文本与 getNumberV2 JSON 响应',
   });
 });
 
+test('HeroSMS adapter 兼容线上地区对象和按服务嵌套的报价对象', async () => {
+  const adapter = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key',
+    baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async (input) => {
+      const action = new URL(input.toString()).searchParams.get('action');
+      if (action === 'getCountries') {
+        return response(JSON.stringify({
+          1: { id: 1, rus: 'Украина', eng: 'Ukraine', chn: '乌克兰', visible: 1 },
+          2: { id: 2, rus: 'Казахстан', eng: 'Kazakhstan', chn: '哈萨克斯坦', visible: 1 },
+        }));
+      }
+      if (action === 'getPrices') {
+        return response(JSON.stringify({
+          1: { dr: { cost: 0.11, count: 1976, physicalCount: 648 } },
+          2: { dr: { cost: 0.055, count: 4641, physicalCount: 0 } },
+        }));
+      }
+      throw new Error(`未预期操作 ${action}`);
+    },
+  });
+
+  assert.deepEqual(await adapter.countries(), [
+    { id: 1, name: '乌克兰' },
+    { id: 2, name: '哈萨克斯坦' },
+  ]);
+  assert.deepEqual(await adapter.quotes('dr'), [
+    { countryId: 1, price: 0.11, stock: 1976 },
+    { countryId: 2, price: 0.055, stock: 4641 },
+  ]);
+});
+
 test('HeroSMS adapter 将兼容文本和 JSON 错误归类且不包含请求 URL', async () => {
   const textErrorAdapter = new HeroSmsHttpAdapter({
     apiKey: 'secret-key',

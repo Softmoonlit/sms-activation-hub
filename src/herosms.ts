@@ -141,10 +141,13 @@ export class HeroSmsHttpAdapter implements HeroSms {
 
   async countries(): Promise<HeroSmsCountry[]> {
     const value = await this.request('getCountries');
-    if (!Array.isArray(value)) {
+    const countryValues = Array.isArray(value)
+      ? value
+      : objectEntries(value)?.map(([, country]) => country);
+    if (!countryValues) {
       throw new HeroSmsResponseError('response');
     }
-    const countries = value.map((country): HeroSmsCountry | undefined => {
+    const countries = countryValues.map((country): HeroSmsCountry | undefined => {
       const entries = objectEntries(country);
       if (!entries) {
         return undefined;
@@ -171,9 +174,13 @@ export class HeroSmsHttpAdapter implements HeroSms {
       }
       for (const [country, quote] of entries) {
         const countryId = Number(country);
-        const fields = objectEntries(quote);
-        const price = fields ? nonNegativeNumber(Object.fromEntries(fields).cost) : undefined;
-        const stock = fields ? nonNegativeNumber(Object.fromEntries(fields).count) : undefined;
+        const quoteFields = objectEntries(quote);
+        const quoteObject = quoteFields ? Object.fromEntries(quoteFields) : undefined;
+        const serviceQuote = quoteObject && objectEntries(quoteObject[serviceCode])
+          ? Object.fromEntries(objectEntries(quoteObject[serviceCode])!)
+          : quoteObject;
+        const price = serviceQuote ? nonNegativeNumber(serviceQuote.cost) : undefined;
+        const stock = serviceQuote ? nonNegativeNumber(serviceQuote.count) : undefined;
         if (!Number.isInteger(countryId) || countryId < 0 || price === undefined || stock === undefined || !Number.isInteger(stock)) {
           throw new HeroSmsResponseError('response');
         }
