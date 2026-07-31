@@ -9,7 +9,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
-    "test": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts",
+    "test": "node --import tsx scripts/run-tests.ts",
+    "test:unit": "node --import tsx --test test/config.test.ts test/herosms.test.ts test/test-database-runner.test.ts",
+    "test:node": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts",
     "test:e2e": "playwright test"
   },
   "engines": {

@@ -80,7 +80,9 @@ async function login(app: FastifyInstance, password = config.adminPassword): Pro
 }
 
 if (!databaseUrl) {
-  test('管理员认证集成测试需要 TEST_DATABASE_URL', { skip: '未设置 PostgreSQL 连接字符串' }, () => {});
+  test('管理员认证集成测试需要 TEST_DATABASE_URL', () => {
+    throw new Error('未设置 TEST_DATABASE_URL；请通过 npm test 运行完整测试');
+  });
 } else {
   test('健康检查可用，公开和常见后台路径均为 404', async () => {
     const { app } = await openApplication();

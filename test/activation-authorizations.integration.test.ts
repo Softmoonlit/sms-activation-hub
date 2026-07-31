@@ -82,7 +82,9 @@ async function createAuthorization(app: FastifyInstance, session: { cookie: stri
 }
 
 if (!databaseUrl) {
-  test('激活授权集成测试需要 TEST_DATABASE_URL', { skip: '未设置 PostgreSQL 连接字符串' }, () => {});
+  test('激活授权集成测试需要 TEST_DATABASE_URL', () => {
+    throw new Error('未设置 TEST_DATABASE_URL；请通过 npm test 运行完整测试');
+  });
 } else {
   test('管理员预检后创建 24 小时待领取授权，完整链接只在创建响应显示且 GET 不领取', async () => {
     const fixedNow = new Date('2026-08-01T00:00:00.000Z');

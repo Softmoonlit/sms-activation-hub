@@ -18,7 +18,21 @@ npm run dev
 
 ```sh
 npm run typecheck
-TEST_DATABASE_URL=postgres://sms_website:local-development-only@127.0.0.1:5432/sms_website npm test
+npm test
 ```
 
-集成测试只接受由 `TEST_DATABASE_URL` 显式指定的真实 PostgreSQL 测试库。未设置该变量时，测试会明确跳过，不会以内存数据库替代持久化行为，也不会意外连接应用运行库。
+`npm test` 会连接 PostgreSQL，创建名称随机的隔离测试数据库，运行完整测试，并在成功或失败后强制删除该数据库。测试不会再复用应用数据库，因此历史授权和未完成对账不会污染后续运行。
+
+本地开发时，如果 `.env` 中的 `DATABASE_URL` 指向 `127.0.0.1`、`localhost` 或 `::1`，测试运行器会复用该服务器连接来创建临时数据库。CI 或远程 PostgreSQL 必须显式设置 `TEST_DATABASE_ADMIN_URL`；该账号需要 `CREATE DATABASE` 和 `DROP DATABASE` 权限。测试运行器拒绝隐式使用远程 `DATABASE_URL`。
+
+其他测试入口：
+
+```sh
+# 不需要 PostgreSQL 的快速测试
+npm run test:unit
+
+# 底层 Node 测试入口，仅供测试运行器或专项排查使用；必须自行提供 TEST_DATABASE_URL
+TEST_DATABASE_URL=postgres://... npm run test:node
+```
+
+缺少 `TEST_DATABASE_URL` 时，数据库集成测试会失败而不是静默跳过，防止不完整的测试结果被误认为全部通过。
