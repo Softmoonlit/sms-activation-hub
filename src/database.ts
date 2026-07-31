@@ -171,6 +171,51 @@ export class Database {
         confirmed_at TIMESTAMPTZ NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS lifecycle_events (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
+        supplier_activation_id UUID REFERENCES supplier_activations(id) ON DELETE RESTRICT,
+        event_kind TEXT NOT NULL,
+        occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS lifecycle_events_authorization_idx
+        ON lifecycle_events (authorization_id, occurred_at);
+
+      CREATE OR REPLACE FUNCTION record_authorization_status_change() RETURNS trigger AS $$
+      BEGIN
+        INSERT INTO lifecycle_events (authorization_id, event_kind)
+        VALUES (NEW.id, 'authorization_status:' || NEW.status);
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION record_supplier_activation_status_change() RETURNS trigger AS $$
+      BEGIN
+        INSERT INTO lifecycle_events (authorization_id, supplier_activation_id, event_kind)
+        VALUES (NEW.authorization_id, NEW.id, 'supplier_activation_status:' || NEW.status);
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION record_number_acquisition_status_change() RETURNS trigger AS $$
+      BEGIN
+        INSERT INTO lifecycle_events (authorization_id, event_kind)
+        VALUES (NEW.authorization_id, 'number_acquisition_status:' || NEW.status);
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS activation_authorization_status_event ON activation_authorizations;
+      CREATE TRIGGER activation_authorization_status_event
+        AFTER INSERT OR UPDATE OF status ON activation_authorizations
+        FOR EACH ROW EXECUTE FUNCTION record_authorization_status_change();
+
+      DROP TRIGGER IF EXISTS supplier_activation_status_event ON supplier_activations;
+      CREATE TRIGGER supplier_activation_status_event
+        AFTER INSERT OR UPDATE OF status ON supplier_activations
+        FOR EACH ROW EXECUTE FUNCTION record_supplier_activation_status_change();
+
       CREATE TABLE IF NOT EXISTS hero_sms_events (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         provider_activation_id TEXT NOT NULL,
@@ -207,6 +252,11 @@ export class Database {
         provider_status TEXT NOT NULL,
         PRIMARY KEY (request_id, provider_activation_id)
       );
+
+      DROP TRIGGER IF EXISTS number_acquisition_status_event ON number_acquisition_requests;
+      CREATE TRIGGER number_acquisition_status_event
+        AFTER INSERT OR UPDATE OF status ON number_acquisition_requests
+        FOR EACH ROW EXECUTE FUNCTION record_number_acquisition_status_change();
     `);
 
     // 每次进程初始化都使旧 Cookie 失效，避免部署重启后保留管理权限。
@@ -300,14 +350,32 @@ export class Database {
     createdAt: Date;
     expiresAt: Date;
     canRevoke: boolean;
+    currentActivationStatus?: string;
+    hasPendingException: boolean;
   }>> {
     await this.expireDueAuthorizations(now);
     const result = await this.pool.query<{
       id: string; recipient_identifier: string; internal_note: string | null;
       status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired'; created_at: Date; expires_at: Date;
+      activation_status: string | null; acquisition_status: string | null; has_pending_exception: boolean;
     }>(
-      `SELECT id, recipient_identifier, internal_note, status, created_at, expires_at
-       FROM activation_authorizations ORDER BY created_at DESC LIMIT 20`,
+      `SELECT auth.id, auth.recipient_identifier, auth.internal_note, auth.status, auth.created_at, auth.expires_at,
+              activation.status AS activation_status, acquisition.status AS acquisition_status,
+              EXISTS (
+                SELECT 1 FROM supplier_activations item
+                WHERE item.authorization_id = auth.id
+                  AND (item.status = 'manual_reconciliation' OR item.refund_reconciliation_status = 'pending')
+              ) AS has_pending_exception
+       FROM activation_authorizations auth
+       LEFT JOIN LATERAL (
+         SELECT status FROM supplier_activations WHERE authorization_id = auth.id ORDER BY acquired_at DESC LIMIT 1
+       ) activation ON true
+       LEFT JOIN LATERAL (
+         SELECT status FROM number_acquisition_requests
+         WHERE authorization_id = auth.id AND status IN ('requesting', 'reconciling', 'manual')
+         ORDER BY requested_at DESC LIMIT 1
+       ) acquisition ON true
+       ORDER BY auth.created_at DESC LIMIT 20`,
     );
     const labels = { unclaimed: '待领取', in_progress: '进行中', sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期' } as const;
     return result.rows.map((row) => ({
@@ -318,6 +386,8 @@ export class Database {
       createdAt: row.created_at,
       expiresAt: row.expires_at,
       canRevoke: ['unclaimed', 'in_progress', 'sms_delivered'].includes(row.status) && row.expires_at > now,
+      ...(row.activation_status ? { currentActivationStatus: row.activation_status } : {}),
+      hasPendingException: row.has_pending_exception || row.acquisition_status === 'reconciling' || row.acquisition_status === 'manual',
     }));
   }
 

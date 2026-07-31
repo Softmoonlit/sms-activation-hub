@@ -1412,4 +1412,74 @@ if (!databaseUrl) {
       assert.equal((await app.inject({ method: 'GET', url: `/a/${'x'.repeat(43)}` })).statusCode, 404);
     } finally { await app.close(); }
   });
+
+  test('管理员首页和详情分别显示授权、供应商状态以及三次激活的净成本', async () => {
+    const now = new Date('2026-09-06T00:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `成本历史-${randomUUID()}`;
+      await createAuthorization(app, session, { recipientIdentifier });
+      const authorization = await database.pool.query<{ id: string }>(
+        'SELECT id FROM activation_authorizations WHERE recipient_identifier = $1', [recipientIdentifier],
+      );
+      const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
+      await database.pool.query("UPDATE activation_authorizations SET status = 'expired', token_hash = NULL WHERE id = $1", [authorizationId]);
+      const activationIds = ['first', 'second', 'third'].map((suffix) => `${suffix}-${randomUUID()}`);
+      for (const [index, activationId] of activationIds.entries()) {
+        await database.pool.query(
+          `INSERT INTO supplier_activations
+             (authorization_id, country_id, provider_activation_id, status, activation_cost, currency, acquired_at, cancel_available_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5, 'USD', $6, $6, $7)`,
+          [authorizationId, index + 1, activationId, index === 2 ? 'waiting_sms' : 'cancelled', [0.8, 1.25, 2][index], new Date(now.getTime() + index), new Date('2026-09-06T00:20:00.000Z')],
+        );
+      }
+      await database.pool.query(
+        'UPDATE authorization_candidate_countries SET used_at = $2 WHERE authorization_id = $1', [authorizationId, now],
+      );
+      await database.pool.query(
+        "UPDATE supplier_activations SET refund_reconciliation_status = 'pending' WHERE provider_activation_id = $1", [activationIds[0]],
+      );
+      await database.pool.query(
+        "UPDATE supplier_activations SET phone_number = '+14155550123', sms_code = '482913' WHERE provider_activation_id = $1", [activationIds[2]],
+      );
+      const activationRows = await database.pool.query<{ id: string }>(
+        'SELECT id FROM supplier_activations WHERE provider_activation_id = $1', [activationIds[0]],
+      );
+      await database.pool.query(
+        "INSERT INTO supplier_activation_refunds (supplier_activation_id, amount, currency, confirmed_at) VALUES ($1, 0.8, 'USD', $2)",
+        [activationRows.rows[0]?.id, now],
+      );
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.match(home.body, /已到期/);
+      assert.match(home.body, /等待短信/);
+      assert.match(home.body, /待处理异常/);
+      assert.doesNotMatch(home.body, /\+14155550123|482913|短信正文/);
+      const eventsBeforeDetail = await database.pool.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM lifecycle_events WHERE authorization_id = $1', [authorizationId],
+      );
+      assert.ok(Number(eventsBeforeDetail.rows[0]?.count) >= 4, '状态变更应留下非敏感生命周期事件');
+
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
+      assert.match(detail.body, /授权状态：已到期/);
+      assert.match(detail.body, /供应商激活/);
+      assert.match(detail.body, /first-/);
+      assert.match(detail.body, /获取时间 2026-09-06T00:00:00\.000Z/);
+      assert.match(detail.body, /已取消/);
+      assert.match(detail.body, /等待短信/);
+      assert.match(detail.body, /候选地区/);
+      assert.match(detail.body, /获取额度：3\/3/);
+      assert.match(detail.body, /累计激活费用：4\.05 USD/);
+      assert.match(detail.body, /已确认退款：0\.80 USD/);
+      assert.match(detail.body, /净成本：3\.25 USD/);
+      assert.match(detail.body, /退款确认待处理/);
+      assert.match(detail.body, /完整号码：<\/strong>\+14155550123/);
+      assert.match(detail.body, /验证码：<\/strong>482913/);
+      const eventsAfterDetail = await database.pool.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM lifecycle_events WHERE authorization_id = $1', [authorizationId],
+      );
+      assert.equal(eventsAfterDetail.rows[0]?.count, eventsBeforeDetail.rows[0]?.count, '读取详情不得写入审计事件');
+    } finally { await app.close(); }
+  });
 }

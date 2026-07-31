@@ -29,6 +29,8 @@ export interface AuthorizationSummary {
   createdAt: Date;
   expiresAt: Date;
   canRevoke: boolean;
+  currentActivationStatus?: string;
+  hasPendingException: boolean;
 }
 
 export interface AuthorizationDetail {
@@ -47,8 +49,22 @@ export interface AuthorizationDetail {
     countryName: string;
     status: 'acquisition_confirming' | 'waiting_sms' | 'cancellation_confirming' | 'cancelled' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed' | 'timed_out';
     numberExpiresAt: Date;
+    phoneNumber?: string;
+    verificationCode?: string;
     unrecognizedSmsText?: string;
   };
+  candidates: Array<{ countryName: string; quotedPrice: number; used: boolean }>;
+  activations: Array<{
+    countryName: string;
+    providerActivationId: string;
+    status: 'acquisition_confirming' | 'waiting_sms' | 'cancellation_confirming' | 'cancelled' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed' | 'timed_out';
+    activationCost: number;
+    currency: string;
+    acquiredAt: Date;
+    refundConfirmed?: number;
+    refundPending: boolean;
+  }>;
+  costs: Array<{ currency: string; activationCost: number; confirmedRefund: number; netCost: number }>;
 }
 
 export type RecipientAuthorizationState = 'available' | 'claimed' | 'unavailable' | 'not-found';
@@ -291,12 +307,12 @@ export class ActivationAuthorizations {
     const result = await this.database.pool.query<{
       id: string; recipient_identifier: string; authorization_status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired';
       authorization_expires_at: Date; country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
-      sms_code: string | null; sms_text: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
+      sms_code: string | null; sms_text: string | null; phone_number: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
       acquisition_country_name: string | null; cancel_available_at: Date | null;
     }>(
       `SELECT auth.id, auth.recipient_identifier, auth.status AS authorization_status, auth.expires_at AS authorization_expires_at,
               candidate.country_name, activation.status AS activation_status, activation.expires_at AS number_expires_at,
-              activation.sms_code, activation.sms_text,
+              activation.phone_number, activation.sms_code, activation.sms_text,
               (SELECT count(*) FROM authorization_candidate_countries candidate WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status, acquisition.country_name AS acquisition_country_name,
               activation.cancel_available_at
@@ -319,6 +335,37 @@ export class ActivationAuthorizations {
     );
     const row = result.rows[0];
     if (!row) return undefined;
+    const [candidateResult, activationResult] = await Promise.all([
+      this.database.pool.query<{ country_name: string; quoted_price: string; used_at: Date | null }>(
+        'SELECT country_name, quoted_price::text, used_at FROM authorization_candidate_countries WHERE authorization_id = $1 ORDER BY position', [id],
+      ),
+      this.database.pool.query<{
+        country_name: string; provider_activation_id: string; status: NonNullable<AuthorizationDetail['activation']>['status']; activation_cost: string; currency: string;
+        acquired_at: Date; refund_amount: string | null; refund_reconciliation_status: 'pending' | 'resolved';
+      }>(
+        `SELECT candidate.country_name, activation.provider_activation_id, activation.status, activation.activation_cost::text, activation.currency, activation.acquired_at,
+                refund.amount::text AS refund_amount, activation.refund_reconciliation_status
+         FROM supplier_activations activation
+         JOIN authorization_candidate_countries candidate
+           ON candidate.authorization_id = activation.authorization_id AND candidate.country_id = activation.country_id
+         LEFT JOIN supplier_activation_refunds refund ON refund.supplier_activation_id = activation.id
+         WHERE activation.authorization_id = $1 ORDER BY activation.acquired_at`, [id],
+      ),
+    ]);
+    const activations = activationResult.rows.map((activation) => ({
+      countryName: activation.country_name, providerActivationId: activation.provider_activation_id, status: activation.status, activationCost: Number(activation.activation_cost),
+      currency: activation.currency, acquiredAt: activation.acquired_at,
+      ...(activation.refund_amount ? { refundConfirmed: Number(activation.refund_amount) } : {}),
+      refundPending: activation.refund_reconciliation_status === 'pending',
+    }));
+    const costsByCurrency = new Map<string, { activationCost: number; confirmedRefund: number }>();
+    for (const activation of activations) {
+      const cost = costsByCurrency.get(activation.currency) ?? { activationCost: 0, confirmedRefund: 0 };
+      cost.activationCost += activation.activationCost;
+      cost.confirmedRefund += activation.refundConfirmed ?? 0;
+      costsByCurrency.set(activation.currency, cost);
+    }
+    const costs = [...costsByCurrency.entries()].map(([currency, cost]) => ({ ...cost, currency, netCost: cost.activationCost - cost.confirmedRefund }));
     const labels = { unclaimed: '待领取', in_progress: '进行中', sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期' } as const;
     const canRevoke = row.authorization_expires_at > this.now() && ['unclaimed', 'in_progress', 'sms_delivered'].includes(row.authorization_status);
     const revocationConsequence = !canRevoke ? undefined
@@ -331,6 +378,9 @@ export class ActivationAuthorizations {
     return {
       id: row.id, recipientIdentifier: row.recipient_identifier, status: labels[row.authorization_status], expiresAt: row.authorization_expires_at,
       acquisitionCount: Number(row.used_count), canRevoke,
+      candidates: candidateResult.rows.map((candidate) => ({ countryName: candidate.country_name, quotedPrice: Number(candidate.quoted_price), used: candidate.used_at !== null })),
+      activations,
+      costs,
       ...(revocationConsequence ? { revocationConsequence } : {}),
       ...(row.acquisition_status && row.acquisition_country_name ? { acquisition: {
         countryName: row.acquisition_country_name,
@@ -338,6 +388,8 @@ export class ActivationAuthorizations {
       } } : {}),
       ...(row.country_name && row.activation_status && row.number_expires_at ? { activation: {
         countryName: row.country_name, status: row.activation_status, numberExpiresAt: row.number_expires_at,
+        ...(row.number_expires_at > this.now() && row.phone_number ? { phoneNumber: row.phone_number } : {}),
+        ...(row.number_expires_at > this.now() && row.sms_code ? { verificationCode: row.sms_code } : {}),
         ...(!row.sms_code && row.sms_text && row.number_expires_at > this.now() ? { unrecognizedSmsText: row.sms_text } : {}),
       } } : {}),
     };
