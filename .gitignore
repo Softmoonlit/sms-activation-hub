@@ -1,4 +1,8 @@
 .agents/
+.scratch/
+AGENTS.md
+docs/agents/
+docs/adr/
 skills-lock.json
 .env
 .env.prod

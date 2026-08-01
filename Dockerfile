@@ -30,6 +30,6 @@ COPY --from=build /app/dist ./dist
 # Run as non-root user
 USER node
 
-EXPOSE 3000
+EXPOSE 3001
 
 CMD ["node", "dist/server.js"]

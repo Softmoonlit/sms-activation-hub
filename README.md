@@ -1,8 +1,19 @@
-# 本地运行
+# 临时短信激活授权平台 (SMS Activation Hub)
+
+基于 Node.js / Fastify / PostgreSQL 开发的轻量级临时短信激活与验证码接收授权系统。支持接码平台（如 HeroSMS）对接与服务代码配置（预置 OpenAI 等服务支持）。
+
+### 核心特性
+- **管理员控制台**：动态生成专属授权链接、指定候选地区、查询授权历史与成本对账、支持隐藏后台路径与密钥轮换。
+- **接收者流程**：接收者无需注册账号，通过私密授权链接领号、实时查看验证码、自动重试与换号，绝对期限（24 小时）安全销毁。
+- **隐私与安全**：根路径及常见后台隐蔽返回 404，敏感数据（号码/验证码/短信全文）在流程结束后自动擦除。
+
+---
+
+## 本地运行
 
 ## 前置条件
 
-需要 Node.js 22+、Docker Compose 和一个支持 HTTPS 的反向代理。管理员密码、会话秘密、HeroSMS API 密钥和 OpenAI 服务代码只放在权限为 `600` 的 `.env` 文件中：
+需要 Node.js 22+、Docker Compose 和一个支持 HTTPS 的反向代理。管理员密码、会话秘密、HeroSMS API 密钥和服务代码只放在权限为 `600` 的 `.env` 文件中：
 
 ```sh
 cp .env.example .env
@@ -12,7 +23,7 @@ npm install
 npm run dev
 ```
 
-开发环境的 PostgreSQL 地址使用 `.env.example` 中的 `DATABASE_URL`。生产环境必须替换 Compose 默认数据库密码、`ADMIN_PASSWORD`、`SESSION_SECRET`、`HEROSMS_API_KEY`，并将 `OPENAI_SERVICE_CODE` 填为已通过 HeroSMS 服务列表确认的 OpenAI 服务代码；应用和日志不会输出 API 密钥或供应商请求 URL。还需为实际反向代理配置 `TRUSTED_PROXY` 的 IP 或 CIDR；应用仅信任这些代理传递的客户端地址。通过反向代理将 HTTPS 转发到应用端口。应用只在 `/$ADMIN_PATH` 提供管理员入口；根路径与常见后台路径故意返回 `404`。
+开发环境的 PostgreSQL 地址使用 `.env.example` 中的 `DATABASE_URL`。生产环境必须替换 Compose 默认数据库密码、`ADMIN_PASSWORD`、`SESSION_SECRET`、`HEROSMS_API_KEY`，并将 `OPENAI_SERVICE_CODE` 填为已通过 HeroSMS 服务列表确认的服务代码（如 OpenAI 对应的代码）；应用和日志不会输出 API 密钥或供应商请求 URL。还需为实际反向代理配置 `TRUSTED_PROXY` 的 IP 或 CIDR；应用仅信任这些代理传递的客户端地址。通过反向代理将 HTTPS 转发到应用端口。应用只在 `/$ADMIN_PATH` 提供管理员入口；根路径与常见后台路径故意返回 `404`。
 
 ## 验证
 
@@ -55,8 +66,8 @@ TEST_DATABASE_URL=postgres://... npx playwright test
 ### 1. 克隆代码
 
 ```sh
-git clone <repo-url> /opt/sms-website
-cd /opt/sms-website
+git clone <repo-url> /opt/sms-activation-hub
+cd /opt/sms-activation-hub
 ```
 
 ### 2. 准备配置文件
@@ -88,7 +99,7 @@ sudo apt install -y caddy
 
 ```caddy
 sms.example.com {
-    reverse_proxy localhost:3000
+    reverse_proxy localhost:3001
 }
 ```
 
@@ -120,10 +131,10 @@ docker compose -f compose.prod.yaml logs -f
 ```sh
 # 验证应用在容器网络内正常响应
 docker compose -f compose.prod.yaml ps          # 检查 Status 为 healthy
-curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/
 # 期望：404（根路径故意返回 404）
 
-curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/health
 # 期望：200
 ```
 
@@ -132,7 +143,7 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health
 ## 更新应用
 
 ```sh
-cd /opt/sms-website
+cd /opt/sms-activation-hub
 git pull origin main
 docker compose -f compose.prod.yaml up -d --build
 ```
@@ -205,7 +216,7 @@ docker compose -f compose.prod.yaml up -d
 
 ## 数据持久化
 
-数据库数据保存在 Docker named volume `sms-website_postgres-data` 中，`docker compose down` 不会删除它。如需彻底清除：
+数据库数据保存在 Docker named volume `sms-activation-hub_postgres-data` 中，`docker compose down` 不会删除它。如需彻底清除：
 
 ```sh
 docker compose -f compose.prod.yaml down -v  # 危险：删除数据库数据

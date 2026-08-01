@@ -15,7 +15,7 @@ const config: AppConfig = {
   adminPassword: 'correct-deployment-password', adminPath: 'control7', databaseUrl: databaseUrl ?? '',
   heroSmsApiKey: 'test-api-key', heroSmsWebhookAllowedIps: ['127.0.0.1'], heroSmsWebhookPath: 'test-webhook-secret-path-1234567890', heroSmsWebhookRequestsPerMinute: 120,
   loginMaxAttempts: 3, loginWindowSeconds: 900, openAiServiceCode: 'openai',
-  port: 3000, publicOrigin: origin, sessionSecret: 'test-session-secret-that-is-at-least-32-characters', trustedProxy: false,
+  port: 3001, publicOrigin: origin, sessionSecret: 'test-session-secret-that-is-at-least-32-characters', trustedProxy: false,
 };
 
 function scriptedHeroSms(overrides: Partial<{

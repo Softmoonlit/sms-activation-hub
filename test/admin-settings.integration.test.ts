@@ -22,7 +22,7 @@ const config: AppConfig = {
   loginMaxAttempts: 3,
   loginWindowSeconds: 900,
   openAiServiceCode: 'openai',
-  port: 3000,
+  port: 3001,
   publicOrigin: origin,
   sessionSecret: 'test-session-secret-that-is-at-least-32-characters',
   trustedProxy: false,

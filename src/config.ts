@@ -95,7 +95,7 @@ export function readConfig(environment = process.env): AppConfig {
     loginMaxAttempts: positiveInteger(environment.LOGIN_MAX_ATTEMPTS, 5, 'LOGIN_MAX_ATTEMPTS'),
     loginWindowSeconds: positiveInteger(environment.LOGIN_WINDOW_SECONDS, 900, 'LOGIN_WINDOW_SECONDS'),
     openAiServiceCode,
-    port: positiveInteger(environment.PORT, 3000, 'PORT'),
+    port: positiveInteger(environment.PORT, 3001, 'PORT'),
     publicOrigin: required(environment, 'PUBLIC_ORIGIN'),
     sessionSecret,
     trustedProxy: trustedProxy.length > 0 ? trustedProxy : false,
