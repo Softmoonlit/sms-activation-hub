@@ -81,6 +81,19 @@ function htmlPage(title: string, content: string): string {
     input, select, textarea { box-sizing: border-box; width: 100%; min-height: 40px; border: 1px solid #9daab2; border-radius: 4px; padding: 8px 10px; font: inherit; }
     textarea { min-height: 88px; resize: vertical; }
     select { background: #fff; }
+    .cb { position: relative; }
+    .cb-input { box-sizing: border-box; width: 100%; min-height: 40px; border: 1px solid #9daab2; border-radius: 4px; padding: 8px 36px 8px 10px; font: inherit; background: #fff; cursor: text; transition: border-color 0.15s, box-shadow 0.15s; }
+    .cb-input:focus { outline: none; border-color: #117a65; box-shadow: 0 0 0 3px #117a6520; }
+    .cb-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 20px; height: 20px; border: none; background: none; padding: 0; margin: 0; cursor: pointer; color: #9daab2; font-size: 15px; line-height: 1; display: none; align-items: center; justify-content: center; border-radius: 50%; }
+    .cb-clear:hover { background: #f0f0f0; color: #53616c; }
+    .cb-input.cb-selected ~ .cb-clear { display: flex; }
+    .cb-list { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 200; background: #fff; border: 1px solid #9daab2; border-radius: 4px; box-shadow: 0 4px 12px #17202a18; max-height: 220px; overflow-y: auto; display: none; list-style: none; margin: 0; padding: 0; }
+    .cb-list.cb-open { display: block; }
+    .cb-opt { padding: 9px 12px; font-size: 14px; cursor: pointer; border-bottom: 1px solid #f0f2f3; }
+    .cb-opt:last-child { border-bottom: none; }
+    .cb-opt:hover, .cb-opt.cb-active { background: #edf3f1; }
+    .cb-hl { color: #0f6655; font-weight: 700; }
+    .cb-empty { padding: 12px; color: #9daab2; font-size: 13px; text-align: center; }
     button { margin-top: 20px; min-height: 40px; border: 0; border-radius: 4px; padding: 8px 16px; background: #117a65; color: #fff; font: inherit; font-weight: 600; cursor: pointer; transition: background 0.2s ease; }
     button.copied { background: #27ae60 !important; }
     .error { margin: 0 0 16px; color: #a12424; font-size: 14px; }
@@ -261,14 +274,25 @@ function escapeHtml(value: string): string {
 }
 
 function settingsPage(path: string, csrfToken: string, settings: CandidateLocationSettings, error?: string): string {
-  const optionMarkup = (selectedId: number | undefined) => settings.locations.map((location) => {
-    const selected = location.id === selectedId ? ' selected' : '';
-    const quote = location.price === undefined || location.stock === undefined ? '暂无报价' : `价格 ${location.price.toString()}，库存 ${location.stock}`;
-    return `<option value="${location.id}"${selected}>${escapeHtml(location.name)}，${quote}</option>`;
+  // Serialise locations once as a JSON array embedded in the page script.
+  // Each entry: [id, displayName] — displayName includes price/stock so it matches the old option text.
+  const locationsJson = JSON.stringify(settings.locations.map((l) => {
+    const quote = l.price === undefined || l.stock === undefined ? '暂无报价' : `价格 ${l.price.toString()}，库存 ${l.stock}`;
+    return [l.id, `${l.name}，${quote}`];
+  }));
+  const initialIds = JSON.stringify(settings.configuredCountryIds.map((id) => id ?? null));
+  const comboboxes = [0, 1, 2].map((position) => {
+    const selectedId = settings.configuredCountryIds[position];
+    const selectedLocation = selectedId !== undefined ? settings.locations.find((l) => l.id === selectedId) : undefined;
+    const selectedName = selectedLocation
+      ? escapeHtml(`${selectedLocation.name}，${selectedLocation.price === undefined || selectedLocation.stock === undefined ? '暂无报价' : `价格 ${selectedLocation.price.toString()}，库存 ${selectedLocation.stock}`}`)
+      : '';
+    const inputClass = selectedName ? ' cb-selected' : '';
+    return `<label>候选地区 ${position + 1}<div class="cb" id="cb${position}"><input class="cb-input${inputClass}" type="text" value="${selectedName}" placeholder="输入地区名称搜索并选择…" autocomplete="off" aria-label="候选地区 ${position + 1}" aria-haspopup="listbox"><button type="button" class="cb-clear" tabindex="-1" title="清除选择">✕</button><input type="hidden" name="candidate${position + 1}" value="${selectedId ?? ''}"><ul class="cb-list" role="listbox"></ul></div></label>`;
   }).join('');
-  const selects = [0, 1, 2].map((position) => `<label>候选地区 ${position + 1}<select name="candidate${position + 1}" required><option value="" disabled${settings.configuredCountryIds[position] === undefined ? ' selected' : ''}>请选择地区</option>${optionMarkup(settings.configuredCountryIds[position])}</select></label>`).join('');
+  const comboboxScript = `<script>(()=>{const LOCS=${locationsJson};const INIT=${initialIds};function esc(s){return s.replace(/[&<>'"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'})[c]??c);}function hl(text,q){if(!q)return esc(text);const i=text.toLowerCase().indexOf(q.toLowerCase());if(i<0)return esc(text);return esc(text.slice(0,i))+'<span class="cb-hl">'+esc(text.slice(i,i+q.length))+'</span>'+esc(text.slice(i+q.length));}function init(idx){const wrap=document.getElementById('cb'+idx);const inp=wrap.querySelector('.cb-input');const clr=wrap.querySelector('.cb-clear');const hid=wrap.querySelector('input[type=hidden]');const list=wrap.querySelector('.cb-list');let selId=INIT[idx];let selName=selId!=null?(LOCS.find(l=>l[0]===selId)||[null,''])[1]:'';let activeIdx=-1;function render(q){list.innerHTML='';activeIdx=-1;const matched=LOCS.filter(l=>!q||l[1].toLowerCase().includes(q.toLowerCase()));if(!matched.length){list.innerHTML='<li class="cb-empty">无匹配地区</li>';}else{matched.forEach((l,i)=>{const li=document.createElement('li');li.className='cb-opt';li.setAttribute('role','option');li.dataset.id=l[0];li.dataset.name=l[1];li.innerHTML=hl(l[1],q);li.addEventListener('mousedown',e=>{e.preventDefault();pick(l[0],l[1]);});list.appendChild(li);});}list.classList.add('cb-open');}function pick(id,name){selId=id;selName=name;hid.value=id;inp.value=name;inp.classList.add('cb-selected');list.classList.remove('cb-open');}function clear(){selId=null;selName='';hid.value='';inp.value='';inp.classList.remove('cb-selected');list.classList.remove('cb-open');inp.focus();}inp.addEventListener('focus',()=>render(inp.classList.contains('cb-selected')?'':inp.value));inp.addEventListener('input',()=>{if(inp.classList.contains('cb-selected')&&inp.value!==selName){inp.classList.remove('cb-selected');hid.value='';selId=null;}render(inp.value);});inp.addEventListener('blur',()=>{setTimeout(()=>{list.classList.remove('cb-open');if(selId&&inp.value!==selName){inp.value=selName;inp.classList.add('cb-selected');}else if(!selId){inp.value='';inp.classList.remove('cb-selected');}},150);});inp.addEventListener('keydown',e=>{const opts=[...list.querySelectorAll('.cb-opt')];if(e.key==='ArrowDown'){e.preventDefault();activeIdx=Math.min(activeIdx+1,opts.length-1);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='ArrowUp'){e.preventDefault();activeIdx=Math.max(activeIdx-1,0);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='Enter'&&activeIdx>=0&&opts[activeIdx]){e.preventDefault();const o=opts[activeIdx];pick(Number(o.dataset.id),o.dataset.name);}else if(e.key==='Escape'){list.classList.remove('cb-open');inp.blur();}});clr.addEventListener('click',clear);}[0,1,2].forEach(init);document.addEventListener('click',e=>{if(!e.target.closest('.cb'))document.querySelectorAll('.cb-list').forEach(l=>l.classList.remove('cb-open'));});})();<\/script>`;
   const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
-  return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', `<section class="settings"><p><strong>HeroSMS 已连接</strong></p><p>余额：${settings.balance.toFixed(2)}</p>${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}">${selects}<button type="submit">保存默认候选地区</button></form></section>`);
+  return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', `<section class="settings"><p><strong>HeroSMS 已连接</strong></p><p>余额：${settings.balance.toFixed(2)}</p>${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}">${comboboxes}<button type="submit">保存默认候选地区</button></form></section>${comboboxScript}`);
 }
 
 function settingsUnavailablePage(path: string, csrfToken: string): string {
