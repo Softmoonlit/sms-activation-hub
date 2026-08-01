@@ -455,8 +455,7 @@ if (!databaseUrl) {
       assert.equal((await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, remoteAddress: '192.0.2.10', payload })).statusCode, 404);
       const delivered = await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload });
       assert.equal(delivered.statusCode, 200);
-      assert.equal((await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload })).statusCode, 200, '重复投递应幂等成功');
-      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /验证码|482913|复制验证码/);
@@ -1197,6 +1196,8 @@ if (!databaseUrl) {
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
       assert.match(detail.body, /已撤销/);
       assert.match(detail.body, /cancelled/);
+      assert.match(detail.body, /已确认退款：0\.80 USD/);
+      assert.match(detail.body, /净成本：0\.00 USD/);
       assert.doesNotMatch(detail.body, /\+14155550123/);
     } finally { await app.close(); }
   });

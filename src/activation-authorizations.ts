@@ -947,9 +947,11 @@ export class ActivationAuthorizations {
     return this.database.transaction(async (client) => {
       const result = await client.query<{
         id: string; authorization_id: string; replacement_pending: boolean; authorization_status: string; authorization_expires_at: Date;
+        activation_cost: string; currency: string;
       }>(
         `SELECT activation.id, activation.authorization_id, activation.replacement_pending,
-                auth.status AS authorization_status, auth.expires_at AS authorization_expires_at
+                auth.status AS authorization_status, auth.expires_at AS authorization_expires_at,
+                activation.activation_cost::text, activation.currency
          FROM supplier_activations activation
          JOIN activation_authorizations auth ON auth.id = activation.authorization_id
          WHERE activation.provider_activation_id = $1 AND activation.status = 'cancellation_confirming'
@@ -971,6 +973,11 @@ export class ActivationAuthorizations {
              authorization_revocation_cancellation_retry_after = NULL
          WHERE id = $1`,
         [activation.id, this.now(), replacementAllowed],
+      );
+      await client.query(
+        `INSERT INTO supplier_activation_refunds (supplier_activation_id, amount, currency, confirmed_at)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (supplier_activation_id) DO NOTHING`,
+        [activation.id, activation.activation_cost, activation.currency, this.now()],
       );
       return { authorizationId: activation.authorization_id, replacementAllowed };
     });
