@@ -86,10 +86,9 @@ function htmlPage(title: string, content: string): string {
     .error { margin: 0 0 16px; color: #a12424; font-size: 14px; }
     .shell { width: min(calc(100% - 48px), 1000px); }
     .shell header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d7dde1; padding-bottom: 16px; gap: 16px; }
-    .shell h1 { margin: 0; }
-    .header-actions { display: flex; align-items: center; gap: 16px; }
-    .header-actions nav a { color: #0f6655; font-size: 14px; font-weight: 600; text-decoration: none; padding: 6px 12px; border-radius: 4px; background: #edf3f1; transition: background 0.2s ease; }
-    .header-actions nav a:hover { background: #dcebe6; }
+    .shell h1 { margin: 0; font-size: 22px; font-weight: 650; }
+    nav a { color: #0f6655; font-size: 14px; font-weight: 600; text-decoration: none; padding: 6px 12px; border-radius: 4px; background: #edf3f1; transition: background 0.2s ease; }
+    nav a:hover { background: #dcebe6; }
     .shell form button { margin: 0; background: #52616b; }
     .settings { max-width: 560px; padding: 32px 0; }
     .settings form { display: grid; gap: 16px; }
@@ -131,7 +130,7 @@ function loginPage(path: string, csrfToken: string, error?: string): string {
 }
 
 function adminPage(title: string, heading: string, path: string, csrfToken: string, navigationPath: string, navigationLabel: string, content: string): string {
-  return htmlPage(title, `<main class="shell"><header><h1>${heading}</h1><div class="header-actions"><nav><a href="${navigationPath}">${navigationLabel}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></div></header>${content}</main>`);
+  return htmlPage(title, `<main class="shell"><header><h1>${heading}</h1><nav><a href="${navigationPath}">${navigationLabel}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
 }
 
 function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
@@ -141,7 +140,7 @@ function adminShell(path: string, csrfToken: string, authorizations: Authorizati
     const candidates = request.candidates.map((candidate) => `<li>激活 ID ${escapeHtml(candidate.activationId)}${candidate.countryId !== undefined ? `，地区 ${candidate.countryId}` : ''}${candidate.activationTime ? `，时间 ${escapeHtml(candidate.activationTime.toISOString())}` : ''}<form method="post" action="/${path}/acquisition-requests/${request.id}/candidates/${encodeURIComponent(candidate.activationId)}/link"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">关联此供应商激活</button></form></li>`).join('');
     return `<article class="authorization"><p><strong>${escapeHtml(request.recipientIdentifier)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(request.requestedAt.toISOString())}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
   }).join('')}</section>`;
-  const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>创建激活授权</h2><p>填写接收者标识和可选内部备注，下一步将执行 HeroSMS 预检并显示确认汇总。</p><form method="post" action="/${path}/authorizations/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>接收者标识<input name="recipientIdentifier" required maxlength="200"></label><label>内部备注（可选）<textarea name="internalNote" maxlength="2000"></textarea></label><button type="submit">预检并确认</button></form></section><section class="card"><h2>最近激活授权</h2>${recent}</section></section>`;
+  const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>创建激活授权</h2><p>填写接收者标识，下一步将执行 HeroSMS 预检并显示确认汇总。</p><form method="post" action="/${path}/authorizations/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>接收者标识<input name="recipientIdentifier" required maxlength="200"></label><button type="submit">预检并确认</button></form></section><section class="card"><h2>最近激活授权</h2>${recent}</section></section>`;
   return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', content);
 }
 
