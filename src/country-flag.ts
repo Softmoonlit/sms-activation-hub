@@ -123,6 +123,26 @@ export function countryFlag(name?: string): string {
   return '🌐';
 }
 
+export function isoCodeFromEmoji(emoji: string): string | undefined {
+  const chars = [...emoji];
+  if (chars.length !== 2) return undefined;
+  const code0 = chars[0].codePointAt(0);
+  const code1 = chars[1].codePointAt(0);
+  if (!code0 || !code1) return undefined;
+  if (code0 >= 0x1F1E6 && code0 <= 0x1F1FF && code1 >= 0x1F1E6 && code1 <= 0x1F1FF) {
+    return String.fromCharCode(code0 - 0x1F1E6 + 65, code1 - 0x1F1E6 + 65).toLowerCase();
+  }
+  return undefined;
+}
+
+export function countryFlagHtml(name?: string): string {
+  const emoji = countryFlag(name);
+  if (emoji === '🌐' || !emoji) return '🌐';
+  const iso = isoCodeFromEmoji(emoji);
+  if (!iso) return emoji;
+  return `<img class="country-flag-img" src="https://flagcdn.com/w40/${iso}.png" srcset="https://flagcdn.com/w80/${iso}.png 2x" width="20" height="15" alt="${emoji}">`;
+}
+
 const CURRENCY_DISPLAY_MAP: Record<string, string> = {
   '840': 'USD',
   '978': 'EUR',

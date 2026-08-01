@@ -7,7 +7,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
 import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationPreflight, type AuthorizationSummary, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
-import { countryFlag, formatCurrency, formatDateTime } from './country-flag.js';
+import { countryFlag, countryFlagHtml, formatCurrency, formatDateTime } from './country-flag.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
 import { HeroSmsHttpAdapter, type HeroSms } from './herosms.js';
@@ -70,8 +70,9 @@ function htmlPage(title: string, content: string): string {
   <meta name="robots" content="noindex,nofollow,noarchive">
   <title>${title}</title>
   <style>
-    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #17202a; background: #f5f7f8; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+    :root { color-scheme: light; }
+    body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; background: #f5f7f8; color: #17202a; font-family: system-ui, -apple-system, sans-serif; box-sizing: border-box; padding: 24px 0 60px; }
+    body:has(.panel) { display: grid; place-items: center; padding: 0; }
     main { width: min(calc(100% - 32px), 480px); }
     .panel { background: #fff; border: 1px solid #d7dde1; border-radius: 6px; padding: 28px; box-shadow: 0 2px 8px #17202a12; }
     h1 { margin: 0 0 8px; font-size: 22px; font-weight: 650; }
@@ -84,10 +85,11 @@ function htmlPage(title: string, content: string): string {
     button.copied { background: #27ae60 !important; }
     .error { margin: 0 0 16px; color: #a12424; font-size: 14px; }
     .shell { width: min(calc(100% - 48px), 1000px); }
-    .shell header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d7dde1; padding-bottom: 16px; }
+    .shell header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d7dde1; padding-bottom: 16px; gap: 16px; }
     .shell h1 { margin: 0; }
-    .shell header { gap: 16px; }
-    nav a { color: #0f6655; font-size: 14px; font-weight: 600; text-decoration: none; }
+    .header-actions { display: flex; align-items: center; gap: 16px; }
+    .header-actions nav a { color: #0f6655; font-size: 14px; font-weight: 600; text-decoration: none; padding: 6px 12px; border-radius: 4px; background: #edf3f1; transition: background 0.2s ease; }
+    .header-actions nav a:hover { background: #dcebe6; }
     .shell form button { margin: 0; background: #52616b; }
     .settings { max-width: 560px; padding: 32px 0; }
     .settings form { display: grid; gap: 16px; }
@@ -114,6 +116,7 @@ function htmlPage(title: string, content: string): string {
     .status-waiting { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; color: #0f6655; margin: 12px 0 16px; font-weight: 500; }
     .spinner { width: 14px; height: 14px; border: 2px solid #0f665533; border-top-color: #0f6655; border-radius: 50%; animation: spin 1s linear infinite; display: inline-block; box-sizing: border-box; }
     .success-badge { display: inline-block; background: #e6f4ea; color: #137333; font-weight: 600; font-size: 13px; padding: 4px 12px; border-radius: 12px; margin-bottom: 8px; }
+    .country-flag-img { width: 22px; height: 15px; object-fit: cover; border-radius: 2px; vertical-align: -2px; margin-right: 6px; box-shadow: 0 1px 2px #00000026; display: inline-block; }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
   <script>function copyValue(btn,text){if(!text)return;const orig=btn.dataset.originalText||btn.textContent;btn.dataset.originalText=orig;const doFeedback=()=>{btn.textContent='已复制 ✓';btn.classList.add('copied');setTimeout(()=>{btn.textContent=orig;btn.classList.remove('copied');},2000);};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(doFeedback,doFeedback);}else{doFeedback();}}</script>
@@ -128,7 +131,7 @@ function loginPage(path: string, csrfToken: string, error?: string): string {
 }
 
 function adminPage(title: string, heading: string, path: string, csrfToken: string, navigationPath: string, navigationLabel: string, content: string): string {
-  return htmlPage(title, `<main class="shell"><header><h1>${heading}</h1><nav><a href="${navigationPath}">${navigationLabel}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
+  return htmlPage(title, `<main class="shell"><header><h1>${heading}</h1><div class="header-actions"><nav><a href="${navigationPath}">${navigationLabel}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></div></header>${content}</main>`);
 }
 
 function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
@@ -232,7 +235,7 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     const numberRemaining = `<span data-countdown="${numberExpiryIso}" data-format="minutes-seconds">${escapeHtml(numberExpiryIso)}</span>`;
     const cancelRemaining = `<span data-countdown="${cancelAvailableIso}" data-format="cancel-countdown">${escapeHtml(cancelAvailableIso)}</span>`;
     const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><ol class="guide-steps"><li>复制上方号码，填入 OpenAI 验证页面并发送验证码</li><li>发送后请保持本页面开着，系统将自动接收并显示验证码</li></ol></div><div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p class="country">${countryFlag(view.countryName)} ${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>${guideMarkup}${replacementAction}<ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：${numberRemaining}</li><li>可换号时间：${cancelRemaining}</li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>${guideMarkup}${replacementAction}<ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：${numberRemaining}</li><li>可换号时间：${cancelRemaining}</li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
   }
   if (view.state === 'claimed' && view.acquisitionState) {
     const status = view.acquisitionState === 'manual' ? '号码获取结果待发送者处理' : '正在确认号码获取结果';
