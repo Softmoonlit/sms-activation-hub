@@ -7,6 +7,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
 import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationPreflight, type AuthorizationSummary, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
+import { countryFlag, formatCurrency } from './country-flag.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
 import { HeroSmsHttpAdapter, type HeroSms } from './herosms.js';
@@ -79,7 +80,8 @@ function htmlPage(title: string, content: string): string {
     input, select, textarea { box-sizing: border-box; width: 100%; min-height: 40px; border: 1px solid #9daab2; border-radius: 4px; padding: 8px 10px; font: inherit; }
     textarea { min-height: 88px; resize: vertical; }
     select { background: #fff; }
-    button { margin-top: 20px; min-height: 40px; border: 0; border-radius: 4px; padding: 8px 16px; background: #117a65; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+    button { margin-top: 20px; min-height: 40px; border: 0; border-radius: 4px; padding: 8px 16px; background: #117a65; color: #fff; font: inherit; font-weight: 600; cursor: pointer; transition: background 0.2s ease; }
+    button.copied { background: #27ae60 !important; }
     .error { margin: 0 0 16px; color: #a12424; font-size: 14px; }
     .shell { width: min(calc(100% - 48px), 1000px); }
     .shell header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d7dde1; padding-bottom: 16px; }
@@ -102,10 +104,19 @@ function htmlPage(title: string, content: string): string {
     .danger { background: #a12424; }
     .token { overflow-wrap: anywhere; padding: 12px; background: #edf3f1; border-radius: 4px; }
     .recipient { width: min(calc(100% - 32px), 520px); }
+    .country { font-weight: 600; font-size: 16px; margin: 0 0 12px; color: #17202a; }
     .number { margin: 12px 0; color: #17202a; font-size: clamp(28px, 8vw, 40px); font-weight: 700; letter-spacing: .02em; overflow-wrap: anywhere; }
     .facts { display: grid; gap: 10px; margin: 20px 0; padding: 0; list-style: none; color: #53616c; }
     .recipient button { width: 100%; }
+    .steps-guide { background: #f0f7f5; border: 1px solid #c2e0d8; border-radius: 6px; padding: 14px 16px; margin: 16px 0; text-align: left; }
+    .guide-title { font-weight: 600; color: #0f6655; margin: 0 0 6px; font-size: 14px; }
+    .guide-steps { margin: 0; padding-left: 20px; font-size: 13px; color: #334155; line-height: 1.6; }
+    .status-waiting { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; color: #0f6655; margin: 12px 0 16px; font-weight: 500; }
+    .spinner { width: 14px; height: 14px; border: 2px solid #0f665533; border-top-color: #0f6655; border-radius: 50%; animation: spin 1s linear infinite; display: inline-block; box-sizing: border-box; }
+    .success-badge { display: inline-block; background: #e6f4ea; color: #137333; font-weight: 600; font-size: 13px; padding: 4px 12px; border-radius: 12px; margin-bottom: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
+  <script>function copyValue(btn,text){if(!text)return;const orig=btn.dataset.originalText||btn.textContent;btn.dataset.originalText=orig;const doFeedback=()=>{btn.textContent='已复制 ✓';btn.classList.add('copied');setTimeout(()=>{btn.textContent=orig;btn.classList.remove('copied');},2000);};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(doFeedback,doFeedback);}else{doFeedback();}}</script>
 </head>
 <body>${content}</body>
 </html>`;
@@ -133,8 +144,8 @@ function adminShell(path: string, csrfToken: string, authorizations: Authorizati
 
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
   const candidates = detail.candidates.map((candidate) => `<li>${escapeHtml(candidate.countryName)}：预检价格 ${candidate.quotedPrice}，${candidate.used ? '已获取' : '未获取'}</li>`).join('');
-  const activations = detail.activations.length === 0 ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${detail.activations.map((activation) => `<li><strong>${escapeHtml(activation.countryName)}：</strong>${escapeHtml(activationStatusLabel(activation.status))}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(activation.acquiredAt.toISOString())}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(activation.currency)}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(activation.currency)}` : ''}${activation.refundPending ? '，退款确认待处理' : ''}</li>`).join('')}</ul>`;
-  const costs = detail.costs.length === 0 ? '<p>尚无费用。</p>' : `<ul class="summary">${detail.costs.map((cost) => `<li>累计激活费用：${cost.activationCost.toFixed(2)} ${escapeHtml(cost.currency)}；已确认退款：${cost.confirmedRefund.toFixed(2)} ${escapeHtml(cost.currency)}；净成本：${cost.netCost.toFixed(2)} ${escapeHtml(cost.currency)}</li>`).join('')}</ul>`;
+  const activations = detail.activations.length === 0 ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${detail.activations.map((activation) => `<li><strong>${escapeHtml(activation.countryName)}：</strong>${escapeHtml(activationStatusLabel(activation.status))}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(activation.acquiredAt.toISOString())}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理' : ''}</li>`).join('')}</ul>`;
+  const costs = detail.costs.length === 0 ? '<p>尚无费用。</p>' : `<ul class="summary">${detail.costs.map((cost) => `<li>累计激活费用：${cost.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；已确认退款：${cost.confirmedRefund.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；净成本：${cost.netCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}</li>`).join('')}</ul>`;
   const currentActivation = detail.activation ? `<section class="card"><h2>当前供应商激活</h2><ul class="summary"><li><strong>地区：</strong>${escapeHtml(detail.activation.countryName)}</li><li><strong>激活状态：</strong>${escapeHtml(activationStatusLabel(detail.activation.status))}</li><li><strong>号码有效至：</strong>${escapeHtml(detail.activation.numberExpiresAt.toISOString())}</li>${detail.activation.phoneNumber ? `<li><strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}</li>` : ''}${detail.activation.verificationCode ? `<li><strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}</li>` : ''}</ul>${detail.activation.unrecognizedSmsText ? `<h3>无法识别验证码的短信正文</h3><p class="token">${escapeHtml(detail.activation.unrecognizedSmsText)}</p>` : ''}</section>` : '';
   const revoke = detail.canRevoke ? `<p><a href="/${path}/authorizations/${detail.id}/revoke">撤销授权</a></p>` : '';
   const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(detail.recipientIdentifier)}</h2><p>授权状态：${detail.status}</p><p>获取额度：${detail.acquisitionCount}/3</p><p>授权到期时间：${escapeHtml(detail.expiresAt.toISOString())}</p>${revoke}</section><section class="card"><h2>候选地区</h2><ul class="summary">${candidates}</ul></section><section class="card"><h2>供应商激活</h2>${activations}</section><section class="card"><h2>成本</h2>${costs}</section>${currentActivation}</section>`;
@@ -171,7 +182,7 @@ function authorizationConfirmationPage(path: string, csrfToken: string, prefligh
 
 function authorizationCreatedPage(path: string, csrfToken: string, authorizationUrl: string, expiresAt: Date): string {
   const escapedUrl = escapeHtml(authorizationUrl);
-  const content = `<section class="dashboard"><section class="card"><h2>激活授权已创建</h2><p>完整授权链接仅显示这一次。丢失后请撤销并重新创建。</p><p class="token" id="authorization-url">${escapedUrl}</p><p>到期时间：${escapeHtml(expiresAt.toISOString())}</p><button type="button" onclick="navigator.clipboard.writeText(document.getElementById('authorization-url').textContent)">复制授权链接</button></section></section>`;
+  const content = `<section class="dashboard"><section class="card"><h2>激活授权已创建</h2><p>完整授权链接仅显示这一次。丢失后请撤销并重新创建。</p><p class="token" id="authorization-url">${escapedUrl}</p><p>到期时间：${escapeHtml(expiresAt.toISOString())}</p><button type="button" onclick="copyValue(this, document.getElementById('authorization-url').textContent)">复制授权链接</button></section></section>`;
   return adminPage('激活授权已创建', '激活授权已创建', path, csrfToken, `/${path}`, '返回首页', content);
 }
 
@@ -186,16 +197,17 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   const action = `/a/${encodeURIComponent(token)}/numbers`;
   const errorMarkup = message ? `<p class="error" role="alert">${escapeHtml(message)}</p>` : '';
   const deadline = view.expiresAt!.toISOString();
-  const remaining = `<span data-countdown="${deadline}">${escapeHtml(deadline)}</span>`;
-  const countdownScript = `<script>(()=>{const element=document.querySelector('[data-countdown]');if(!element)return;const update=()=>{const seconds=Math.max(0,Math.floor((Date.parse(element.dataset.countdown)-Date.now())/1000));const hours=Math.floor(seconds/3600);const minutes=Math.floor(seconds%3600/60);element.textContent=hours+'小时 '+minutes+'分钟';};update();setInterval(update,30000);})();</script>`;
+  const remaining = `<span data-countdown="${deadline}" data-format="hours-minutes">${escapeHtml(deadline)}</span>`;
+  const countdownScript = `<script>(()=>{const elements=document.querySelectorAll('[data-countdown]');if(!elements.length)return;const update=()=>{let reload=false;elements.forEach((el)=>{const target=Date.parse(el.dataset.countdown);const seconds=Math.max(0,Math.floor((target-Date.now())/1000));const fmt=el.dataset.format;if(fmt==='hours-minutes'){const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);el.textContent=(h>0?h+'小时 ':'')+m+'分钟';}else if(fmt==='minutes-seconds'){if(seconds<=0){el.textContent='已到期';}else{const m=Math.floor(seconds/60);const s=seconds%60;el.textContent=m+'分 '+(s<10?'0':'')+s+'秒';}}else if(fmt==='cancel-countdown'){if(seconds<=0){el.textContent='已可'+String.fromCharCode(25442,21495);if(!el.dataset.reloaded){el.dataset.reloaded='true';reload=true;}}else{const m=Math.floor(seconds/60);const s=seconds%60;el.textContent=m+'分 '+(s<10?'0':'')+s+'秒';}}});if(reload){setTimeout(()=>location.reload(),500);}};update();setInterval(update,1000);})();</script>`;
   const acquisitionForm = (label = '获取号码') => `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">${label}</button></form>`;
   if (view.state === 'available') {
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm()}</section></main>${countdownScript}`);
   }
   if (view.state === 'claimed' && view.smsDelivered) {
+    const countryMarkup = view.countryName ? `<p class="country">${countryFlag(view.countryName)} ${escapeHtml(view.countryName)}</p>` : '';
     const delivery = view.verificationCode
-      ? `<p>验证码</p><p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制验证码</button>`
-      : '<p>短信已收到，暂时无法显示验证码，请联系发送者</p>';
+      ? `${countryMarkup}<div class="success-badge">🎉 已收到验证码</div><p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
+      : `${countryMarkup}<p>短信已收到，暂时无法显示验证码，请联系发送者</p>`;
     const structuredCodePollingScript = view.verificationCode ? '' : '<script>setTimeout(()=>location.reload(),5000)</script>';
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${delivery}<ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}${structuredCodePollingScript}`);
   }
@@ -209,7 +221,12 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     const e164 = view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`;
     const smsPollingScript = '<script>setTimeout(()=>location.reload(),5000)</script>';
     const replacementAction = view.replacementAvailable ? `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">更换号码</button></form>` : '';
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p>${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="navigator.clipboard.writeText(this.dataset.copyValue)">复制号码</button>${replacementAction}<ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：<time datetime="${view.numberExpiresAt!.toISOString()}">${escapeHtml(view.numberExpiresAt!.toISOString())}</time></li><li>可换号时间：<time datetime="${view.cancelAvailableAt!.toISOString()}">${escapeHtml(view.cancelAvailableAt!.toISOString())}</time></li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
+    const numberExpiryIso = view.numberExpiresAt!.toISOString();
+    const cancelAvailableIso = view.cancelAvailableAt!.toISOString();
+    const numberRemaining = `<span data-countdown="${numberExpiryIso}" data-format="minutes-seconds">${escapeHtml(numberExpiryIso)}</span>`;
+    const cancelRemaining = `<span data-countdown="${cancelAvailableIso}" data-format="cancel-countdown">${escapeHtml(cancelAvailableIso)}</span>`;
+    const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><ol class="guide-steps"><li>复制上方号码，填入 OpenAI 验证页面并发送验证码</li><li>发送后请保持本页面开着，系统将自动接收并显示验证码</li></ol></div><div class="status-waiting"><span class="spinner"></span> 正在自动接收验证码中，无需手动刷新</div>`;
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p class="country">${countryFlag(view.countryName)} ${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>${guideMarkup}${replacementAction}<ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：${numberRemaining}</li><li>可换号时间：${cancelRemaining}</li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
   }
   if (view.state === 'claimed' && view.acquisitionState) {
     const status = view.acquisitionState === 'manual' ? '号码获取结果待发送者处理' : '正在确认号码获取结果';
