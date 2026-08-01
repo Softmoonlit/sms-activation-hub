@@ -38,6 +38,7 @@ export interface AuthorizationDetail {
   recipientIdentifier: string;
   status: AuthorizationSummary['status'];
   expiresAt: Date;
+  revokedAt?: Date;
   acquisitionCount: number;
   canRevoke: boolean;
   revocationConsequence?: string;
@@ -49,6 +50,8 @@ export interface AuthorizationDetail {
     countryName: string;
     status: 'acquisition_confirming' | 'waiting_sms' | 'cancellation_confirming' | 'cancelled' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed' | 'timed_out';
     numberExpiresAt: Date;
+    /** 仅非终态（waiting_sms、cancellation_confirming、sms_delivered 等）时为 true，前端据此决定是否显示倒计时。 */
+    numberExpiresAtCountdown: boolean;
     phoneNumber?: string;
     verificationCode?: string;
     unrecognizedSmsText?: string;
@@ -306,11 +309,11 @@ export class ActivationAuthorizations {
   async detail(id: string): Promise<AuthorizationDetail | undefined> {
     const result = await this.database.pool.query<{
       id: string; recipient_identifier: string; authorization_status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired';
-      authorization_expires_at: Date; country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
+      authorization_expires_at: Date; revoked_at: Date | null; country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
       sms_code: string | null; sms_text: string | null; phone_number: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
       acquisition_country_name: string | null; cancel_available_at: Date | null;
     }>(
-      `SELECT auth.id, auth.recipient_identifier, auth.status AS authorization_status, auth.expires_at AS authorization_expires_at,
+      `SELECT auth.id, auth.recipient_identifier, auth.status AS authorization_status, auth.expires_at AS authorization_expires_at, auth.revoked_at,
               candidate.country_name, activation.status AS activation_status, activation.expires_at AS number_expires_at,
               activation.phone_number, activation.sms_code, activation.sms_text,
               (SELECT count(*) FROM authorization_candidate_countries candidate WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NOT NULL)::text AS used_count,
@@ -375,8 +378,10 @@ export class ActivationAuthorizations {
             : row.number_expires_at && row.number_expires_at <= this.now() ? '当前激活已结束，仅终止接收者访问。' : '立即请求取消当前供应商激活。')
           : row.authorization_status === 'sms_delivered' ? '只终止接收者访问，不请求供应商取消。'
             : '立即终止接收者访问。';
+    const ACTIVE_ACTIVATION_STATUSES = new Set(['acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming']);
     return {
       id: row.id, recipientIdentifier: row.recipient_identifier, status: labels[row.authorization_status], expiresAt: row.authorization_expires_at,
+      ...(row.revoked_at ? { revokedAt: row.revoked_at } : {}),
       acquisitionCount: Number(row.used_count), canRevoke,
       candidates: candidateResult.rows.map((candidate) => ({ countryName: candidate.country_name, quotedPrice: Number(candidate.quoted_price), used: candidate.used_at !== null })),
       activations,
@@ -388,6 +393,7 @@ export class ActivationAuthorizations {
       } } : {}),
       ...(row.country_name && row.activation_status && row.number_expires_at ? { activation: {
         countryName: row.country_name, status: row.activation_status, numberExpiresAt: row.number_expires_at,
+        numberExpiresAtCountdown: ACTIVE_ACTIVATION_STATUSES.has(row.activation_status),
         ...(row.number_expires_at > this.now() && row.phone_number ? { phoneNumber: row.phone_number } : {}),
         ...(row.number_expires_at > this.now() && row.sms_code ? { verificationCode: row.sms_code } : {}),
         ...(!row.sms_code && row.sms_text && row.number_expires_at > this.now() ? { unrecognizedSmsText: row.sms_text } : {}),
