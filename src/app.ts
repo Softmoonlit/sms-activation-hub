@@ -84,8 +84,8 @@ function htmlPage(title: string, content: string): string {
     .cb { position: relative; }
     .cb-input { box-sizing: border-box; width: 100%; min-height: 40px; border: 1px solid #9daab2; border-radius: 4px; padding: 8px 36px 8px 10px; font: inherit; background: #fff; cursor: text; transition: border-color 0.15s, box-shadow 0.15s; }
     .cb-input:focus { outline: none; border-color: #117a65; box-shadow: 0 0 0 3px #117a6520; }
-    .cb-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 20px; height: 20px; border: none; background: none; padding: 0; margin: 0; cursor: pointer; color: #9daab2; font-size: 15px; line-height: 1; display: none; align-items: center; justify-content: center; border-radius: 50%; }
-    .cb-clear:hover { background: #f0f0f0; color: #53616c; }
+    .cb .cb-clear { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); border: none; background: none; padding: 2px; margin: 0; min-height: 0; border-radius: 0; font-size: 16px; font-weight: 400; line-height: 1; color: #b0bec5; cursor: pointer; display: none; align-items: center; justify-content: center; transition: color 0.15s; }
+    .cb .cb-clear:hover { background: none; color: #546e7a; }
     .cb-input.cb-selected ~ .cb-clear { display: flex; }
     .cb-list { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 200; background: #fff; border: 1px solid #9daab2; border-radius: 4px; box-shadow: 0 4px 12px #17202a18; max-height: 220px; overflow-y: auto; display: none; list-style: none; margin: 0; padding: 0; }
     .cb-list.cb-open { display: block; }
@@ -273,7 +273,7 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character] ?? character);
 }
 
-function settingsPage(path: string, csrfToken: string, settings: CandidateLocationSettings, error?: string): string {
+function settingsPage(path: string, csrfToken: string, settings: CandidateLocationSettings, error?: string, saved?: boolean): string {
   // Serialise locations once as a JSON array embedded in the page script.
   // Each entry: [id, displayName] — displayName includes price/stock so it matches the old option text.
   const locationsJson = JSON.stringify(settings.locations.map((l) => {
@@ -292,7 +292,10 @@ function settingsPage(path: string, csrfToken: string, settings: CandidateLocati
   }).join('');
   const comboboxScript = `<script>(()=>{const LOCS=${locationsJson};const INIT=${initialIds};function esc(s){return s.replace(/[&<>'"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'})[c]??c);}function hl(text,q){if(!q)return esc(text);const i=text.toLowerCase().indexOf(q.toLowerCase());if(i<0)return esc(text);return esc(text.slice(0,i))+'<span class="cb-hl">'+esc(text.slice(i,i+q.length))+'</span>'+esc(text.slice(i+q.length));}function init(idx){const wrap=document.getElementById('cb'+idx);const inp=wrap.querySelector('.cb-input');const clr=wrap.querySelector('.cb-clear');const hid=wrap.querySelector('input[type=hidden]');const list=wrap.querySelector('.cb-list');let selId=INIT[idx];let selName=selId!=null?(LOCS.find(l=>l[0]===selId)||[null,''])[1]:'';let activeIdx=-1;function render(q){list.innerHTML='';activeIdx=-1;const matched=LOCS.filter(l=>!q||l[1].toLowerCase().includes(q.toLowerCase()));if(!matched.length){list.innerHTML='<li class="cb-empty">无匹配地区</li>';}else{matched.forEach((l,i)=>{const li=document.createElement('li');li.className='cb-opt';li.setAttribute('role','option');li.dataset.id=l[0];li.dataset.name=l[1];li.innerHTML=hl(l[1],q);li.addEventListener('mousedown',e=>{e.preventDefault();pick(l[0],l[1]);});list.appendChild(li);});}list.classList.add('cb-open');}function pick(id,name){selId=id;selName=name;hid.value=id;inp.value=name;inp.classList.add('cb-selected');list.classList.remove('cb-open');}function clear(){selId=null;selName='';hid.value='';inp.value='';inp.classList.remove('cb-selected');list.classList.remove('cb-open');inp.focus();}inp.addEventListener('focus',()=>render(inp.classList.contains('cb-selected')?'':inp.value));inp.addEventListener('input',()=>{if(inp.classList.contains('cb-selected')&&inp.value!==selName){inp.classList.remove('cb-selected');hid.value='';selId=null;}render(inp.value);});inp.addEventListener('blur',()=>{setTimeout(()=>{list.classList.remove('cb-open');if(selId&&inp.value!==selName){inp.value=selName;inp.classList.add('cb-selected');}else if(!selId){inp.value='';inp.classList.remove('cb-selected');}},150);});inp.addEventListener('keydown',e=>{const opts=[...list.querySelectorAll('.cb-opt')];if(e.key==='ArrowDown'){e.preventDefault();activeIdx=Math.min(activeIdx+1,opts.length-1);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='ArrowUp'){e.preventDefault();activeIdx=Math.max(activeIdx-1,0);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='Enter'&&activeIdx>=0&&opts[activeIdx]){e.preventDefault();const o=opts[activeIdx];pick(Number(o.dataset.id),o.dataset.name);}else if(e.key==='Escape'){list.classList.remove('cb-open');inp.blur();}});clr.addEventListener('click',clear);}[0,1,2].forEach(init);document.addEventListener('click',e=>{if(!e.target.closest('.cb'))document.querySelectorAll('.cb-list').forEach(l=>l.classList.remove('cb-open'));});})();<\/script>`;
   const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
-  return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', `<section class="settings"><p><strong>HeroSMS 已连接</strong></p><p>余额：${settings.balance.toFixed(2)}</p>${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}">${comboboxes}<button type="submit">保存默认候选地区</button></form></section>${comboboxScript}`);
+  const savedBadge = saved
+    ? `<span id="save-toast" role="status" aria-live="polite" style="margin-left:.75rem;color:#166534;font-size:.875rem">✓ 已保存</span><script>(()=>{setTimeout(()=>{const t=document.getElementById('save-toast');if(t)t.remove();history.replaceState(null,'',location.pathname);},3000);})();<\/script>`
+    : '';
+  return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', `<section class="settings"><p><strong>HeroSMS 已连接</strong>${savedBadge}</p><p>余额：${settings.balance.toFixed(2)}</p>${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}">${comboboxes}<button type="submit">保存默认候选地区</button></form></section>${comboboxScript}`);
 }
 
 function settingsUnavailablePage(path: string, csrfToken: string): string {
@@ -660,15 +663,16 @@ export async function createApp(config: AppConfig, database = new Database(confi
     return confirmed ? reply.redirect(adminRoot, 303) : reply.code(409).send();
   });
 
-  app.get(`${adminRoot}/settings`, async (request, reply) => {
+  app.get<{ Querystring: { saved?: string } }>(`${adminRoot}/settings`, async (request, reply) => {
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     if (!session) {
       return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     }
     cookiesForSession(reply, session.id, session.csrfToken);
+    const saved = request.query.saved === '1';
     try {
       const settings = await defaultCandidateLocations.settings();
-      return reply.type('text/html; charset=utf-8').send(settingsPage(config.adminPath, session.csrfToken, settings));
+      return reply.type('text/html; charset=utf-8').send(settingsPage(config.adminPath, session.csrfToken, settings, undefined, saved));
     } catch {
       return reply.code(503).type('text/html; charset=utf-8').send(settingsUnavailablePage(config.adminPath, session.csrfToken));
     }
@@ -687,7 +691,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
         throw new CandidateLocationValidationError();
       }
       await defaultCandidateLocations.replace(countryIds);
-      return reply.redirect(`${adminRoot}/settings`, 303);
+      return reply.redirect(`${adminRoot}/settings?saved=1`, 303);
     } catch (error) {
       if (error instanceof CandidateLocationValidationError) {
         try {
