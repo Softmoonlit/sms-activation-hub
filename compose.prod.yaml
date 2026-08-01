@@ -2,11 +2,11 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
-    env_file: .env.prod
+    env_file: .env.postgres.prod
     environment:
       POSTGRES_DB: sms_website
       POSTGRES_USER: sms_website
-      # POSTGRES_PASSWORD 由 env_file 中的 POSTGRES_PASSWORD 变量注入
+      # POSTGRES_PASSWORD 由 .env.postgres.prod 注入，避免应用密钥注入数据库容器
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

@@ -67,9 +67,14 @@ chmod 600 .env.prod
 # 编辑 .env.prod，替换所有 replace-* 占位符为真实值
 # PUBLIC_ORIGIN=https://sms.example.com
 # TRUSTED_PROXY=127.0.0.1（Caddy 在宿主机上）
+
+# PostgreSQL 容器仅需一个密钥文件，避免应用密钥注入数据库容器
+cp .env.postgres.prod.example .env.postgres.prod
+chmod 600 .env.postgres.prod
+# 编辑 .env.postgres.prod，将 POSTGRES_PASSWORD 设为与 .env.prod 中相同的密码
 ```
 
-`.env.prod` 包含所有敏感密钥，不会进入 Git（已加入 `.gitignore`）。
+`.env.prod` 和 `.env.postgres.prod` 包含所有敏感密钥，不会进入 Git（已加入 `.gitignore`）。
 
 ### 3. 安装并配置宿主机 Caddy
 
@@ -102,7 +107,7 @@ Caddy 会自动申请并续期 Let's Encrypt TLS 证书。
 docker compose -f compose.prod.yaml up -d --build
 ```
 
-首次启动会构建镜像并运行数据库迁移（如有）。查看日志：
+首次启动时，应用会在启动时自动建表（不需要单独运行 migration runner）。查看日志：
 
 ```sh
 docker compose -f compose.prod.yaml logs -f
@@ -164,6 +169,12 @@ docker compose -f compose.prod.yaml up -d app
 
 轮换期间（步骤 1→3 之间）HeroSMS 回调会短暂失败；建议在业务低峰期操作。
 
+### 轮换 HeroSMS API 密钥（`HEROSMS_API_KEY`）
+
+1. 在 HeroSMS 平台重新生成 API 密钥
+2. 编辑 `.env.prod`，更新 `HEROSMS_API_KEY`
+3. 重启应用：`docker compose -f compose.prod.yaml up -d app`
+
 ### 轮换会话密钥（`SESSION_SECRET`）
 
 ```sh
@@ -185,7 +196,10 @@ docker compose -f compose.prod.yaml exec postgres \
 # 2. 编辑 .env.prod，同步更新 DATABASE_URL 和 POSTGRES_PASSWORD
 vim .env.prod
 
-# 3. 重启应用以使用新密码
+# 3. 编辑 .env.postgres.prod，同步更新 POSTGRES_PASSWORD
+vim .env.postgres.prod
+
+# 4. 重启应用以使用新密码
 docker compose -f compose.prod.yaml up -d
 ```
 

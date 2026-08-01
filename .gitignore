@@ -2,6 +2,7 @@
 skills-lock.json
 .env
 .env.prod
+.env.postgres.prod
 node_modules/
 dist/
 coverage/
