@@ -99,8 +99,9 @@ function htmlPage(title: string, content: string): string {
     .error { margin: 0 0 16px; color: #a12424; font-size: 14px; }
     .shell { width: min(calc(100% - 48px), 1000px); }
     .shell header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d7dde1; padding-bottom: 16px; gap: 16px; }
-    .shell h1 { margin: 0; font-size: 22px; font-weight: 650; }
-    nav a { color: #0f6655; font-size: 14px; font-weight: 600; text-decoration: none; padding: 6px 12px; border-radius: 4px; background: #edf3f1; transition: background 0.2s ease; }
+    .shell h1 { margin: 0; font-size: 22px; font-weight: 650; display: flex; align-items: center; gap: 0.35em; }
+    .icon { width: 1em; height: 1em; flex-shrink: 0; stroke: currentColor; }
+    nav a { color: #0f6655; box-sizing: border-box; font-size: 1rem; font-family: inherit; font-weight: 600; text-decoration: none; height: 40px; padding: 0 16px; border-radius: 4px; background: #edf3f1; transition: background 0.2s ease; display: inline-flex; align-items: center; gap: 0.35em; }
     nav a:hover { background: #dcebe6; }
     .shell form button { margin: 0; background: #52616b; }
     .settings { max-width: 560px; padding: 32px 0; }
@@ -142,8 +143,24 @@ function loginPage(path: string, csrfToken: string, error?: string): string {
   return htmlPage('管理员登录', `<main><section class="panel"><h1>管理员登录</h1><p>请输入部署时配置的管理密码。</p>${errorMarkup}<form method="post" action="/${path}/login"><input type="hidden" name="csrf" value="${csrfToken}"><label>密码<input name="password" type="password" autocomplete="current-password" required></label><button type="submit">登录</button></form></section></main>`);
 }
 
+const SVG_GEAR = `<svg class="icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+const SVG_ARROW_LEFT = `<svg class="icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>`;
+
+function headingWithIcon(heading: string): string {
+  if (heading === '设置') return `${SVG_GEAR}${heading}`;
+  return heading;
+}
+
+function navLabelWithIcon(label: string): string {
+  if (label.includes('返回') || label === '设置') {
+    const icon = label === '设置' ? SVG_GEAR : SVG_ARROW_LEFT;
+    return `${icon}${label}`;
+  }
+  return label;
+}
+
 function adminPage(title: string, heading: string, path: string, csrfToken: string, navigationPath: string, navigationLabel: string, content: string): string {
-  return htmlPage(title, `<main class="shell"><header><h1>${heading}</h1><nav><a href="${navigationPath}">${navigationLabel}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
+  return htmlPage(title, `<main class="shell"><header><h1>${headingWithIcon(heading)}</h1><nav><a href="${navigationPath}">${navLabelWithIcon(navigationLabel)}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
 }
 
 function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
