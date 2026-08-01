@@ -1513,8 +1513,12 @@ export class ActivationAuthorizations {
     if (authorizationStatus !== 'revoked' && !deliverable) {
       await this.expireAuthorization(client, authorizationId, confirmedAt);
     }
-    const acquiredAt = number.activationTime ?? confirmedAt;
-    const numberExpiresAt = number.activationEndTime ?? new Date(acquiredAt.getTime() + 20 * 60 * 1000);
+    const acquiredAt = number.activationTime && Math.abs(number.activationTime.getTime() - confirmedAt.getTime()) <= 5 * 60 * 1000
+      ? number.activationTime
+      : confirmedAt;
+    const numberExpiresAt = number.activationEndTime && Math.abs(number.activationEndTime.getTime() - acquiredAt.getTime()) <= 30 * 60 * 1000
+      ? number.activationEndTime
+      : new Date(acquiredAt.getTime() + 20 * 60 * 1000);
     await client.query(
       `INSERT INTO supplier_activations
         (authorization_id, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_poll_after, authorization_expiry_cancellation_pending, authorization_revocation_cancellation_pending)

@@ -77,26 +77,48 @@ const COUNTRY_FLAGS: Record<string, string> = {
   '埃塞俄比亚': '🇪🇹',
   '安哥拉': '🇦🇴',
   '莫桑比克': '🇲🇿',
-  '津巴布韦': '🇿🇼',
-  '摩尔多瓦': '🇲🇩',
-  '亚美尼亚': '🇦🇲',
-  '阿塞拜疆': '🇦🇿',
-  '格鲁吉亚': '🇬🇪',
-  '蒙古': '🇲🇳',
-  '香港': '🇭🇰',
-  '中国香港': '🇭🇰',
-  '台湾': '🇹🇼',
-  '中国台湾': '🇹🇼',
-  '澳门': '🇲🇴',
-  '中国澳门': '🇲🇴',
+  '津巴布韦': '🇿🇼', 'ZW': '🇿🇼',
+  '摩尔多瓦': '🇲🇩', 'MD': '🇲🇩',
+  '亚美尼亚': '🇦🇲', 'AM': '🇦🇲',
+  '阿塞拜疆': '🇦🇿', 'AZ': '🇦🇿',
+  '格鲁吉亚': '🇬🇪', 'GE': '🇬🇪',
+  '蒙古': '🇲🇳', 'MN': '🇲🇳',
+  '香港': '🇭🇰', 'HK': '🇭🇰', '中国香港': '🇭🇰',
+  '台湾': '🇹🇼', 'TW': '🇹🇼', '中国台湾': '🇹🇼',
+  '澳门': '🇲🇴', 'MO': '🇲🇴', '中国澳门': '🇲🇴',
+  'CN': '🇨🇳', 'US': '🇺🇸', 'GB': '🇬🇧', 'FR': '🇫🇷', 'DE': '🇩🇪',
+  'JP': '🇯🇵', 'KR': '🇰🇷', 'CA': '🇨🇦', 'AU': '🇦🇺', 'RU': '🇷🇺',
+  'IN': '🇮🇳', 'ID': '🇮🇩', 'BR': '🇧🇷', 'AR': '🇦🇷', 'PH': '🇵🇭',
+  'VN': '🇻🇳', 'TH': '🇹🇭', 'MY': '🇲🇾', 'SG': '🇸🇬', 'KZ': '🇰🇿',
+  'UA': '🇺🇦', 'UZ': '🇺🇿', 'KG': '🇰🇬', 'TJ': '🇹🇯', 'TR': '🇹🇷',
+  'EG': '🇪🇬', 'ZA': '🇿🇦', 'NG': '🇳🇬', 'KE': '🇰🇪', 'MX': '🇲🇽',
+  'CO': '🇨🇴', 'PE': '🇵🇪', 'CL': '🇨🇱', 'ES': '🇪🇸', 'PT': '🇵🇹',
+  'IT': '🇮🇹', 'NL': '🇳🇱', 'PL': '🇵🇱', 'SE': '🇸🇪', 'NO': '🇳🇴',
+  'FI': '🇫🇮', 'DK': '🇩🇰', 'IE': '🇮🇪', 'CH': '🇨🇭', 'AT': '🇦🇹',
+  'BE': '🇧🇪', 'GR': '🇬🇷', 'RO': '🇷🇴', 'BG': '🇧🇬', 'HU': '🇭🇺',
+  'CZ': '🇨🇿', 'SK': '🇸🇰', 'NZ': '🇳🇿', 'SA': '🇸🇦', 'AE': '🇦🇪',
+  'IL': '🇮🇱', 'PK': '🇵🇰', 'BD': '🇧🇩', 'KH': '🇰🇭', 'LA': '🇱🇦',
+  'MM': '🇲🇲', 'NP': '🇳🇵', 'LK': '🇱🇰', 'MA': '🇲🇦', 'DZ': '🇩🇿',
+  'TN': '🇹🇳', 'GH': '🇬🇭', 'CI': '🇨🇮', 'CM': '🇨🇲', 'ET': '🇪🇹',
+  'AO': '🇦🇴', 'MZ': '🇲🇿',
 };
 
 export function countryFlag(name?: string): string {
   if (!name) return '🌐';
   const trimmed = name.trim();
   if (COUNTRY_FLAGS[trimmed]) return COUNTRY_FLAGS[trimmed];
+  if (COUNTRY_FLAGS[trimmed.toUpperCase()]) return COUNTRY_FLAGS[trimmed.toUpperCase()];
+
+  const tokens = trimmed.split(/[\s()_,-]+/);
+  for (const token of tokens) {
+    if (!token) continue;
+    const upper = token.toUpperCase();
+    if (COUNTRY_FLAGS[token]) return COUNTRY_FLAGS[token];
+    if (COUNTRY_FLAGS[upper]) return COUNTRY_FLAGS[upper];
+  }
+
   for (const [key, flag] of Object.entries(COUNTRY_FLAGS)) {
-    if (trimmed.includes(key) || key.includes(trimmed)) return flag;
+    if (key.length > 1 && (trimmed.includes(key) || key.includes(trimmed))) return flag;
   }
   return '🌐';
 }

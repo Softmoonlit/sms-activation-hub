@@ -10,6 +10,9 @@ test('countryFlag returns corresponding flag emoji for common country names', ()
   assert.equal(countryFlag('法国'), '🇫🇷');
   assert.equal(countryFlag('哈萨克斯坦'), '🇰🇿');
   assert.equal(countryFlag('印尼'), '🇮🇩');
+  assert.equal(countryFlag('ZA 南非'), '🇿🇦');
+  assert.equal(countryFlag('ZA'), '🇿🇦');
+  assert.equal(countryFlag('US 美国'), '🇺🇸');
   assert.equal(countryFlag('未知国家'), '🌐');
   assert.equal(countryFlag(undefined), '🌐');
 });
