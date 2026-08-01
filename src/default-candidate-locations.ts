@@ -40,13 +40,16 @@ export class DefaultCandidateLocations {
     }
 
     const quotesByCountry = new Map(quotes.map((quote) => [quote.countryId, quote]));
+    const locations = countries
+      .map((country) => {
+        const quote = quotesByCountry.get(country.id);
+        return quote ? { ...country, price: quote.price, stock: quote.stock } : country;
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN') || a.id - b.id);
     return {
       balance,
       configuredCountryIds,
-      locations: countries.map((country) => {
-        const quote = quotesByCountry.get(country.id);
-        return quote ? { ...country, price: quote.price, stock: quote.stock } : country;
-      }),
+      locations,
     };
   }
 

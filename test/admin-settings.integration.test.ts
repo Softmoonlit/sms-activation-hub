@@ -112,6 +112,11 @@ if (!databaseUrl) {
       assert.match(settings.body, /中国/);
       assert.match(settings.body, /库存 0/);
       assert.match(settings.body, /价格 0\.1234/);
+      const francePos = settings.body.indexOf('法国');
+      const usPos = settings.body.indexOf('美国');
+      const ukPos = settings.body.indexOf('英国');
+      const chinaPos = settings.body.indexOf('中国');
+      assert.ok(francePos < usPos && usPos < ukPos && ukPos < chinaPos, '候选国家选项应按中文拼音首字母排序（法国 < 美国 < 英国 < 中国）');
 
       const saved = await app.inject({
         method: 'POST',
