@@ -1466,7 +1466,7 @@ if (!databaseUrl) {
       assert.match(detail.body, /授权状态：已到期/);
       assert.match(detail.body, /供应商激活/);
       assert.match(detail.body, /first-/);
-      assert.match(detail.body, /获取时间 2026-09-06T00:00:00\.000Z/);
+      assert.match(detail.body, /获取时间 2026-09-06 08:00:00/);
       assert.match(detail.body, /已取消/);
       assert.match(detail.body, /等待短信/);
       assert.match(detail.body, /候选地区/);

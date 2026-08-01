@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { countryFlag, formatCurrency } from '../src/country-flag.js';
+import { countryFlag, formatCurrency, formatDateTime } from '../src/country-flag.js';
 
 test('countryFlag returns corresponding flag emoji for common country names', () => {
   assert.equal(countryFlag('美国'), '🇺🇸');
@@ -25,4 +25,9 @@ test('formatCurrency converts numeric ISO currency codes to uppercase currency s
   assert.equal(formatCurrency('USD'), 'USD');
   assert.equal(formatCurrency(''), '');
   assert.equal(formatCurrency(undefined), '');
+});
+
+test('formatDateTime converts UTC date to Beijing time (Asia/Shanghai)', () => {
+  assert.equal(formatDateTime(new Date('2026-08-01T06:09:36.000Z')), '2026-08-01 14:09:36');
+  assert.equal(formatDateTime(undefined), '');
 });

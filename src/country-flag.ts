@@ -135,3 +135,18 @@ export function formatCurrency(currency?: string): string {
   const trimmed = currency.trim();
   return CURRENCY_DISPLAY_MAP[trimmed] ?? trimmed;
 }
+
+export function formatDateTime(date?: Date): string {
+  if (!date || Number.isNaN(date.getTime())) return '';
+  const formatter = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  return formatter.format(date).replace(/\//g, '-');
+}

@@ -148,7 +148,7 @@ function objectEntries(value: unknown): [string, unknown][] | undefined {
 
 function dateValue(value: unknown): Date | undefined {
   if (typeof value !== 'string' || /^0{4}-0{2}-0{2}/.test(value)) return undefined;
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(' ', 'T')}Z` : value;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(' ', 'T')}+03:00` : value;
   const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? undefined : date;
 }

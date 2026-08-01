@@ -214,7 +214,7 @@ test('HeroSMS adapter 读取活动激活与历史供号码获取对账', async (
   assert.deepEqual(await adapter.activeActivations(), [{
     activationId: '635468021', phoneNumber: '79********1', activationCost: 12.5,
     currency: '840', serviceCode: 'vk', countryId: 2,
-    activationTime: new Date('2022-06-01T16:59:16Z'), status: '4',
+    activationTime: new Date('2022-06-01T13:59:16Z'), status: '4',
   }]);
   assert.deepEqual(await adapter.activationHistory(new Date('2026-02-18T15:00:00Z'), new Date('2026-02-18T17:00:00Z')), [{
     activationId: '635468024', phoneNumber: '7*********0', activationCost: 0,
@@ -238,7 +238,7 @@ test('HeroSMS adapter 读取结构化短信状态并完成供应商激活', asyn
   });
 
   assert.deepEqual(await adapter.activationStatus('activation-42'), {
-    delivered: true, receivedAt: new Date('2026-08-01T00:03:00.000Z'), code: '482913', text: 'Your code is 482913',
+    delivered: true, receivedAt: new Date('2026-07-31T21:03:00.000Z'), code: '482913', text: 'Your code is 482913',
   });
   await adapter.finishActivation('activation-42');
   assert.deepEqual(requests.map((url) => [url.searchParams.get('action'), url.searchParams.get('id')]), [

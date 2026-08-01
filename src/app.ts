@@ -7,7 +7,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
 import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationPreflight, type AuthorizationSummary, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
-import { countryFlag, formatCurrency } from './country-flag.js';
+import { countryFlag, formatCurrency, formatDateTime } from './country-flag.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
 import { HeroSmsHttpAdapter, type HeroSms } from './herosms.js';
@@ -146,7 +146,7 @@ const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll
 
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
   const candidates = detail.candidates.map((candidate) => `<li>${escapeHtml(candidate.countryName)}：预检价格 ${candidate.quotedPrice}，${candidate.used ? '已获取' : '未获取'}</li>`).join('');
-  const activations = detail.activations.length === 0 ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${detail.activations.map((activation) => `<li><strong>${escapeHtml(activation.countryName)}：</strong>${escapeHtml(activationStatusLabel(activation.status))}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(activation.acquiredAt.toISOString())}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理' : ''}</li>`).join('')}</ul>`;
+  const activations = detail.activations.length === 0 ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${detail.activations.map((activation) => `<li><strong>${escapeHtml(activation.countryName)}：</strong>${escapeHtml(activationStatusLabel(activation.status))}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt))}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理' : ''}</li>`).join('')}</ul>`;
   const costs = detail.costs.length === 0 ? '<p>尚无费用。</p>' : `<ul class="summary">${detail.costs.map((cost) => `<li>累计激活费用：${cost.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；已确认退款：${cost.confirmedRefund.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；净成本：${cost.netCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}</li>`).join('')}</ul>`;
   const numberExpiryIso = detail.activation ? detail.activation.numberExpiresAt.toISOString() : '';
   const numberRemaining = detail.activation ? `<span data-countdown="${numberExpiryIso}" data-format="minutes-seconds">${escapeHtml(numberExpiryIso)}</span>` : '';
@@ -461,6 +461,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
   app.get<{ Params: { id: string } }>(`${adminRoot}/authorizations/:id`, async (request, reply) => {
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     if (!session) return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    await activationAuthorizations.cancelRevokedActivations().catch(() => undefined);
+    await activationAuthorizations.reconcileCancellationConfirmations().catch(() => undefined);
     const detail = await activationAuthorizations.detail(request.params.id);
     if (!detail) return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     cookiesForSession(reply, session.id, session.csrfToken);
