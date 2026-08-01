@@ -324,12 +324,12 @@ export class ActivationAuthorizations {
          SELECT request.status, candidate.country_name
          FROM number_acquisition_requests request
          JOIN authorization_candidate_countries candidate
-           ON candidate.authorization_id = request.authorization_id AND candidate.country_id = request.country_id
+           ON candidate.authorization_id = request.authorization_id AND candidate.position = request.candidate_position
          WHERE request.authorization_id = auth.id AND request.status IN ('requesting', 'reconciling', 'manual')
          ORDER BY request.requested_at DESC LIMIT 1
        ) acquisition ON true
        LEFT JOIN authorization_candidate_countries candidate
-         ON candidate.authorization_id = auth.id AND candidate.country_id = activation.country_id
+         ON candidate.authorization_id = auth.id AND candidate.position = activation.candidate_position
        WHERE auth.id = $1`,
       [id],
     );
@@ -347,7 +347,7 @@ export class ActivationAuthorizations {
                 refund.amount::text AS refund_amount, activation.refund_reconciliation_status
          FROM supplier_activations activation
          JOIN authorization_candidate_countries candidate
-           ON candidate.authorization_id = activation.authorization_id AND candidate.country_id = activation.country_id
+           ON candidate.authorization_id = activation.authorization_id AND candidate.position = activation.candidate_position
          LEFT JOIN supplier_activation_refunds refund ON refund.supplier_activation_id = activation.id
          WHERE activation.authorization_id = $1 ORDER BY activation.acquired_at`, [id],
       ),
@@ -419,7 +419,7 @@ export class ActivationAuthorizations {
               last_activation.timed_out_at AS last_activation_timed_out_at
        FROM activation_authorizations auth
        LEFT JOIN supplier_activations activation ON activation.authorization_id = auth.id AND activation.status IN ('waiting_sms', 'cancellation_confirming', 'sms_delivered', 'completion_confirming', 'completed', 'manual_reconciliation')
-       LEFT JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id AND candidate.country_id = activation.country_id
+       LEFT JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id AND candidate.position = activation.candidate_position
        LEFT JOIN LATERAL (
          SELECT status FROM number_acquisition_requests request
          WHERE request.authorization_id = auth.id AND request.status IN ('requesting', 'reconciling', 'manual')
@@ -1030,8 +1030,8 @@ export class ActivationAuthorizations {
           await this.clearPendingReplacement(authorizationId);
           return { state: 'confirming' };
         }
-        const candidatesResult = await client.query<{ country_id: number }>(
-          'SELECT country_id FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NULL', [authorizationId],
+        const candidatesResult = await client.query<{ position: number; country_id: number }>(
+          'SELECT position, country_id FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NULL ORDER BY position', [authorizationId],
         );
         if (!candidatesResult.rowCount) {
           await client.query("UPDATE activation_authorizations SET status = 'quota_exhausted' WHERE id = $1 AND status = 'in_progress'", [authorizationId]);
@@ -1042,16 +1042,16 @@ export class ActivationAuthorizations {
         const candidates = candidatesResult.rows
           .map((candidate) => ({ ...candidate, quote: quoteByCountry.get(candidate.country_id) }))
           .filter((candidate): candidate is typeof candidate & { quote: HeroSmsQuote } => Boolean(candidate.quote && candidate.quote.stock > 0))
-          .sort((left, right) => left.quote.price - right.quote.price || left.country_id - right.country_id);
+          .sort((left, right) => left.quote.price - right.quote.price || left.country_id - right.country_id || left.position - right.position);
         for (const candidate of candidates) {
           const requestedAt = this.now();
           const request = await client.query<{ id: string }>(
-            `INSERT INTO number_acquisition_requests (authorization_id, country_id, requested_price, status, requested_at, updated_at)
-             SELECT auth.id, $2, $3, 'requesting', $4, $4
+            `INSERT INTO number_acquisition_requests (authorization_id, candidate_position, country_id, requested_price, status, requested_at, updated_at)
+             SELECT auth.id, $2, $3, $4, 'requesting', $5, $5
              FROM activation_authorizations auth
-             WHERE auth.id = $1 AND auth.status = 'in_progress' AND auth.expires_at > $4
+             WHERE auth.id = $1 AND auth.status = 'in_progress' AND auth.expires_at > $5
              RETURNING id`,
-            [authorizationId, candidate.country_id, candidate.quote.price, requestedAt],
+            [authorizationId, candidate.position, candidate.country_id, candidate.quote.price, requestedAt],
           );
           const requestId = request.rows[0]?.id;
           if (!requestId) {
@@ -1071,7 +1071,7 @@ export class ActivationAuthorizations {
           await this.clearPendingReplacement(authorizationId);
           try {
             const number = await this.heroSms.getNumber(this.openAiServiceCode, candidate.country_id);
-            const deliverable = await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.country_id, candidate.quote.price, number);
+            const deliverable = await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.position, candidate.country_id, candidate.quote.price, number);
             return { state: deliverable ? 'replaced' : 'error' };
           } catch (error) {
             if (error instanceof HeroSmsResponseError && error.kind === 'uncertain') {
@@ -1169,8 +1169,8 @@ export class ActivationAuthorizations {
             await client.query('COMMIT');
             return 'claimed' as const;
           }
-          const candidatesResult = await client.query<{ country_id: number; country_name: string }>(
-            'SELECT country_id, country_name FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NULL',
+          const candidatesResult = await client.query<{ position: number; country_id: number; country_name: string }>(
+            'SELECT position, country_id, country_name FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NULL ORDER BY position',
             [authorizationId],
           );
           await client.query('COMMIT');
@@ -1179,7 +1179,7 @@ export class ActivationAuthorizations {
           const candidates = candidatesResult.rows
             .map((candidate) => ({ ...candidate, quote: quoteByCountry.get(candidate.country_id) }))
             .filter((candidate): candidate is typeof candidate & { quote: HeroSmsQuote } => Boolean(candidate.quote && candidate.quote.stock > 0))
-            .sort((left, right) => left.quote.price - right.quote.price || left.country_id - right.country_id);
+            .sort((left, right) => left.quote.price - right.quote.price || left.country_id - right.country_id || left.position - right.position);
 
           if (!candidatesResult.rowCount) {
             await client.query("UPDATE activation_authorizations SET status = 'quota_exhausted' WHERE id = $1 AND status = 'in_progress'", [authorizationId]);
@@ -1203,13 +1203,13 @@ export class ActivationAuthorizations {
 
             const request = await client.query<{ id: string }>(
               `INSERT INTO number_acquisition_requests
-                (authorization_id, country_id, requested_price, status, requested_at, updated_at)
-               SELECT auth.id, $2, $3, 'requesting', $4, $4
+                (authorization_id, candidate_position, country_id, requested_price, status, requested_at, updated_at)
+               SELECT auth.id, $2, $3, $4, 'requesting', $5, $5
                FROM activation_authorizations auth
-               WHERE auth.id = $1 AND auth.status = 'in_progress' AND auth.expires_at > $4
-                 AND auth.recipient_session_hash = $5
+               WHERE auth.id = $1 AND auth.status = 'in_progress' AND auth.expires_at > $5
+                 AND auth.recipient_session_hash = $6
                RETURNING id`,
-              [authorizationId, candidate.country_id, candidate.quote.price, requestedAt, tokenHash(sessionToken)],
+              [authorizationId, candidate.position, candidate.country_id, candidate.quote.price, requestedAt, tokenHash(sessionToken)],
             );
             const requestId = request.rows[0]?.id;
             if (!requestId) return 'not-found' as const;
@@ -1246,7 +1246,7 @@ export class ActivationAuthorizations {
             }
 
             try {
-              const deliverable = await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.country_id, candidate.quote.price, number);
+              const deliverable = await this.persistSuccessfulAcquisition(client, requestId, authorizationId, candidate.position, candidate.country_id, candidate.quote.price, number);
               return deliverable ? 'claimed' as const : 'not-found' as const;
             } catch {
               try {
@@ -1288,7 +1288,7 @@ export class ActivationAuthorizations {
       `SELECT request.id, auth.recipient_identifier, candidate.country_name, request.status, request.requested_at
        FROM number_acquisition_requests request
        JOIN activation_authorizations auth ON auth.id = request.authorization_id
-       JOIN authorization_candidate_countries candidate ON candidate.authorization_id = request.authorization_id AND candidate.country_id = request.country_id
+       JOIN authorization_candidate_countries candidate ON candidate.authorization_id = request.authorization_id AND candidate.position = request.candidate_position
        WHERE request.status IN ('requesting', 'reconciling', 'manual') ORDER BY request.requested_at`,
     );
     const result: AcquisitionReconciliation[] = [];
@@ -1363,9 +1363,9 @@ export class ActivationAuthorizations {
 
   private async reconcileRequestWithoutLock(id: string): Promise<boolean> {
     const requestResult = await this.database.pool.query<{
-      authorization_id: string; country_id: number; requested_price: string; requested_at: Date; status: string;
+      authorization_id: string; candidate_position: number; country_id: number; requested_price: string; requested_at: Date; status: string;
     }>(
-      "SELECT authorization_id, country_id, requested_price::text, requested_at, status FROM number_acquisition_requests WHERE id = $1 AND status IN ('requesting', 'reconciling', 'manual')",
+      "SELECT authorization_id, candidate_position, country_id, requested_price::text, requested_at, status FROM number_acquisition_requests WHERE id = $1 AND status IN ('requesting', 'reconciling', 'manual')",
       [id],
     );
     const request = requestResult.rows[0];
@@ -1375,14 +1375,15 @@ export class ActivationAuthorizations {
     const windowEnd = new Date(this.now().getTime() + 5 * 60 * 1000);
     const alreadyPersisted = await this.database.pool.query<{ provider_activation_id: string }>(
       `SELECT provider_activation_id FROM supplier_activations
-       WHERE authorization_id = $1 AND country_id = $2 AND acquired_at BETWEEN $3 AND $4`,
-      [request.authorization_id, request.country_id, windowStart, windowEnd],
+       WHERE authorization_id = $1 AND candidate_position = $2`,
+      [request.authorization_id, request.candidate_position],
     );
     if (alreadyPersisted.rowCount === 1) {
       await this.database.transaction(async (client) => {
         await client.query(
-          'UPDATE authorization_candidate_countries SET used_at = COALESCE(used_at, $3) WHERE authorization_id = $1 AND country_id = $2',
-          [request.authorization_id, request.country_id, this.now()],
+          `UPDATE authorization_candidate_countries SET used_at = COALESCE(used_at, $3)
+           WHERE authorization_id = $1 AND position = $2`,
+          [request.authorization_id, request.candidate_position, this.now()],
         );
         await client.query("UPDATE number_acquisition_requests SET status = 'resolved', updated_at = $2 WHERE id = $1", [id, this.now()]);
         await client.query('DELETE FROM number_acquisition_candidates WHERE request_id = $1', [id]);
@@ -1439,10 +1440,10 @@ export class ActivationAuthorizations {
   private async resolveCandidate(id: string, providerActivationId: string): Promise<boolean> {
     return this.database.transaction(async (client) => {
       const result = await client.query<{
-        authorization_id: string; request_country_id: number; requested_price: string; phone_number: string; activation_cost: string;
+        authorization_id: string; candidate_position: number; request_country_id: number; requested_price: string; phone_number: string; activation_cost: string;
         currency: string; activation_time: Date | null; candidate_country_id: number | null;
       }>(
-        `SELECT request.authorization_id, request.country_id AS request_country_id, request.requested_price::text,
+        `SELECT request.authorization_id, request.candidate_position, request.country_id AS request_country_id, request.requested_price::text,
                 candidate.phone_number, candidate.activation_cost::text, candidate.currency, candidate.activation_time,
                 candidate.country_id AS candidate_country_id
          FROM number_acquisition_requests request
@@ -1456,13 +1457,14 @@ export class ActivationAuthorizations {
       const countryId = candidate.candidate_country_id ?? candidate.request_country_id;
       if (countryId !== candidate.request_country_id) return false;
       const acquiredAt = candidate.activation_time ?? this.now();
-      await this.insertSupplierActivation(client, candidate.authorization_id, countryId, {
+      await this.insertSupplierActivation(client, candidate.authorization_id, candidate.candidate_position, countryId, {
         activationId: providerActivationId, phoneNumber: candidate.phone_number,
         activationCost: Number(candidate.activation_cost), currency: candidate.currency, activationTime: acquiredAt,
       }, Number(candidate.requested_price));
       await client.query(
-        'UPDATE authorization_candidate_countries SET used_at = $3 WHERE authorization_id = $1 AND country_id = $2 AND used_at IS NULL',
-        [candidate.authorization_id, countryId, this.now()],
+        `UPDATE authorization_candidate_countries SET used_at = $3
+         WHERE authorization_id = $1 AND position = $2 AND used_at IS NULL`,
+        [candidate.authorization_id, candidate.candidate_position, this.now()],
       );
       await client.query("UPDATE number_acquisition_requests SET status = 'resolved', updated_at = $2 WHERE id = $1", [id, this.now()]);
       await client.query('DELETE FROM number_acquisition_candidates WHERE request_id = $1', [id]);
@@ -1474,16 +1476,18 @@ export class ActivationAuthorizations {
     client: PoolClient,
     requestId: string,
     authorizationId: string,
+    candidatePosition: number,
     countryId: number,
     requestedPrice: number,
     number: HeroSmsNumber,
   ): Promise<boolean> {
     await client.query('BEGIN');
     try {
-      const deliverable = await this.insertSupplierActivation(client, authorizationId, countryId, number, requestedPrice);
+      const deliverable = await this.insertSupplierActivation(client, authorizationId, candidatePosition, countryId, number, requestedPrice);
       await client.query(
-        'UPDATE authorization_candidate_countries SET used_at = $3 WHERE authorization_id = $1 AND country_id = $2 AND used_at IS NULL',
-        [authorizationId, countryId, this.now()],
+        `UPDATE authorization_candidate_countries SET used_at = $3
+         WHERE authorization_id = $1 AND position = $2 AND used_at IS NULL`,
+        [authorizationId, candidatePosition, this.now()],
       );
       await client.query("UPDATE number_acquisition_requests SET status = 'resolved', updated_at = $2 WHERE id = $1", [requestId, this.now()]);
       await client.query('COMMIT');
@@ -1497,6 +1501,7 @@ export class ActivationAuthorizations {
   private async insertSupplierActivation(
     client: PoolClient,
     authorizationId: string,
+    candidatePosition: number,
     countryId: number,
     number: HeroSmsNumber,
     fallbackPrice: number,
@@ -1521,9 +1526,9 @@ export class ActivationAuthorizations {
       : new Date(acquiredAt.getTime() + 20 * 60 * 1000);
     await client.query(
       `INSERT INTO supplier_activations
-        (authorization_id, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_poll_after, authorization_expiry_cancellation_pending, authorization_revocation_cancellation_pending)
-       VALUES ($1, $2, $3, 'waiting_sms', $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [authorizationId, countryId, number.activationId, deliverable ? number.phoneNumber : null,
+        (authorization_id, candidate_position, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_poll_after, authorization_expiry_cancellation_pending, authorization_revocation_cancellation_pending)
+       VALUES ($1, $2, $3, $4, 'waiting_sms', $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [authorizationId, candidatePosition, countryId, number.activationId, deliverable ? number.phoneNumber : null,
         number.activationCost ?? fallbackPrice, number.currency ?? 'UNKNOWN', acquiredAt,
         new Date(acquiredAt.getTime() + 2 * 60 * 1000), numberExpiresAt,
         deliverable ? acquiredAt : null, !deliverable && authorizationStatus !== 'revoked', authorizationStatus === 'revoked'],

@@ -101,7 +101,7 @@ if (!databaseUrl) {
     throw new Error('未设置 TEST_DATABASE_URL；请通过 npm test 运行完整测试');
   });
 } else {
-  test('管理员查看 HeroSMS 状态并保存三个不同的默认候选地区', async () => {
+  test('管理员查看 HeroSMS 状态并保存三个默认候选地区', async () => {
     const { app } = await openApplication();
     try {
       const session = await login(app);
@@ -136,7 +136,7 @@ if (!databaseUrl) {
     }
   });
 
-  test('管理员不能以重复或不可查询地区覆盖已有默认候选地区', async () => {
+  test('管理员可以保存重复地区但不能保存不可查询地区', async () => {
     const { app } = await openApplication();
     try {
       const session = await login(app);
@@ -149,6 +149,14 @@ if (!databaseUrl) {
       });
       assert.equal(initial.statusCode, 303);
 
+      const duplicatesAllowed = await app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/settings`,
+        headers,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidate1=1&candidate2=1&candidate3=1`,
+      });
+      assert.equal(duplicatesAllowed.statusCode, 303);
+
       const rejected = await app.inject({
         method: 'POST',
         url: `/${config.adminPath}/settings`,
@@ -156,12 +164,10 @@ if (!databaseUrl) {
         payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidate1=1&candidate2=1&candidate3=99`,
       });
       assert.equal(rejected.statusCode, 422);
-      assert.match(rejected.body, /三个不同且可查询的候选地区/);
+      assert.match(rejected.body, /三个可查询的候选地区/);
 
       const settings = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
-      assert.match(settings.body, /option value="1" selected/);
-      assert.match(settings.body, /option value="2" selected/);
-      assert.match(settings.body, /option value="3" selected/);
+      assert.equal((settings.body.match(/option value="1" selected/g) || []).length, 3);
     } finally {
       await app.close();
     }

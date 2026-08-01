@@ -33,8 +33,11 @@ export class Database {
 
       CREATE TABLE IF NOT EXISTS default_candidate_countries (
         position SMALLINT PRIMARY KEY CHECK (position BETWEEN 1 AND 3),
-        country_id INTEGER NOT NULL UNIQUE CHECK (country_id >= 0)
+        country_id INTEGER NOT NULL CHECK (country_id >= 0)
       );
+
+      ALTER TABLE default_candidate_countries
+        DROP CONSTRAINT IF EXISTS default_candidate_countries_country_id_key;
 
       CREATE TABLE IF NOT EXISTS activation_authorizations (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -77,16 +80,21 @@ export class Database {
         quoted_price NUMERIC NOT NULL CHECK (quoted_price >= 0),
         quoted_stock INTEGER NOT NULL CHECK (quoted_stock > 0),
         used_at TIMESTAMPTZ,
-        PRIMARY KEY (authorization_id, position),
-        UNIQUE (authorization_id, country_id)
+        PRIMARY KEY (authorization_id, position)
       );
 
       ALTER TABLE authorization_candidate_countries
         ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ;
+      ALTER TABLE authorization_candidate_countries
+        DROP CONSTRAINT IF EXISTS authorization_candidate_countri_authorization_id_country_id_key;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS authorization_candidate_countries_position_country_idx
+        ON authorization_candidate_countries (authorization_id, position, country_id);
 
       CREATE TABLE IF NOT EXISTS supplier_activations (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
+        candidate_position SMALLINT NOT NULL CHECK (candidate_position BETWEEN 1 AND 3),
         country_id INTEGER NOT NULL,
         provider_activation_id TEXT NOT NULL UNIQUE,
         status TEXT NOT NULL CHECK (status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'cancelled', 'manual_reconciliation', 'sms_delivered', 'completion_confirming', 'completed', 'timed_out')),
@@ -97,8 +105,30 @@ export class Database {
         cancel_available_at TIMESTAMPTZ NOT NULL,
         expires_at TIMESTAMPTZ NOT NULL,
         CHECK (expires_at > acquired_at),
-        CHECK (cancel_available_at >= acquired_at)
+        CHECK (cancel_available_at >= acquired_at),
+        CONSTRAINT supplier_activations_candidate_position_fkey
+          FOREIGN KEY (authorization_id, candidate_position, country_id)
+          REFERENCES authorization_candidate_countries (authorization_id, position, country_id) ON DELETE RESTRICT
       );
+
+      ALTER TABLE supplier_activations
+        ADD COLUMN IF NOT EXISTS candidate_position SMALLINT;
+      UPDATE supplier_activations activation
+        SET candidate_position = candidate.position
+        FROM authorization_candidate_countries candidate
+        WHERE activation.candidate_position IS NULL
+          AND candidate.authorization_id = activation.authorization_id
+          AND candidate.country_id = activation.country_id;
+      ALTER TABLE supplier_activations ALTER COLUMN candidate_position SET NOT NULL;
+      ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_candidate_position_check;
+      ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_candidate_position_check
+        CHECK (candidate_position BETWEEN 1 AND 3);
+      ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_candidate_position_fkey;
+      ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_candidate_position_fkey
+        FOREIGN KEY (authorization_id, candidate_position, country_id)
+        REFERENCES authorization_candidate_countries (authorization_id, position, country_id) ON DELETE RESTRICT;
+      CREATE UNIQUE INDEX IF NOT EXISTS supplier_activations_candidate_position_idx
+        ON supplier_activations (authorization_id, candidate_position);
 
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_status_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_status_check
@@ -228,13 +258,35 @@ export class Database {
       CREATE TABLE IF NOT EXISTS number_acquisition_requests (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
+        candidate_position SMALLINT NOT NULL CHECK (candidate_position BETWEEN 1 AND 3),
         country_id INTEGER NOT NULL,
         requested_price NUMERIC NOT NULL CHECK (requested_price >= 0),
         status TEXT NOT NULL CHECK (status IN ('requesting', 'reconciling', 'manual', 'resolved', 'confirmed_absent', 'failed')),
         error_kind TEXT,
         requested_at TIMESTAMPTZ NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL
+        updated_at TIMESTAMPTZ NOT NULL,
+        CONSTRAINT number_acquisition_requests_candidate_position_fkey
+          FOREIGN KEY (authorization_id, candidate_position, country_id)
+          REFERENCES authorization_candidate_countries (authorization_id, position, country_id) ON DELETE RESTRICT
       );
+
+      ALTER TABLE number_acquisition_requests
+        ADD COLUMN IF NOT EXISTS candidate_position SMALLINT;
+      UPDATE number_acquisition_requests request
+        SET candidate_position = candidate.position
+        FROM authorization_candidate_countries candidate
+        WHERE request.candidate_position IS NULL
+          AND candidate.authorization_id = request.authorization_id
+          AND candidate.country_id = request.country_id;
+      ALTER TABLE number_acquisition_requests ALTER COLUMN candidate_position SET NOT NULL;
+      ALTER TABLE number_acquisition_requests DROP CONSTRAINT IF EXISTS number_acquisition_requests_candidate_position_check;
+      ALTER TABLE number_acquisition_requests ADD CONSTRAINT number_acquisition_requests_candidate_position_check
+        CHECK (candidate_position BETWEEN 1 AND 3);
+
+      ALTER TABLE number_acquisition_requests DROP CONSTRAINT IF EXISTS number_acquisition_requests_candidate_position_fkey;
+      ALTER TABLE number_acquisition_requests ADD CONSTRAINT number_acquisition_requests_candidate_position_fkey
+        FOREIGN KEY (authorization_id, candidate_position, country_id)
+        REFERENCES authorization_candidate_countries (authorization_id, position, country_id) ON DELETE RESTRICT;
 
       CREATE INDEX IF NOT EXISTS number_acquisition_requests_unresolved_idx
         ON number_acquisition_requests (requested_at)
@@ -317,8 +369,8 @@ export class Database {
     expiresAt: Date;
     candidates: Array<{ countryId: number; countryName: string; price: number; stock: number }>;
   }): Promise<string> {
-    if (input.candidates.length !== 3 || new Set(input.candidates.map((candidate) => candidate.countryId)).size !== 3) {
-      throw new Error('激活授权必须包含三个不同的候选地区');
+    if (input.candidates.length !== 3) {
+      throw new Error('激活授权必须包含三个候选位置');
     }
     return this.transaction(async (client) => {
       const result = await client.query<{ id: string }>(

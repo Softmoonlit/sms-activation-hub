@@ -16,7 +16,7 @@ export interface CandidateLocationSettings {
 
 export class CandidateLocationValidationError extends Error {
   constructor() {
-    super('请选择三个不同且可查询的候选地区。');
+    super('请选择三个可查询的候选地区。');
   }
 }
 
@@ -54,7 +54,7 @@ export class DefaultCandidateLocations {
   }
 
   async replace(countryIds: number[]): Promise<void> {
-    if (countryIds.length !== 3 || new Set(countryIds).size !== 3) {
+    if (countryIds.length !== 3) {
       throw new CandidateLocationValidationError();
     }
     const settings = await this.settings();

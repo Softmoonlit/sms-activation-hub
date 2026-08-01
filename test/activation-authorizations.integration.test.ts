@@ -127,6 +127,69 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
+  test('管理员可以用三个相同候选地区创建激活授权', async () => {
+    const { app, database } = await openApplication();
+    try {
+      await database.replaceDefaultCandidateCountryIds([1, 1, 1]);
+      const session = await login(app);
+      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+
+      assert.equal(created.statusCode, 201);
+      assert.match(created.body, /\/a\/[A-Za-z0-9_-]{43}/);
+    } finally { await app.close(); }
+  });
+
+  test('三个相同候选地区按位置依次消费且后台成本不重复', async () => {
+    let now = new Date('2026-08-01T00:00:00.000Z');
+    const activationIds = [0, 1, 2].map(() => `duplicate-country-${randomUUID()}`);
+    const acquiredCountries: number[] = [];
+    const heroSms = scriptedHeroSms({
+      getNumber: async (_serviceCode, countryId) => {
+        const activationId = activationIds[acquiredCountries.length]; assert.ok(activationId);
+        acquiredCountries.push(countryId);
+        return {
+          activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await database.replaceDefaultCandidateCountryIds([1, 1, 1]);
+      const session = await login(app);
+      const recipientIdentifier = `重复地区-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      assert.equal(created.statusCode, 201);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+
+      const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
+      for (const minute of [2, 4]) {
+        now = new Date(`2026-08-01T00:0${minute}:00.000Z`);
+        const replaced: InjectionResponse = await app.inject({
+          method: 'POST', url: `/a/${token}/replacement/confirm`,
+          headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+          payload: 'replacement=confirm',
+        });
+        assert.equal(replaced.statusCode, 303);
+      }
+
+      assert.deepEqual(acquiredCountries, [1, 1, 1]);
+      const recipientPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(recipientPage.body, /剩余可用号码次数：0/);
+      assert.doesNotMatch(recipientPage.body, /更换号码/);
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const authorizationId = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(authorizationId);
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
+      for (const activationId of activationIds) {
+        assert.equal((detail.body.match(new RegExp(activationId, 'g')) ?? []).length, 1);
+      }
+      assert.match(detail.body, /累计激活费用：2\.40 USD/);
+    } finally { await app.close(); }
+  });
+
   test('创建会阻止无库存、余额不足和同一标准化接收者的重复未结束授权', async () => {
     const recipientIdentifier = `Case-${randomUUID()}`;
     const first = await openApplication();
@@ -432,6 +495,123 @@ if (!databaseUrl) {
       const page = await restarted.app.inject({ method: 'GET', url: `/a/${token!}`, headers: { cookie: recipientCookie! } });
       assert.match(page.body, /\+1 415 555 0123/);
     } finally { await restarted.app.close(); }
+  });
+
+  test('相同地区的后继获取对账不会误用前一候选位置', async () => {
+    let now = new Date('2026-08-08T06:00:00.000Z');
+    const firstActivationId = `duplicate-first-${randomUUID()}`;
+    const secondActivationId = `duplicate-second-${randomUUID()}`;
+    let getNumberCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        if (getNumberCalls === 2) throw new HeroSmsResponseError('uncertain');
+        return {
+          activationId: firstActivationId, phoneNumber: '+14155550123', activationCost: 0.8,
+          currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      activeActivations: async () => getNumberCalls < 2 ? [] : [{
+        activationId: secondActivationId, phoneNumber: '+14155550124', activationCost: 0.8,
+        currency: 'USD', serviceCode: 'openai', countryId: 1, activationTime: now, status: '1',
+      }],
+      activationHistory: async () => [],
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await database.replaceDefaultCandidateCountryIds([1, 1, 1]);
+      const session = await login(app);
+      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
+
+      now = new Date('2026-08-08T06:02:00.000Z');
+      const replaced = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replaced.statusCode, 303);
+      const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /\+1 415 555 0124/);
+
+      const activations = await database.pool.query<{ provider_activation_id: string; candidate_position: number }>(
+        'SELECT provider_activation_id, candidate_position FROM supplier_activations WHERE provider_activation_id = ANY($1) ORDER BY candidate_position',
+        [[firstActivationId, secondActivationId]],
+      );
+      assert.deepEqual(activations.rows, [
+        { provider_activation_id: firstActivationId, candidate_position: 1 },
+        { provider_activation_id: secondActivationId, candidate_position: 2 },
+      ]);
+    } finally { await app.close(); }
+  });
+
+  test('相同地区的后继获取可人工关联且后台不重复请求', async () => {
+    let now = new Date('2026-08-08T12:00:00.000Z');
+    const firstActivationId = `duplicate-manual-first-${randomUUID()}`;
+    const linkedActivationId = `duplicate-manual-linked-${randomUUID()}`;
+    const otherActivationId = `duplicate-manual-other-${randomUUID()}`;
+    let getNumberCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        if (getNumberCalls === 2) throw new HeroSmsResponseError('uncertain');
+        return {
+          activationId: firstActivationId, phoneNumber: '+14155550123', activationCost: 0.8,
+          currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      activeActivations: async () => getNumberCalls < 2 ? [] : [
+        {
+          activationId: linkedActivationId, phoneNumber: '+14155550124', activationCost: 0.8,
+          currency: 'USD', serviceCode: 'openai', countryId: 1, activationTime: now, status: '1',
+        },
+        {
+          activationId: otherActivationId, phoneNumber: '+14155550125', activationCost: 0.8,
+          currency: 'USD', serviceCode: 'openai', countryId: 1, activationTime: now, status: '1',
+        },
+      ],
+      activationHistory: async () => [],
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await database.replaceDefaultCandidateCountryIds([1, 1, 1]);
+      const session = await login(app);
+      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
+
+      now = new Date('2026-08-08T12:02:00.000Z');
+      const confirming = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(confirming.statusCode, 202);
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const linkedAction = new RegExp(`action="/${config.adminPath}/acquisition-requests/[0-9a-f-]{36}/candidates/${linkedActivationId}/link"`, 'g');
+      const otherAction = new RegExp(`action="/${config.adminPath}/acquisition-requests/[0-9a-f-]{36}/candidates/${otherActivationId}/link"`, 'g');
+      assert.equal((home.body.match(linkedAction) ?? []).length, 1);
+      assert.equal((home.body.match(otherAction) ?? []).length, 1);
+      const link = home.body.match(new RegExp(`action="(/${config.adminPath}/acquisition-requests/[0-9a-f-]{36}/candidates/${linkedActivationId}/link)"`))?.[1]; assert.ok(link);
+      assert.equal((await post(app, session, link, {})).statusCode, 303);
+
+      const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(page.body, /\+1 415 555 0124/);
+      const activations = await database.pool.query<{ provider_activation_id: string; candidate_position: number }>(
+        'SELECT provider_activation_id, candidate_position FROM supplier_activations WHERE provider_activation_id = ANY($1) ORDER BY candidate_position',
+        [[firstActivationId, linkedActivationId]],
+      );
+      assert.deepEqual(activations.rows, [
+        { provider_activation_id: firstActivationId, candidate_position: 1 },
+        { provider_activation_id: linkedActivationId, candidate_position: 2 },
+      ]);
+    } finally { await app.close(); }
   });
 
   test('受保护 Webhook 持久化结构化验证码、幂等终止后继操作并异步完成供应商激活', async () => {
@@ -1430,9 +1610,9 @@ if (!databaseUrl) {
       for (const [index, activationId] of activationIds.entries()) {
         await database.pool.query(
           `INSERT INTO supplier_activations
-             (authorization_id, country_id, provider_activation_id, status, activation_cost, currency, acquired_at, cancel_available_at, expires_at)
-           VALUES ($1, $2, $3, $4, $5, 'USD', $6, $6, $7)`,
-          [authorizationId, index + 1, activationId, index === 2 ? 'waiting_sms' : 'cancelled', [0.8, 1.25, 2][index], new Date(now.getTime() + index), new Date('2026-09-06T00:20:00.000Z')],
+             (authorization_id, candidate_position, country_id, provider_activation_id, status, activation_cost, currency, acquired_at, cancel_available_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'USD', $7, $7, $8)`,
+          [authorizationId, index + 1, index + 1, activationId, index === 2 ? 'waiting_sms' : 'cancelled', [0.8, 1.25, 2][index], new Date(now.getTime() + index), new Date('2026-09-06T00:20:00.000Z')],
         );
       }
       await database.pool.query(

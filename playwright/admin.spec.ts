@@ -337,7 +337,7 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
     await assertNoOverflow(page, '号码显示状态');
 
     // 倒计时元素存在时不溢出
-    await expect(page.locator('[data-countdown]')).toBeVisible();
+    await expect(page.locator('[data-countdown]').first()).toBeVisible();
     await assertNoOverflow(page, '倒计时显示状态');
 
     // 时间快进，换号按钮出现后
