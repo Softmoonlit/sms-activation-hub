@@ -92,8 +92,8 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
     // 登录后重定向到首页
     await expect(page).toHaveURL(`${origin}/${config.adminPath}`);
     await expect(page.locator('h1', { hasText: '管理后台' })).toBeVisible();
-    // 首页包含创建授权区域
-    await expect(page.getByRole('heading', { name: '创建激活授权', level: 2 })).toBeVisible();
+    // 首页包含批量创建区域
+    await expect(page.getByRole('heading', { name: '批量创建激活授权链接', level: 2 })).toBeVisible();
     await expect(page.getByRole('heading', { name: '最近激活授权', level: 2 })).toBeVisible();
 
     // 通过 UI 进入设置页并配置默认候选地区
@@ -112,28 +112,26 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
     await expect(page.locator('h1', { hasText: '设置' })).toBeVisible();
     await expect(page.getByRole('status')).toHaveText('✓ 已保存');
 
-    // 返回首页，进入预检确认页
+    // 返回首页，进入批量数量确认页
     await page.getByRole('link', { name: '返回首页' }).click();
     await expect(page.locator('h1', { hasText: '管理后台' })).toBeVisible();
-    const recipientId = `admin-pw-${randomUUID()}`;
-    await page.locator('input[name="recipientIdentifier"]').fill(recipientId);
-    await page.getByRole('button', { name: '预检并确认' }).click();
-    await expect(page.locator('h1', { hasText: '确认激活授权' })).toBeVisible();
-    await expect(page.getByText('接收者标识：')).toBeVisible();
-    await expect(page.getByText('HeroSMS 余额：')).toBeVisible();
-    // 应有三个候选地区和库存
-    await expect(page.getByText('美国')).toBeVisible();
-    await expect(page.getByText('英国')).toBeVisible();
-    await expect(page.getByText('法国')).toBeVisible();
+    const quantity = page.locator('input[name="quantity"]');
+    await expect(quantity).toHaveValue('10');
+    await quantity.fill('3');
+    await page.getByRole('button', { name: '预览批量创建' }).click();
+    await expect(page.locator('h1', { hasText: '确认批量创建授权链接' })).toBeVisible();
+    await expect(page.getByText('将创建 3 条永久待领取授权链接')).toBeVisible();
+    await expect(page.getByText('HeroSMS')).toHaveCount(0);
+    await expect(page.getByText('候选地区')).toHaveCount(0);
 
-    // 授权已创建页（含复制按钮）
-    await page.getByRole('button', { name: '确认创建 24 小时授权' }).click();
-    await expect(page.locator('h1', { hasText: '激活授权已创建' })).toBeVisible();
-    await expect(page.locator('#authorization-url')).toBeVisible();
-    const urlText = await page.locator('#authorization-url').textContent();
-    assert.ok(urlText?.includes('/a/'), '授权链接应包含 /a/ 路径');
-    // 复制按钮可用
-    await page.getByRole('button', { name: '复制授权链接' }).click();
+    // 批量创建结果页只提供一次性复制全部
+    await page.getByRole('button', { name: '确认创建' }).click();
+    await expect(page.locator('h1', { hasText: '批量授权链接已创建' })).toBeVisible();
+    await expect(page.locator('#authorization-urls')).toBeVisible();
+    const urlText = await page.locator('#authorization-urls').textContent();
+    assert.equal(urlText?.trim().split('\n').length, 3);
+    assert.ok(urlText?.includes('/a/'), '批量结果应包含授权链接');
+    await page.getByRole('button', { name: '复制全部' }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('/a/');
 
     await context.close();
@@ -164,7 +162,7 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
     await expect(page.getByText(recipientId)).toBeVisible();
 
     // 查看详情
-    await page.getByRole('link', { name: '查看详情' }).first().click();
+    await page.locator('article.authorization').filter({ hasText: recipientId }).getByRole('link', { name: '查看详情' }).click();
     await expect(page.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
     await expect(page.getByText('授权状态：')).toBeVisible();
     await expect(page.getByText('获取额度：')).toBeVisible();

@@ -31,6 +31,12 @@ export const AUTHORIZATION_STATUS_LABELS: Record<AuthorizationStatus, Authorizat
   sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期',
 };
 
+export class AuthorizationTokenSuffixCollisionError extends Error {
+  constructor(readonly suffix: string) {
+    super(`授权链接末 8 位已存在：${suffix}`);
+  }
+}
+
 export class Database {
   readonly pool: Pool;
 
@@ -503,6 +509,41 @@ export class Database {
         );
       }
       return id;
+    });
+  }
+
+  async createUnclaimedAuthorizationBatch(input: readonly { tokenHash: string; tokenSuffix: string; createdAt: Date }[]): Promise<string[]> {
+    if (input.length === 0) {
+      throw new Error('批量创建至少需要一个授权链接');
+    }
+    const suffixes = input.map((record) => record.tokenSuffix);
+    if (new Set(suffixes).size !== suffixes.length) {
+      const duplicate = suffixes.find((suffix, index) => suffixes.indexOf(suffix) !== index);
+      throw new AuthorizationTokenSuffixCollisionError(duplicate ?? suffixes[0]!);
+    }
+    return this.transaction(async (client) => {
+      const existing = await client.query<{ token_suffix: string }>(
+        'SELECT token_suffix FROM activation_authorizations WHERE token_suffix = ANY($1::text[]) LIMIT 1',
+        [suffixes],
+      );
+      if (existing.rows[0]) {
+        throw new AuthorizationTokenSuffixCollisionError(existing.rows[0].token_suffix);
+      }
+
+      const ids: string[] = [];
+      for (const record of input) {
+        const result = await client.query<{ id: string }>(
+          `INSERT INTO activation_authorizations
+            (recipient_identifier, normalized_recipient_identifier, internal_note, token_hash, token_suffix, status, created_at, expires_at, last_activity_at)
+           VALUES (NULL, NULL, NULL, $1, $2, 'unclaimed', $3, NULL, $3)
+           RETURNING id`,
+          [record.tokenHash, record.tokenSuffix, record.createdAt],
+        );
+        const id = result.rows[0]?.id;
+        if (!id) throw new Error('创建待领取激活授权失败');
+        ids.push(id);
+      }
+      return ids;
     });
   }
 

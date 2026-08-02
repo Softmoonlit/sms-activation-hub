@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import type { FastifyInstance } from 'fastify';
 
-import { createApp } from '../src/app.js';
+import { createApp, type AppDependencies } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsNumber } from '../src/herosms.js';
@@ -19,8 +19,10 @@ const config: AppConfig = {
 };
 
 function scriptedHeroSms(overrides: Partial<{
-  balance: number;
+  balance: number | HeroSms['balance'];
   stock: number;
+  services: HeroSms['services'];
+  countries: HeroSms['countries'];
   quotes: HeroSms['quotes'];
   getNumber: HeroSms['getNumber'];
   activeActivations: HeroSms['activeActivations'];
@@ -29,10 +31,11 @@ function scriptedHeroSms(overrides: Partial<{
   cancelActivation: HeroSms['cancelActivation'];
   finishActivation: HeroSms['finishActivation'];
 }> = {}): HeroSms {
+  const balance = overrides.balance;
   return {
-    balance: async () => overrides.balance ?? 10,
-    services: async () => [{ code: 'openai', name: 'OpenAI' }],
-    countries: async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }],
+    balance: typeof balance === 'function' ? balance : async () => balance ?? 10,
+    services: overrides.services ?? (async () => [{ code: 'openai', name: 'OpenAI' }]),
+    countries: overrides.countries ?? (async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }]),
     quotes: overrides.quotes ?? (async () => [
       { countryId: 1, price: 0.8, stock: overrides.stock ?? 3 },
       { countryId: 2, price: 1.2, stock: 2 },
@@ -66,9 +69,9 @@ async function login(app: FastifyInstance): Promise<{ cookie: string; csrf: stri
   assert.equal(response.statusCode, 303);
   return { cookie: `admin_session=${cookieValue(response, 'admin_session')}; admin_csrf=${cookieValue(response, 'admin_csrf')}`, csrf: cookieValue(response, 'admin_csrf') };
 }
-async function openApplication(heroSms = scriptedHeroSms(), now?: () => Date) {
+async function openApplication(heroSms = scriptedHeroSms(), now?: () => Date, extraDependencies: Omit<AppDependencies, 'heroSms' | 'now'> = {}) {
   const database = new Database(databaseUrl!);
-  const app = await createApp({ ...config, sessionSecret: `${config.sessionSecret}-${randomUUID()}` }, database, { heroSms, now });
+  const app = await createApp({ ...config, sessionSecret: `${config.sessionSecret}-${randomUUID()}` }, database, { heroSms, now, ...extraDependencies });
   await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
   return { app, database };
 }
@@ -83,11 +86,197 @@ async function createAuthorization(app: FastifyInstance, session: { cookie: stri
   return post(app, session, `/${config.adminPath}/authorizations`, { ...fields, preflightFingerprint });
 }
 
+async function createBatch(app: FastifyInstance, session: { cookie: string; csrf: string }, quantity: string): Promise<InjectionResponse> {
+  const preview = await post(app, session, `/${config.adminPath}/authorizations/batch/preview`, { quantity });
+  const preflightFingerprint = preview.body.match(/name="preflightFingerprint" value="([A-Za-z0-9_-]+)"/)?.[1];
+  assert.ok(preflightFingerprint);
+  return post(app, session, `/${config.adminPath}/authorizations/batch`, { quantity, preflightFingerprint });
+}
+
+async function cleanupBatchAuthorizations(database: Database): Promise<void> {
+  await database.transaction(async (client) => {
+    const ids = await client.query<{ id: string }>(
+      "SELECT id FROM activation_authorizations WHERE recipient_identifier IS NULL",
+    );
+    if (!ids.rowCount) return;
+    const authorizationIds = ids.rows.map((row) => row.id);
+    await client.query('DELETE FROM lifecycle_events WHERE authorization_id = ANY($1::uuid[])', [authorizationIds]);
+    await client.query('DELETE FROM activation_authorizations WHERE id = ANY($1::uuid[])', [authorizationIds]);
+  });
+}
+
 if (!databaseUrl) {
   test('激活授权集成测试需要 TEST_DATABASE_URL', () => {
     throw new Error('未设置 TEST_DATABASE_URL；请通过 npm test 运行完整测试');
   });
 } else {
+  test('批量创建确认只依赖数量，生成永久待领取链接且不调用 HeroSMS', async () => {
+    let providerCalls = 0;
+    const heroSms = scriptedHeroSms({
+      balance: async () => { providerCalls += 1; throw new Error('批量创建不应读取余额'); },
+      quotes: async () => { providerCalls += 1; throw new Error('批量创建不应读取报价'); },
+      services: async () => { providerCalls += 1; throw new Error('批量创建不应读取服务'); },
+      countries: async () => { providerCalls += 1; throw new Error('批量创建不应读取地区'); },
+    });
+    let now = new Date('2026-08-01T00:00:00.000Z');
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const preview = await post(app, session, `/${config.adminPath}/authorizations/batch/preview`, { quantity: '10' });
+      assert.equal(preview.statusCode, 200);
+      assert.match(preview.body, /将创建 10 条永久待领取授权链接/);
+      assert.doesNotMatch(preview.body, /接收者标识|候选地区|HeroSMS|余额|价格|库存/);
+      const fingerprint = preview.body.match(/name="preflightFingerprint" value="([A-Za-z0-9_-]+)"/)?.[1];
+      assert.ok(fingerprint);
+
+      const created = await post(app, session, `/${config.adminPath}/authorizations/batch`, { quantity: '10', preflightFingerprint: fingerprint });
+      assert.equal(created.statusCode, 201);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 10);
+      assert.equal((created.body.match(/复制全部/g) ?? []).length, 1);
+      assert.equal((created.body.match(/复制授权链接/g) ?? []).length, 0);
+      assert.equal(providerCalls, 0);
+
+      const stored = await database.pool.query<{
+        token_hash: string | null; token_suffix: string | null; recipient_identifier: string | null;
+        claimed_at: Date | null; expires_at: Date | null; recipient_session_hash: string | null;
+      }>(
+        'SELECT token_hash, token_suffix, recipient_identifier, claimed_at, expires_at, recipient_session_hash FROM activation_authorizations WHERE token_suffix = ANY($1::text[])',
+        [links.map((link) => link.slice(-8))],
+      );
+      assert.equal(stored.rows.length, 10);
+      assert.ok(stored.rows.every((row) => row.token_hash && row.token_suffix && row.recipient_identifier === null && row.claimed_at === null && row.expires_at === null && row.recipient_session_hash === null));
+      const candidates = await database.pool.query('SELECT 1 FROM authorization_candidate_countries WHERE authorization_id IN (SELECT id FROM activation_authorizations WHERE token_suffix = ANY($1::text[]))', [links.map((link) => link.slice(-8))]);
+      assert.equal(candidates.rowCount, 0);
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.doesNotMatch(home.body, new RegExp(links[0]!));
+      assert.match(home.body, /待领取/);
+
+      now = new Date('2027-08-01T00:00:00.000Z');
+      const oneYearLater = await app.inject({ method: 'GET', url: `/a/${links[0]}` });
+      assert.equal(oneYearLater.statusCode, 200);
+      assert.match(oneYearLater.body, /获取号码/);
+      assert.doesNotMatch(oneYearLater.body, /领取前永久有效/);
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('批量数量只接受 1 至 50 的整数，非法确认不会写入记录', async () => {
+    const { app, database } = await openApplication();
+    try {
+      const session = await login(app);
+      const before = await database.pool.query<{ count: string }>("SELECT count(*)::text AS count FROM activation_authorizations WHERE created_at = TIMESTAMPTZ '2026-08-01 00:00:00+00'");
+      for (const quantity of ['0', '-1', '1.5', 'abc', '51', '']) {
+        const preview = await post(app, session, `/${config.adminPath}/authorizations/batch/preview`, { quantity });
+        assert.equal(preview.statusCode, 422, `数量 ${quantity} 应被拒绝`);
+        const created = await post(app, session, `/${config.adminPath}/authorizations/batch`, { quantity });
+        assert.equal(created.statusCode, 422, `数量 ${quantity} 的直接创建也应被拒绝`);
+      }
+      const after = await database.pool.query<{ count: string }>("SELECT count(*)::text AS count FROM activation_authorizations WHERE created_at = TIMESTAMPTZ '2026-08-01 00:00:00+00'");
+      assert.equal(after.rows[0]?.count, before.rows[0]?.count);
+    } finally { await app.close(); }
+  });
+
+  test('批量创建接受 1 和 50 两个边界数量', async () => {
+    const { app, database } = await openApplication();
+    try {
+      const session = await login(app);
+      const one = await createBatch(app, session, '1');
+      assert.equal(one.statusCode, 201);
+      assert.equal([...one.body.matchAll(/https:\/\/test\.example\/a\/[A-Za-z0-9_-]{43}/g)].length, 1);
+      const fifty = await createBatch(app, session, '50');
+      assert.equal(fifty.statusCode, 201);
+      assert.equal([...fifty.body.matchAll(/https:\/\/test\.example\/a\/[A-Za-z0-9_-]{43}/g)].length, 50);
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('批量记录写入任一行失败时整批回滚', async () => {
+    const { app, database } = await openApplication();
+    try {
+      const createdAt = new Date('2026-08-01T00:00:00.000Z');
+      await assert.rejects(database.createUnclaimedAuthorizationBatch([
+        { tokenHash: 'a'.repeat(64), tokenSuffix: 'ROLLBK01', createdAt },
+        { tokenHash: 'a'.repeat(64), tokenSuffix: 'ROLLBK02', createdAt },
+      ]));
+      const stored = await database.pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM activation_authorizations WHERE token_suffix IN ('ROLLBK01', 'ROLLBK02')",
+      );
+      assert.equal(stored.rows[0]?.count, '0');
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('末 8 位碰撞时重新生成 token，批量写入仍保持唯一', async () => {
+    const collidingSuffix = 'COLLIDE1';
+    const tokens = [
+      `${'A'.repeat(35)}${collidingSuffix}`,
+      `${'B'.repeat(35)}${collidingSuffix}`,
+      `${'C'.repeat(35)}FRESH001`,
+      `${'D'.repeat(35)}FRESH002`,
+    ];
+    let index = 0;
+    const { app, database } = await openApplication(scriptedHeroSms(), undefined, {
+      tokenGenerator: { generate: () => tokens[index++] ?? `${'E'.repeat(35)}FRESH003` },
+    });
+    try {
+      const session = await login(app);
+      const first = await createBatch(app, session, '1');
+      assert.equal(first.statusCode, 201);
+      const second = await createBatch(app, session, '2');
+      assert.equal(second.statusCode, 201);
+      const links = [...second.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 2);
+      assert.equal(new Set(links.map((link) => link.slice(-8))).size, 2);
+      assert.equal(index, 4, '碰撞应只重新生成发生碰撞的 token');
+      const collisionRows = await database.pool.query<{ count: string }>('SELECT count(*)::text AS count FROM activation_authorizations WHERE token_suffix = $1', [collidingSuffix]);
+      assert.equal(collisionRows.rows[0]?.count, '1');
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('待领取详情只展示短标识和生命周期，撤销后 token 立即返回 404', async () => {
+    const fixedNow = new Date('2026-08-01T00:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => fixedNow);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '1');
+      assert.equal(created.statusCode, 201);
+      const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1];
+      assert.ok(token);
+      const suffix = token.slice(-8);
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = home.body.match(new RegExp(`链接末 8 位：${suffix}.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1];
+      assert.ok(id);
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
+      assert.match(detail.body, new RegExp(`链接末 8 位：${suffix}`));
+      assert.match(detail.body, /待领取/);
+      assert.match(detail.body, /创建时间/);
+      assert.doesNotMatch(detail.body, /获取额度|候选地区|供应商激活|成本/);
+
+      const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
+      assert.equal(confirmation.statusCode, 200);
+      const revoked = await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {});
+      assert.equal(revoked.statusCode, 303);
+      const stored = await database.pool.query<{ token_hash: string | null; status: string }>('SELECT token_hash, status FROM activation_authorizations WHERE id = $1', [id]);
+      assert.equal(stored.rows[0]?.token_hash, null);
+      assert.equal(stored.rows[0]?.status, 'ended');
+      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
   test('管理员预检后创建 24 小时待领取授权，完整链接只在创建响应显示且 GET 不领取', async () => {
     const fixedNow = new Date('2026-08-01T00:00:00.000Z');
     const { app, database } = await openApplication(scriptedHeroSms(), () => fixedNow);

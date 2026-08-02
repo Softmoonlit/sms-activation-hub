@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import type { PoolClient } from 'pg';
 
-import { AUTHORIZATION_STATUS_LABELS, Database, type AuthorizationStatus } from './database.js';
+import { AUTHORIZATION_STATUS_LABELS, AuthorizationTokenSuffixCollisionError, Database, type AuthorizationStatus } from './database.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsQuote } from './herosms.js';
 
 const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -13,6 +13,16 @@ export interface CreatedAuthorization {
   token: string;
   tokenSuffix: string;
   expiresAt?: Date;
+}
+
+export interface AuthorizationTokenGenerator {
+  generate(): string;
+}
+
+export type AuthorizationTokenGeneratorInput = AuthorizationTokenGenerator | (() => string);
+
+export interface BatchAuthorizationPreflight {
+  quantity: number;
 }
 
 export interface AuthorizationPreflight {
@@ -195,6 +205,39 @@ function tokenHash(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
+const AUTHORIZATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const MAX_TOKEN_COLLISION_RETRIES = 100;
+const defaultAuthorizationTokenGenerator: AuthorizationTokenGenerator = {
+  generate: () => randomBytes(32).toString('base64url'),
+};
+
+function generatedToken(generator: AuthorizationTokenGeneratorInput): string {
+  const token = typeof generator === 'function' ? generator() : generator.generate();
+  if (!AUTHORIZATION_TOKEN_PATTERN.test(token)) {
+    throw new Error('授权 token 必须是 256 位以上的 Base64URL 值');
+  }
+  return token;
+}
+
+function tokenCollisionConstraint(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  if (!('code' in error) || error.code !== '23505') return false;
+  const constraint = 'constraint' in error && typeof error.constraint === 'string' ? error.constraint : '';
+  return constraint === 'activation_authorizations_token_suffix_idx' || constraint === 'activation_authorizations_token_hash_idx';
+}
+
+function parseBatchQuantity(value: unknown): number {
+  const raw = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : typeof value === 'string' ? value.trim() : '';
+  if (!/^\d+$/.test(raw)) {
+    throw new AuthorizationValidationError('创建数量必须是 1 至 50 的整数。');
+  }
+  const quantity = Number(raw);
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 50) {
+    throw new AuthorizationValidationError('创建数量必须是 1 至 50 的整数。');
+  }
+  return quantity;
+}
+
 function isAuthorizationAccessible(expiresAt: Date | null, now: Date): boolean {
   return expiresAt === null || expiresAt > now;
 }
@@ -231,6 +274,7 @@ export class ActivationAuthorizations {
     private readonly heroSms: HeroSms,
     private readonly openAiServiceCode: string,
     private readonly now: () => Date = () => new Date(),
+    private readonly tokenGenerator: AuthorizationTokenGeneratorInput = defaultAuthorizationTokenGenerator,
   ) {}
 
   async expireDue(): Promise<void> {
@@ -288,8 +332,42 @@ export class ActivationAuthorizations {
     return { recipientIdentifier, normalizedRecipientIdentifier, internalNote, balance, candidates };
   }
 
+  async batchPreflight(quantityValue: unknown): Promise<BatchAuthorizationPreflight> {
+    return { quantity: parseBatchQuantity(quantityValue) };
+  }
+
+  async createBatch(quantityValue: unknown): Promise<CreatedAuthorization[]> {
+    const quantity = parseBatchQuantity(quantityValue);
+    const createdAt = this.now();
+    let tokens = Array.from({ length: quantity }, () => generatedToken(this.tokenGenerator));
+
+    for (let attempt = 0; attempt < MAX_TOKEN_COLLISION_RETRIES; attempt += 1) {
+      try {
+        const ids = await this.database.createUnclaimedAuthorizationBatch(tokens.map((token) => ({
+          tokenHash: tokenHash(token),
+          tokenSuffix: token.slice(-8),
+          createdAt,
+        })));
+        return ids.map((id, index) => ({ id, token: tokens[index]!, tokenSuffix: tokens[index]!.slice(-8) }));
+      } catch (error) {
+        if (error instanceof AuthorizationTokenSuffixCollisionError) {
+          const index = tokens.findIndex((token) => token.slice(-8) === error.suffix);
+          if (index < 0) throw error;
+          tokens[index] = generatedToken(this.tokenGenerator);
+          continue;
+        }
+        if (tokenCollisionConstraint(error)) {
+          tokens = Array.from({ length: quantity }, () => generatedToken(this.tokenGenerator));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('批量生成授权 token 失败');
+  }
+
   async create(preflight: AuthorizationPreflight): Promise<CreatedAuthorization> {
-    const token = randomBytes(32).toString('base64url');
+    const token = generatedToken(this.tokenGenerator);
     const createdAt = this.now();
     const expiresAt = new Date(createdAt.getTime() + AUTHORIZATION_LIFETIME_MS);
     try {

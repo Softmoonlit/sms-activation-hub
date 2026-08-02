@@ -5,7 +5,7 @@ import formbody from '@fastify/formbody';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
-import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationPreflight, type AuthorizationSummary, type RecipientAuthorizationView } from './activation-authorizations.js';
+import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationPreflight, type AuthorizationSummary, type AuthorizationTokenGeneratorInput, type BatchAuthorizationPreflight, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
 import { countryFlag, countryFlagHtml, formatCurrency, formatDateTime } from './country-flag.js';
 import { type AppConfig, randomToken } from './config.js';
@@ -42,6 +42,7 @@ interface HeroSmsWebhookBody {
 }
 
 interface AuthorizationBody extends CsrfBody {
+  quantity?: string;
   recipientIdentifier?: string;
   internalNote?: string;
   preflightFingerprint?: string;
@@ -175,21 +176,30 @@ function adminShell(path: string, csrfToken: string, authorizations: Authorizati
     const recipient = request.recipientIdentifier ?? `链接末 8 位：${request.tokenSuffix ?? '未知'}`;
     return `<article class="authorization"><p><strong>${escapeHtml(recipient)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(request.requestedAt.toISOString())}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
   }).join('')}</section>`;
-  const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>创建激活授权</h2><p>填写接收者标识，下一步将执行 HeroSMS 预检并显示确认汇总。</p><form method="post" action="/${path}/authorizations/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>接收者标识<input name="recipientIdentifier" required maxlength="200"></label><button type="submit">预检并确认</button></form></section><section class="card"><h2>最近激活授权</h2>${recent}</section></section>`;
+  const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>批量创建激活授权链接</h2><p>一次生成 1 至 50 条永久待领取授权链接，不读取候选地区或 HeroSMS。</p><form method="post" action="/${path}/authorizations/batch/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>创建数量<input name="quantity" type="number" min="1" max="50" step="1" value="10" required></label><button type="submit">预览批量创建</button></form></section><section class="card"><h2>创建激活授权</h2><p>填写接收者标识，下一步将执行 HeroSMS 预检并显示确认汇总。</p><form method="post" action="/${path}/authorizations/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>接收者标识<input name="recipientIdentifier" required maxlength="200"></label><button type="submit">预检并确认</button></form></section><section class="card"><h2>最近激活授权</h2>${recent}</section></section>`;
   return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', content);
 }
 
 const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll('[data-countdown]');if(!elements.length)return;const update=()=>{let reload=false;elements.forEach((el)=>{const target=Date.parse(el.dataset.countdown);const seconds=Math.max(0,Math.floor((target-Date.now())/1000));const fmt=el.dataset.format;if(fmt==='hours-minutes'){if(seconds<=0){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);el.textContent=(h>0?h+'小时 ':'')+m+'分钟';}}else if(fmt==='minutes-seconds'){if(seconds<=0){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}else if(fmt==='cancel-countdown'){if(seconds<=0){el.textContent='已可'+String.fromCharCode(25442,21495);if(!el.dataset.reloaded){el.dataset.reloaded='true';reload=true;}}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}});if(reload){setTimeout(()=>location.reload(),500);}};update();setInterval(update,1000);})();</script>`;
 
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
-  const candidates = detail.candidates.map((candidate) => {
+  const candidateItems = detail.candidates.map((candidate) => {
     const snapshot = candidate.quotedPrice === undefined && candidate.quotedStock === undefined
       ? '领取时配置，未保存报价库存快照'
       : `预检价格 ${candidate.quotedPrice ?? '未知'}，库存 ${candidate.quotedStock ?? '未知'}`;
     return `<li>${escapeHtml(candidate.countryName)}：${snapshot}，${candidate.used ? '已获取' : '未获取'}</li>`;
   }).join('');
+  const candidates = detail.candidates.length > 0
+    ? `<section class="card"><h2>候选地区</h2><ul class="summary">${candidateItems}</ul></section>`
+    : '';
   const activations = detail.activations.length === 0 ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${detail.activations.map((activation) => `<li><strong>${escapeHtml(activation.countryName)}：</strong>${escapeHtml(activationStatusLabel(activation.status))}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt))}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理' : ''}</li>`).join('')}</ul>`;
+  const activationSection = detail.candidates.length > 0 || detail.activations.length > 0
+    ? `<section class="card"><h2>供应商激活</h2>${activations}</section>`
+    : '';
   const costs = detail.costs.length === 0 ? '<p>尚无费用。</p>' : `<ul class="summary">${detail.costs.map((cost) => `<li>累计激活费用：${cost.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；已确认退款：${cost.confirmedRefund.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；净成本：${cost.netCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}</li>`).join('')}</ul>`;
+  const costSection = detail.candidates.length > 0 || detail.costs.length > 0
+    ? `<section class="card"><h2>成本</h2>${costs}</section>`
+    : '';
   const numberExpiryIso = detail.activation ? detail.activation.numberExpiresAt.toISOString() : '';
   const numberRemaining = detail.activation
     ? (detail.activation.numberExpiresAtCountdown
@@ -205,7 +215,8 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
       ? `<span data-countdown="${authExpiryIso}" data-format="hours-minutes">${escapeHtml(authExpiryIso)}</span>`
       : '领取前永久有效';
   const identifier = detail.recipientIdentifier ?? `链接末 8 位：${detail.tokenSuffix ?? '未知'}`;
-  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(identifier)}</h2><p>授权状态：${detail.status}</p><p>获取额度：${detail.acquisitionCount}/3</p><p>授权到期时间：${authRemaining}</p>${revoke}</section><section class="card"><h2>候选地区</h2><ul class="summary">${candidates}</ul></section><section class="card"><h2>供应商激活</h2>${activations}</section><section class="card"><h2>成本</h2>${costs}</section>${currentActivation}</section>${COUNTDOWN_SCRIPT}`;
+  const lifecycle = `<p>创建时间：${escapeHtml(formatDateTime(detail.createdAt))}</p>${detail.candidates.length > 0 ? `<p>获取额度：${detail.acquisitionCount}/3</p><p>授权到期时间：${authRemaining}</p>` : ''}`;
+  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(identifier)}</h2><p>授权状态：${detail.status}</p>${lifecycle}${revoke}</section>${candidates}${activationSection}${costSection}${currentActivation}</section>${COUNTDOWN_SCRIPT}`;
   return adminPage('激活授权详情', '激活授权详情', path, csrfToken, `/${path}`, '返回首页', content);
 }
 
@@ -216,12 +227,14 @@ function authorizationRevocationConfirmationPage(path: string, csrfToken: string
       ? `<li><strong>当前地区：</strong>${escapeHtml(detail.acquisition.countryName)}</li><li><strong>当前激活状态：</strong>${detail.acquisition.status}</li>`
       : '<li><strong>当前激活状态：</strong>尚未获取号码</li>';
   const identifier = detail.recipientIdentifier ?? `链接末 8 位：${detail.tokenSuffix ?? '未知'}`;
-  const content = `<section class="dashboard"><section class="card"><h2>确认撤销授权</h2><ul class="summary"><li><strong>接收者标识：</strong>${escapeHtml(identifier)}</li><li><strong>授权状态：</strong>${detail.status}</li>${activation}<li><strong>已获取次数：</strong>${detail.acquisitionCount}</li><li><strong>撤销后：</strong>${escapeHtml(detail.revocationConsequence ?? '该激活授权已经不可撤销。')}</li></ul><form method="post" action="/${path}/authorizations/${detail.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认撤销授权</button></form></section></section>`;
+  const identityLabel = detail.recipientIdentifier ? '接收者标识' : '链接末 8 位';
+  const acquisitionCount = detail.candidates.length > 0 ? `<li><strong>已获取次数：</strong>${detail.acquisitionCount}</li>` : '';
+  const content = `<section class="dashboard"><section class="card"><h2>确认撤销授权</h2><ul class="summary"><li><strong>${identityLabel}：</strong>${escapeHtml(identifier)}</li><li><strong>授权状态：</strong>${detail.status}</li>${activation}${acquisitionCount}<li><strong>撤销后：</strong>${escapeHtml(detail.revocationConsequence ?? '该激活授权已经不可撤销。')}</li></ul><form method="post" action="/${path}/authorizations/${detail.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认撤销授权</button></form></section></section>`;
   return adminPage('确认撤销授权', '确认撤销授权', path, csrfToken, `/${path}/authorizations/${detail.id}`, '返回详情', content);
 }
 
-function preflightFingerprint(preflight: AuthorizationPreflight, secret: string): string {
-  return createHmac('sha256', secret).update(JSON.stringify(preflight)).digest('base64url');
+function preflightFingerprint(value: unknown, secret: string): string {
+  return createHmac('sha256', secret).update(JSON.stringify(value)).digest('base64url');
 }
 
 function fingerprintMatches(actual: string | undefined, expected: string): boolean {
@@ -229,6 +242,18 @@ function fingerprintMatches(actual: string | undefined, expected: string): boole
   const actualBuffer = Buffer.from(actual);
   const expectedBuffer = Buffer.from(expected);
   return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function batchAuthorizationConfirmationPage(path: string, csrfToken: string, preflight: BatchAuthorizationPreflight, fingerprint: string, warning?: string): string {
+  const warningMarkup = warning ? `<p class="error" role="alert">${escapeHtml(warning)}</p>` : '';
+  const content = `<section class="dashboard"><section class="card"><h2>确认创建</h2>${warningMarkup}<p>将创建 ${preflight.quantity} 条永久待领取授权链接。</p><form method="post" action="/${path}/authorizations/batch"><input type="hidden" name="csrf" value="${csrfToken}"><input type="hidden" name="quantity" value="${preflight.quantity}"><input type="hidden" name="preflightFingerprint" value="${fingerprint}"><button type="submit">确认创建</button></form></section></section>`;
+  return adminPage('确认批量创建授权链接', '确认批量创建授权链接', path, csrfToken, `/${path}`, '返回首页', content);
+}
+
+function batchAuthorizationCreatedPage(path: string, csrfToken: string, authorizationUrls: string[]): string {
+  const urls = escapeHtml(authorizationUrls.join('\n'));
+  const content = `<section class="dashboard"><section class="card"><h2>批量授权链接已创建</h2><p>完整授权链接仅显示这一次；数据库不会保存可恢复的完整授权链接。</p><pre class="token" id="authorization-urls">${urls}</pre><button type="button" onclick="copyValue(this, document.getElementById('authorization-urls').textContent)">复制全部</button></section></section>`;
+  return adminPage('批量授权链接已创建', '批量授权链接已创建', path, csrfToken, `/${path}`, '返回首页', content);
 }
 
 function authorizationConfirmationPage(path: string, csrfToken: string, preflight: AuthorizationPreflight, fingerprint: string, warning?: string): string {
@@ -259,10 +284,11 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   const remaining = deadline
     ? `<span data-countdown="${deadline}" data-format="hours-minutes">${escapeHtml(deadline)}</span>`
     : '领取前永久有效';
+  const availableRemaining = deadline ? `<p>授权剩余时间：${remaining}</p>` : '';
   const countdownScript = COUNTDOWN_SCRIPT;
   const acquisitionForm = (label = '获取号码') => `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">${label}</button></form>`;
   if (view.state === 'available') {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${acquisitionForm()}</section></main>${countdownScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${availableRemaining}${errorMarkup}${acquisitionForm()}</section></main>${countdownScript}`);
   }
   if (view.state === 'claimed' && view.smsDelivered) {
     const countryMarkup = view.countryName ? `<p class="country">${countryFlag(view.countryName)} ${escapeHtml(view.countryName)}</p>` : '';
@@ -397,6 +423,7 @@ function cookiesForSession(reply: FastifyReply, sessionId: string, csrfToken: st
 export interface AppDependencies {
   heroSms?: HeroSms;
   now?: () => Date;
+  tokenGenerator?: AuthorizationTokenGeneratorInput;
 }
 
 export async function createApp(config: AppConfig, database = new Database(config.databaseUrl), dependencies: AppDependencies = {}): Promise<FastifyInstance> {
@@ -408,7 +435,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     baseUrl: HEROSMS_COMPATIBILITY_URL,
   });
   const defaultCandidateLocations = new DefaultCandidateLocations(database, heroSms, config.openAiServiceCode);
-  const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, dependencies.now);
+  const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, dependencies.now, dependencies.tokenGenerator);
   await activationAuthorizations.reconcilePendingRequests();
   await activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry();
   await activationAuthorizations.reconcileTimedOutActivations();
@@ -568,7 +595,62 @@ export async function createApp(config: AppConfig, database = new Database(confi
     }
   });
 
+  const batchPreview = async (request: FastifyRequest<{ Body: AuthorizationBody }>, reply: FastifyReply): Promise<FastifyReply> => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    const csrfToken = csrfFrom(request);
+    if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+      return reply.code(403).send();
+    }
+    try {
+      const preflight = await activationAuthorizations.batchPreflight(request.body.quantity);
+      return reply.type('text/html; charset=utf-8').send(batchAuthorizationConfirmationPage(
+        config.adminPath,
+        session.csrfToken,
+        preflight,
+        preflightFingerprint(preflight, config.sessionSecret),
+      ));
+    } catch (error) {
+      const message = error instanceof AuthorizationValidationError ? error.message : '暂时无法准备批量创建。';
+      return reply.code(error instanceof AuthorizationValidationError ? 422 : 503).type('text/html; charset=utf-8').send(
+        adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list(), message),
+      );
+    }
+  };
+
+  const batchCreate = async (request: FastifyRequest<{ Body: AuthorizationBody }>, reply: FastifyReply): Promise<FastifyReply> => {
+    const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
+    const csrfToken = csrfFrom(request);
+    if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+      return reply.code(403).send();
+    }
+    try {
+      const preflight = await activationAuthorizations.batchPreflight(request.body.quantity);
+      const currentFingerprint = preflightFingerprint(preflight, config.sessionSecret);
+      if (!fingerprintMatches(request.body.preflightFingerprint, currentFingerprint)) {
+        return reply.code(409).type('text/html; charset=utf-8').send(batchAuthorizationConfirmationPage(
+          config.adminPath,
+          session.csrfToken,
+          preflight,
+          currentFingerprint,
+          '创建数量已变化，请重新确认。',
+        ));
+      }
+      const created = await activationAuthorizations.createBatch(preflight.quantity);
+      const authorizationUrls = created.map((item) => new URL(`/a/${item.token}`, config.publicOrigin).toString());
+      return reply.code(201).type('text/html; charset=utf-8').send(batchAuthorizationCreatedPage(config.adminPath, session.csrfToken, authorizationUrls));
+    } catch (error) {
+      const message = error instanceof AuthorizationValidationError ? error.message : '暂时无法批量创建激活授权链接。';
+      return reply.code(error instanceof AuthorizationValidationError ? 422 : 503).type('text/html; charset=utf-8').send(
+        adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list(), message),
+      );
+    }
+  };
+
+  app.post<{ Body: AuthorizationBody }>(`${adminRoot}/authorizations/batch/preview`, batchPreview);
+  app.post<{ Body: AuthorizationBody }>(`${adminRoot}/authorizations/batch`, batchCreate);
+
   app.post<{ Body: AuthorizationBody }>(`${adminRoot}/authorizations/preview`, async (request, reply) => {
+    if (request.body.quantity !== undefined) return batchPreview(request, reply);
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     const csrfToken = csrfFrom(request);
     if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
@@ -584,6 +666,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
 
   app.post<{ Body: AuthorizationBody }>(`${adminRoot}/authorizations`, async (request, reply) => {
+    if (request.body.quantity !== undefined) return batchCreate(request, reply);
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     const csrfToken = csrfFrom(request);
     if (!session || !isSameOrigin(request, config) || !csrfToken || csrfToken !== session.csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
