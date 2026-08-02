@@ -102,12 +102,15 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
     await expect(page.getByText('HeroSMS 已连接')).toBeVisible();
     await expect(page.getByText('余额：')).toBeVisible();
     // 选择三个候选地区
-    await page.locator('select[name="candidate1"]').selectOption('1');
-    await page.locator('select[name="candidate2"]').selectOption('2');
-    await page.locator('select[name="candidate3"]').selectOption('3');
+    for (const [position, countryName] of ['美国', '英国', '法国'].entries()) {
+      const candidate = page.getByRole('textbox', { name: `候选地区 ${position + 1}` });
+      await candidate.fill(countryName);
+      await page.getByRole('option', { name: countryName }).click();
+    }
     await page.getByRole('button', { name: '保存默认候选地区' }).click();
     // 保存后重定向回设置页，候选地区已保存
     await expect(page.locator('h1', { hasText: '设置' })).toBeVisible();
+    await expect(page.getByRole('status')).toHaveText('✓ 已保存');
 
     // 返回首页，进入预检确认页
     await page.getByRole('link', { name: '返回首页' }).click();

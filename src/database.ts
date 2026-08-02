@@ -1,20 +1,14 @@
 import { Pool, type PoolClient } from 'pg';
 
-export type CanonicalAuthorizationStatus = 'unclaimed' | 'in_progress' | 'result_available' | 'ended';
-
 export type AuthorizationStatus =
-  | CanonicalAuthorizationStatus
+  | 'unclaimed'
+  | 'in_progress'
+  | 'result_available'
+  | 'ended'
   | 'sms_delivered'
   | 'quota_exhausted'
   | 'revoked'
   | 'expired';
-
-export interface AuthorizationListOptions {
-  page: number;
-  status?: CanonicalAuthorizationStatus;
-  tokenSuffix?: string;
-  order?: 'activity' | 'created';
-}
 
 export type AuthorizationListDisplayStatus = '待领取' | '进行中' | '结果可查看' | '已结束' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
 
@@ -30,13 +24,6 @@ export interface AuthorizationListItem {
   canRevoke: boolean;
   currentActivationStatus?: string;
   hasPendingException: boolean;
-}
-
-export interface AuthorizationListPageResult {
-  items: AuthorizationListItem[];
-  total: number;
-  page: number;
-  pageCount: number;
 }
 
 export const AUTHORIZATION_STATUS_LABELS: Record<AuthorizationStatus, AuthorizationListDisplayStatus> = {
@@ -519,58 +506,8 @@ export class Database {
     });
   }
 
-  async createActivationAuthorizations(inputs: readonly { tokenHash: string; tokenSuffix: string; createdAt: Date }[]): Promise<string[]> {
-    if (inputs.length < 1 || inputs.length > 50) throw new Error('一次必须创建 1 至 50 条激活授权');
-    return this.transaction(async (client) => {
-      const ids: string[] = [];
-      for (const input of inputs) {
-        const result = await client.query<{ id: string }>(
-          `INSERT INTO activation_authorizations
-             (token_hash, token_suffix, status, created_at, expires_at, last_activity_at)
-           VALUES ($1, $2, 'unclaimed', $3, NULL, $3)
-           RETURNING id`,
-          [input.tokenHash, input.tokenSuffix, input.createdAt],
-        );
-        const id = result.rows[0]?.id;
-        if (!id) throw new Error('创建激活授权失败');
-        ids.push(id);
-      }
-      return ids;
-    });
-  }
-
-  async listActivationAuthorizations(now: Date): Promise<AuthorizationListItem[]>;
-  async listActivationAuthorizations(options: AuthorizationListOptions, now?: Date): Promise<AuthorizationListPageResult>;
-  async listActivationAuthorizations(
-    optionsOrNow: AuthorizationListOptions | Date,
-    now = new Date(),
-  ): Promise<AuthorizationListItem[] | AuthorizationListPageResult> {
-    const legacyCall = optionsOrNow instanceof Date;
-    const options = legacyCall ? { page: 1, order: 'created' as const } : optionsOrNow;
-    const effectiveNow = legacyCall ? optionsOrNow : now;
-    if (legacyCall) await this.expireDueAuthorizations(effectiveNow);
-    const clauses: string[] = [];
-    const parameters: Array<string | number> = [];
-    if (options.status) {
-      parameters.push(options.status);
-      clauses.push(`auth.status = $${parameters.length}`);
-    }
-    if (options.tokenSuffix) {
-      parameters.push(options.tokenSuffix);
-      clauses.push(`auth.token_suffix = $${parameters.length}`);
-    }
-    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const countResult = await this.pool.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM activation_authorizations auth ${where}`,
-      parameters,
-    );
-    const total = Number(countResult.rows[0]?.count ?? 0);
-    const pageCount = Math.max(1, Math.ceil(total / 20));
-    const page = Math.min(Math.max(1, options.page), pageCount);
-    const listParameters = [...parameters, 20, (page - 1) * 20];
-    const orderBy = options.order === 'created'
-      ? 'auth.created_at DESC, auth.id DESC'
-      : 'COALESCE(auth.last_activity_at, auth.created_at) DESC, auth.id DESC';
+  async listActivationAuthorizations(now: Date): Promise<AuthorizationListItem[]> {
+    await this.expireDueAuthorizations(now);
     const result = await this.pool.query<{
       id: string; recipient_identifier: string | null; token_suffix: string | null; internal_note: string | null;
       status: AuthorizationStatus; created_at: Date; expires_at: Date | null; last_activity_at: Date;
@@ -593,31 +530,23 @@ export class Database {
          WHERE authorization_id = auth.id AND status IN ('requesting', 'reconciling', 'manual')
          ORDER BY requested_at DESC LIMIT 1
        ) acquisition ON true
-       ${where}
-       ORDER BY ${orderBy}
-       LIMIT $${parameters.length + 1} OFFSET $${parameters.length + 2}`,
-      listParameters,
+       ORDER BY auth.created_at DESC, auth.id DESC
+       LIMIT 20`,
     );
-    const pageResult: AuthorizationListPageResult = {
-      items: result.rows.map((row) => ({
-        id: row.id,
-        ...(row.recipient_identifier !== null ? { recipientIdentifier: row.recipient_identifier } : {}),
-        ...(row.token_suffix !== null ? { tokenSuffix: row.token_suffix } : {}),
-        ...(row.internal_note ? { internalNote: row.internal_note } : {}),
-        status: AUTHORIZATION_STATUS_LABELS[row.status],
-        createdAt: row.created_at,
-        ...(row.expires_at !== null ? { expiresAt: row.expires_at } : {}),
-        lastActivityAt: row.last_activity_at,
-        canRevoke: ['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(row.status)
-          && (row.expires_at === null || row.expires_at > effectiveNow),
-        ...(row.activation_status ? { currentActivationStatus: row.activation_status } : {}),
-        hasPendingException: row.has_pending_exception || row.acquisition_status === 'reconciling' || row.acquisition_status === 'manual',
-      })),
-      total,
-      page,
-      pageCount,
-    };
-    return legacyCall ? pageResult.items : pageResult;
+    return result.rows.map((row) => ({
+      id: row.id,
+      ...(row.recipient_identifier !== null ? { recipientIdentifier: row.recipient_identifier } : {}),
+      ...(row.token_suffix !== null ? { tokenSuffix: row.token_suffix } : {}),
+      ...(row.internal_note ? { internalNote: row.internal_note } : {}),
+      status: AUTHORIZATION_STATUS_LABELS[row.status],
+      createdAt: row.created_at,
+      ...(row.expires_at !== null ? { expiresAt: row.expires_at } : {}),
+      lastActivityAt: row.last_activity_at,
+      canRevoke: ['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(row.status)
+        && (row.expires_at === null || row.expires_at > now),
+      ...(row.activation_status ? { currentActivationStatus: row.activation_status } : {}),
+      hasPendingException: row.has_pending_exception || row.acquisition_status === 'reconciling' || row.acquisition_status === 'manual',
+    }));
   }
 
   async authorizationByTokenHash(hash: string): Promise<{ id: string; status: AuthorizationStatus; expiresAt: Date | null } | undefined> {

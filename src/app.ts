@@ -163,10 +163,9 @@ function adminPage(title: string, heading: string, path: string, csrfToken: stri
   return htmlPage(title, `<main class="shell"><header><h1>${headingWithIcon(heading)}</h1><nav><a href="${navigationPath}">${navLabelWithIcon(navigationLabel)}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
 }
 
-function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[] | { items: AuthorizationSummary[] }, error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
-  const authorizationItems = Array.isArray(authorizations) ? authorizations : authorizations.items;
+function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
   const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
-  const recent = authorizationItems.length === 0 ? '<p class="empty">尚未创建激活授权。</p>' : authorizationItems.map((authorization) => {
+  const recent = authorizations.length === 0 ? '<p class="empty">尚未创建激活授权。</p>' : authorizations.map((authorization) => {
     const identifier = authorization.recipientIdentifier ?? `链接末 8 位：${authorization.tokenSuffix ?? '未知'}`;
     const expiry = authorization.expiresAt ? `<p>到期时间：${escapeHtml(authorization.expiresAt.toISOString())}</p>` : '<p>领取前永久有效</p>';
     return `<article class="authorization"><p><strong>${escapeHtml(identifier)}</strong> · ${authorization.status}</p>${authorization.currentActivationStatus ? `<p>当前激活状态：${escapeHtml(activationStatusLabel(authorization.currentActivationStatus))}</p>` : '<p>当前激活状态：尚无供应商激活</p>'}${authorization.hasPendingException ? '<p class="error">待处理异常</p>' : ''}${authorization.internalNote ? `<p>${escapeHtml(authorization.internalNote)}</p>` : ''}${expiry}<p><a href="/${path}/authorizations/${authorization.id}">查看详情</a></p>${authorization.canRevoke ? `<p><a href="/${path}/authorizations/${authorization.id}/revoke">撤销授权</a></p>` : ''}</article>`;

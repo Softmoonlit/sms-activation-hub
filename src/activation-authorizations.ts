@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import type { PoolClient } from 'pg';
 
-import { AUTHORIZATION_STATUS_LABELS, Database, type AuthorizationListOptions, type AuthorizationStatus } from './database.js';
+import { AUTHORIZATION_STATUS_LABELS, Database, type AuthorizationStatus } from './database.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsQuote } from './herosms.js';
 
 const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -21,13 +21,6 @@ export interface AuthorizationPreflight {
   internalNote?: string;
   balance: number;
   candidates: Array<{ countryId: number; countryName: string; price: number; stock: number }>;
-}
-
-export interface AuthorizationListPage {
-  items: AuthorizationSummary[];
-  total: number;
-  page: number;
-  pageCount: number;
 }
 
 export interface AuthorizationSummary {
@@ -272,38 +265,8 @@ export class ActivationAuthorizations {
     }
   }
 
-  validateCreationCount(value: string | number | undefined): number {
-    const count = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
-    if (!Number.isInteger(count) || count < 1 || count > 50) {
-      throw new AuthorizationValidationError('创建数量必须是 1 至 50 的整数。');
-    }
-    return count;
-  }
-
-  async createBatch(count: number): Promise<CreatedAuthorization[]> {
-    this.validateCreationCount(count);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const createdAt = this.now();
-      const generated = Array.from({ length: count }, () => {
-        const token = randomBytes(32).toString('base64url');
-        return { token, tokenHash: tokenHash(token), tokenSuffix: token.slice(-8), createdAt };
-      });
-      try {
-        const ids = await this.database.createActivationAuthorizations(generated);
-        return generated.map((item, index) => ({ id: ids[index]!, token: item.token, tokenSuffix: item.tokenSuffix }));
-      } catch (error) {
-        const duplicate = error && typeof error === 'object' && 'code' in error && error.code === '23505';
-        if (!duplicate || attempt === 4) throw error;
-      }
-    }
-    throw new Error('创建激活授权失败');
-  }
-
-  async list(): Promise<AuthorizationSummary[]>;
-  async list(options: AuthorizationListOptions): Promise<AuthorizationListPage>;
-  async list(options?: AuthorizationListOptions): Promise<AuthorizationSummary[] | AuthorizationListPage> {
-    const page = await this.database.listActivationAuthorizations(options ?? { page: 1, order: 'created' }, this.now());
-    return options ? page : page.items;
+  async list(): Promise<AuthorizationSummary[]> {
+    return this.database.listActivationAuthorizations(this.now());
   }
 
   async revoke(id: string): Promise<boolean> {
