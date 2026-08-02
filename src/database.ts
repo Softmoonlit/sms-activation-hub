@@ -43,6 +43,21 @@ export interface CompleteDefaultCandidateLocation {
   countryName: string;
 }
 
+function completeDefaultCandidateLocationsFromRows(
+  locations: readonly { position: number; countryId: number; countryName?: string | null }[],
+): CompleteDefaultCandidateLocation[] | undefined {
+  if (locations.length !== 3 || locations.some((location, index) => (
+    location.position !== index + 1 || !location.countryName || !location.countryName.trim()
+  ))) {
+    return undefined;
+  }
+  return locations.map((location) => ({
+    position: location.position,
+    countryId: location.countryId,
+    countryName: location.countryName!,
+  }));
+}
+
 export class AuthorizationTokenSuffixCollisionError extends Error {
   constructor(readonly suffix: string) {
     super(`授权链接末 8 位已存在：${suffix}`);
@@ -464,17 +479,18 @@ export class Database {
   }
 
   async completeDefaultCandidateLocations(): Promise<CompleteDefaultCandidateLocation[] | undefined> {
-    const locations = await this.defaultCandidateLocations();
-    if (locations.length !== 3 || locations.some((location, index) => (
-      location.position !== index + 1 || !location.countryName || !location.countryName.trim()
-    ))) {
-      return undefined;
-    }
-    return locations.map((location) => ({
+    return completeDefaultCandidateLocationsFromRows(await this.defaultCandidateLocations());
+  }
+
+  async completeDefaultCandidateLocationsFor(client: PoolClient): Promise<CompleteDefaultCandidateLocation[] | undefined> {
+    const result = await client.query<{ position: number; country_id: number; country_name: string | null }>(
+      'SELECT position, country_id, country_name FROM default_candidate_countries ORDER BY position',
+    );
+    return completeDefaultCandidateLocationsFromRows(result.rows.map((location) => ({
       position: location.position,
-      countryId: location.countryId,
-      countryName: location.countryName!,
-    }));
+      countryId: location.country_id,
+      countryName: location.country_name,
+    })));
   }
 
   async replaceDefaultCandidateLocations(locations: readonly { countryId: number; countryName: string }[]): Promise<void> {

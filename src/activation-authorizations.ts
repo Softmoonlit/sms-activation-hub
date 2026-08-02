@@ -93,7 +93,7 @@ export interface AuthorizationDetail {
   costs: Array<{ currency: string; activationCost: number; confirmedRefund: number; netCost: number }>;
 }
 
-export type RecipientAuthorizationState = 'available' | 'claimed' | 'unavailable' | 'not-found';
+export type RecipientAuthorizationState = 'available' | 'claimed' | 'unavailable' | 'browser-mismatch' | 'not-found';
 
 export interface RecipientAuthorizationView {
   state: RecipientAuthorizationState;
@@ -156,12 +156,14 @@ export interface HeroSmsWebhookEvent {
 }
 
 export type ClaimResult =
-  | { state: 'claimed'; sessionToken: string }
-  | { state: 'confirming'; sessionToken: string }
-  | { state: 'no-numbers'; sessionToken: string }
+  | { state: 'claimed'; sessionToken: string; setSessionCookie: boolean }
+  | { state: 'confirming'; sessionToken: string; setSessionCookie: boolean }
+  | { state: 'no-numbers'; sessionToken: string; setSessionCookie: boolean }
   | { state: 'unavailable' }
+  | { state: 'browser-mismatch' }
   | { state: 'not-found' }
-  | { state: 'error'; sessionToken: string };
+  | { state: 'claim-failed' }
+  | { state: 'error'; sessionToken: string; setSessionCookie: boolean };
 
 export interface AcquisitionReconciliation {
   id: string;
@@ -244,6 +246,16 @@ function isAuthorizationAccessible(expiresAt: Date | null, now: Date): boolean {
 
 function optionalDate(value: Date | null): Date | undefined {
   return value ?? undefined;
+}
+
+type AuthorizationDeadlineRow = {
+  number_acquisition_expires_at?: Date | null;
+  expires_at?: Date | null;
+  authorization_expires_at?: Date | null;
+};
+
+function authorizationAcquisitionDeadline(row: AuthorizationDeadlineRow | null | undefined): Date | null {
+  return row?.number_acquisition_expires_at ?? row?.expires_at ?? row?.authorization_expires_at ?? null;
 }
 
 interface NormalizedProviderActivationTimes {
@@ -591,12 +603,12 @@ export class ActivationAuthorizations {
     await this.reconcileTimedOutActivations(target.rows[0].id);
     const result = await this.database.pool.query<{
       id: string; status: AuthorizationStatus;
-      expires_at: Date | null; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
+      expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
       acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string;
       acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; sms_code: string | null;
       last_activation_status: string | null; last_activation_timed_out_at: Date | null;
     }>(
-      `SELECT auth.id, auth.status, auth.expires_at, auth.recipient_session_hash,
+      `SELECT auth.id, auth.status, auth.expires_at, auth.number_acquisition_expires_at, auth.recipient_session_hash,
               candidate.country_name, activation.phone_number, activation.acquired_at,
               activation.cancel_available_at, activation.expires_at AS number_expires_at,
               activation.status AS activation_status, activation.sms_code,
@@ -625,11 +637,13 @@ export class ActivationAuthorizations {
       await this.database.expireAuthorization(authorization.id, now);
       return { state: 'not-found' };
     }
-    const expiresAt = optionalDate(authorization.expires_at);
+    const expiresAt = optionalDate(authorizationAcquisitionDeadline(authorization));
     if (authorization.status === 'revoked') return { state: 'unavailable', ...(expiresAt ? { expiresAt } : {}) };
     if (authorization.status === 'unclaimed') return { state: 'available', ...(expiresAt ? { expiresAt } : {}) };
     if (!sessionToken || !authorization.recipient_session_hash || tokenHash(sessionToken) !== authorization.recipient_session_hash) {
-      return { state: 'unavailable', ...(expiresAt ? { expiresAt } : {}) };
+      return authorization.status === 'in_progress' || authorization.status === 'result_available' || authorization.status === 'sms_delivered'
+        ? { state: 'browser-mismatch', ...(expiresAt ? { expiresAt } : {}) }
+        : { state: 'unavailable', ...(expiresAt ? { expiresAt } : {}) };
     }
     return {
       state: 'claimed', ...(expiresAt ? { expiresAt } : {}),
@@ -983,14 +997,15 @@ export class ActivationAuthorizations {
     if (!target.rows[0]) return { state: 'not-found' };
     await this.reconcileTimedOutActivations(target.rows[0].id);
     const transition = await this.database.transaction(async (client): Promise<ReplacementTransition> => {
-      const authorizationResult = await client.query<{ id: string; status: string; expires_at: Date; recipient_session_hash: string | null }>(
-        'SELECT id, status, expires_at, recipient_session_hash FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
+      const authorizationResult = await client.query<{ id: string; status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+        'SELECT id, status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
         [tokenHash(token)],
       );
       const authorization = authorizationResult.rows[0];
       const now = this.now();
-      if (!authorization || authorization.expires_at <= now) {
-        if (authorization) await this.expireAuthorization(client, authorization.id, now);
+      const acquisitionExpiresAt = authorizationAcquisitionDeadline(authorization);
+      if (!authorization || !acquisitionExpiresAt || acquisitionExpiresAt <= now) {
+        if (authorization?.expires_at && authorization.expires_at <= now) await this.expireAuthorization(client, authorization.id, now);
         return { kind: 'not-found' };
       }
       if (authorization.status !== 'in_progress' || !sessionToken || authorization.recipient_session_hash !== tokenHash(sessionToken)) return { kind: 'unavailable' };
@@ -1116,14 +1131,14 @@ export class ActivationAuthorizations {
       `UPDATE supplier_activations activation SET replacement_pending = false
        FROM activation_authorizations auth
        WHERE activation.authorization_id = auth.id AND activation.status = 'cancelled' AND activation.replacement_pending
-         AND (auth.status <> 'in_progress' OR auth.expires_at <= $1)`,
+         AND (auth.status <> 'in_progress' OR COALESCE(auth.number_acquisition_expires_at, auth.expires_at) <= $1)`,
       [now],
     );
     const pending = await this.database.pool.query<{ authorization_id: string }>(
       `SELECT activation.authorization_id FROM supplier_activations activation
        JOIN activation_authorizations auth ON auth.id = activation.authorization_id
        WHERE activation.status = 'cancelled' AND activation.replacement_pending
-         AND auth.status = 'in_progress' AND auth.expires_at > $1
+         AND auth.status = 'in_progress' AND COALESCE(auth.number_acquisition_expires_at, auth.expires_at) > $1
        ORDER BY activation.acquired_at`,
       [now],
     );
@@ -1133,11 +1148,13 @@ export class ActivationAuthorizations {
   private async confirmCancellation(providerActivationId: string): Promise<{ authorizationId: string; replacementAllowed: boolean } | undefined> {
     return this.database.transaction(async (client) => {
       const result = await client.query<{
-        id: string; authorization_id: string; replacement_pending: boolean; authorization_status: string; authorization_expires_at: Date;
+        id: string; authorization_id: string; replacement_pending: boolean; authorization_status: string;
+        authorization_expires_at: Date | null; number_acquisition_expires_at: Date | null;
         activation_cost: string; currency: string;
       }>(
         `SELECT activation.id, activation.authorization_id, activation.replacement_pending,
-                auth.status AS authorization_status, auth.expires_at AS authorization_expires_at,
+                auth.status AS authorization_status,
+                auth.expires_at AS authorization_expires_at, auth.number_acquisition_expires_at,
                 activation.activation_cost::text, activation.currency
          FROM supplier_activations activation
          JOIN activation_authorizations auth ON auth.id = activation.authorization_id
@@ -1148,9 +1165,11 @@ export class ActivationAuthorizations {
       );
       const activation = result.rows[0];
       if (!activation) return undefined;
+      const acquisitionExpiresAt = authorizationAcquisitionDeadline(activation);
       const replacementAllowed = activation.replacement_pending
         && activation.authorization_status === 'in_progress'
-        && activation.authorization_expires_at > this.now();
+        && acquisitionExpiresAt !== null
+        && acquisitionExpiresAt > this.now();
       await client.query(
         `UPDATE supplier_activations
          SET status = 'cancelled', supplier_cancelled_at = COALESCE(supplier_cancelled_at, $2),
@@ -1183,14 +1202,15 @@ export class ActivationAuthorizations {
     sessionHash: string | undefined,
     quotes: HeroSmsQuote[],
   ): Promise<PreparedNumberAcquisition> {
-    const authorizationResult = await client.query<{ status: string; expires_at: Date | null; recipient_session_hash: string | null }>(
-      'SELECT status, expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1 FOR UPDATE',
+    const authorizationResult = await client.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+      'SELECT status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1 FOR UPDATE',
       [authorizationId],
     );
     const authorization = authorizationResult.rows[0];
     const now = this.now();
-    if (!authorization || !authorization.expires_at || authorization.expires_at <= now) {
-      if (authorization) await this.expireAuthorization(client, authorizationId, now);
+    const acquisitionExpiresAt = authorizationAcquisitionDeadline(authorization);
+    if (!authorization || !acquisitionExpiresAt || acquisitionExpiresAt <= now) {
+      if (authorization?.expires_at && authorization.expires_at <= now) await this.expireAuthorization(client, authorizationId, now);
       return { kind: 'expired' };
     }
     if (authorization.status !== 'in_progress'
@@ -1227,12 +1247,13 @@ export class ActivationAuthorizations {
     authorizationId: string,
     sessionHash: string | undefined,
   ): Promise<'available' | 'expired' | 'unavailable'> {
-    const result = await this.database.pool.query<{ status: string; expires_at: Date | null; recipient_session_hash: string | null }>(
-      'SELECT status, expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
+    const result = await this.database.pool.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+      'SELECT status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
       [authorizationId],
     );
     const authorization = result.rows[0];
-    if (!authorization || !authorization.expires_at || authorization.expires_at <= this.now()) return 'expired';
+    const acquisitionExpiresAt = authorizationAcquisitionDeadline(authorization);
+    if (!authorization || !acquisitionExpiresAt || acquisitionExpiresAt <= this.now()) return 'expired';
     if (!['in_progress', 'sms_delivered', 'result_available'].includes(authorization.status)
       || (sessionHash !== undefined && authorization.recipient_session_hash !== sessionHash)) return 'unavailable';
     return 'available';
@@ -1247,12 +1268,13 @@ export class ActivationAuthorizations {
       if (options.clearPendingReplacement) await this.clearPendingReplacement(authorizationId);
     };
 
-    const eligibility = await this.database.pool.query<{ status: string; expires_at: Date | null }>(
-      'SELECT status, expires_at FROM activation_authorizations WHERE id = $1',
+    const eligibility = await this.database.pool.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null }>(
+      'SELECT status, expires_at, number_acquisition_expires_at FROM activation_authorizations WHERE id = $1',
       [authorizationId],
     );
     const authorization = eligibility.rows[0];
-    if (!authorization || !authorization.expires_at || authorization.expires_at <= this.now()) {
+    const acquisitionExpiresAt = authorizationAcquisitionDeadline(authorization);
+    if (!authorization || !acquisitionExpiresAt || acquisitionExpiresAt <= this.now()) {
       await clearPendingReplacement();
       return 'expired';
     }
@@ -1309,21 +1331,23 @@ export class ActivationAuthorizations {
               (authorization_id, candidate_position, country_id, requested_price, status, requested_at, updated_at)
              SELECT auth.id, $2, $3, $4, 'requesting', $5, $5
              FROM activation_authorizations auth
-             WHERE auth.id = $1 AND auth.status = 'in_progress' AND auth.expires_at > $5
+             WHERE auth.id = $1 AND auth.status = 'in_progress'
+               AND COALESCE(auth.number_acquisition_expires_at, auth.expires_at) > $5
                AND ($6::text IS NULL OR auth.recipient_session_hash = $6)
              RETURNING id`,
             [authorizationId, candidate.position, candidate.countryId, candidate.requestedPrice, requestedAt, sessionHash ?? null],
           );
           const requestId = request.rows[0]?.id;
           if (!requestId) {
-            const currentResult = await client.query<{ status: string; expires_at: Date | null; recipient_session_hash: string | null }>(
-              'SELECT status, expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
+            const currentResult = await client.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+              'SELECT status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
               [authorizationId],
             );
             const current = currentResult.rows[0];
             const currentTime = this.now();
-            if (!current || !current.expires_at || current.expires_at <= currentTime) {
-              if (current?.status === 'in_progress') await this.expireAuthorization(client, authorizationId, currentTime);
+            const currentAcquisitionExpiresAt = authorizationAcquisitionDeadline(current);
+            if (!current || !currentAcquisitionExpiresAt || currentAcquisitionExpiresAt <= currentTime) {
+              if (current?.expires_at && current.expires_at <= currentTime) await this.expireAuthorization(client, authorizationId, currentTime);
               await clearPendingReplacement();
               return 'expired';
             }
@@ -1335,18 +1359,19 @@ export class ActivationAuthorizations {
             return 'error';
           }
 
-          const currentAuthorization = await client.query<{ status: string; expires_at: Date | null; recipient_session_hash: string | null }>(
-            'SELECT status, expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
+          const currentAuthorization = await client.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+            'SELECT status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
             [authorizationId],
           );
           const current = currentAuthorization.rows[0];
           const providerCallAt = this.now();
-          if (!current || !current.expires_at || current.expires_at <= providerCallAt) {
+          const currentAcquisitionExpiresAt = authorizationAcquisitionDeadline(current);
+          if (!current || !currentAcquisitionExpiresAt || currentAcquisitionExpiresAt <= providerCallAt) {
             await client.query(
               "UPDATE number_acquisition_requests SET status = 'failed', error_kind = 'authorization-expired', updated_at = $2 WHERE id = $1",
               [requestId, providerCallAt],
             );
-            if (current?.status === 'in_progress') await this.expireAuthorization(client, authorizationId, providerCallAt);
+            if (current?.expires_at && current.expires_at <= providerCallAt) await this.expireAuthorization(client, authorizationId, providerCallAt);
             await clearPendingReplacement();
             return 'expired';
           }
@@ -1445,30 +1470,63 @@ export class ActivationAuthorizations {
     );
     if (!target.rows[0]) return { state: 'not-found' };
     await this.reconcileTimedOutActivations(target.rows[0].id);
-    const sessionToken = existingSessionToken ?? randomBytes(32).toString('base64url');
+    let sessionToken = existingSessionToken ?? randomBytes(32).toString('base64url');
+    let newlyClaimed = false;
     const authorizationId = await this.database.transaction(async (client) => {
-      const result = await client.query<{ id: string; status: string; expires_at: Date; recipient_session_hash: string | null }>(
+      const result = await client.query<{
+        id: string; status: string; expires_at: Date | null; recipient_session_hash: string | null;
+      }>(
         'SELECT id, status, expires_at, recipient_session_hash FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
         [tokenHash(token)],
       );
       const authorization = result.rows[0];
       const now = this.now();
-      if (!authorization || authorization.expires_at <= now) {
-        if (authorization) await this.expireAuthorization(client, authorization.id, now);
+      if (!authorization || (authorization.expires_at !== null && authorization.expires_at <= now)) {
+        if (authorization?.expires_at !== null && authorization?.expires_at !== undefined) {
+          await this.expireAuthorization(client, authorization.id, now);
+        }
         return undefined;
       }
       if (authorization.status === 'unclaimed') {
-        await client.query(
-          "UPDATE activation_authorizations SET status = 'in_progress', recipient_session_hash = $2 WHERE id = $1 AND status = 'unclaimed'",
-          [authorization.id, tokenHash(sessionToken)],
-        );
+        if (authorization.expires_at === null) {
+          const configuredLocations = await this.database.completeDefaultCandidateLocationsFor(client);
+          if (!configuredLocations) return 'claim-failed' as const;
+          const numberAcquisitionExpiresAt = new Date(now.getTime() + CLAIM_ACQUISITION_LIFETIME_MS);
+          for (const location of configuredLocations) {
+            await client.query(
+              `INSERT INTO authorization_candidate_countries
+                (authorization_id, position, country_id, country_name, quoted_price, quoted_stock)
+               VALUES ($1, $2, $3, $4, NULL, NULL)`,
+              [authorization.id, location.position, location.countryId, location.countryName],
+            );
+          }
+          sessionToken = randomBytes(32).toString('base64url');
+          await client.query(
+            `UPDATE activation_authorizations
+             SET status = 'in_progress', claimed_at = $2, number_acquisition_expires_at = $3,
+                 recipient_session_hash = $4, last_activity_at = $2
+             WHERE id = $1 AND status = 'unclaimed'`,
+            [authorization.id, now, numberAcquisitionExpiresAt, tokenHash(sessionToken)],
+          );
+          newlyClaimed = true;
+        } else {
+          // 兼容旧的逐条创建路径：其候选快照和创建期限仍由旧流程维护。
+          sessionToken = randomBytes(32).toString('base64url');
+          await client.query(
+            "UPDATE activation_authorizations SET status = 'in_progress', claimed_at = COALESCE(claimed_at, $2), recipient_session_hash = $3 WHERE id = $1 AND status = 'unclaimed'",
+            [authorization.id, now, tokenHash(sessionToken)],
+          );
+          newlyClaimed = true;
+        }
         return authorization.id;
       }
-      return authorization.status === 'in_progress' && authorization.recipient_session_hash === tokenHash(sessionToken)
-        ? authorization.id
+      return authorization.status === 'in_progress'
+        ? (authorization.recipient_session_hash === tokenHash(sessionToken) ? authorization.id : 'browser-mismatch' as const)
         : null;
     });
     if (authorizationId === undefined) return { state: 'not-found' };
+    if (authorizationId === 'claim-failed') return { state: 'claim-failed' };
+    if (authorizationId === 'browser-mismatch') return { state: 'browser-mismatch' };
     if (authorizationId === null) return { state: 'unavailable' };
 
     try {
@@ -1481,12 +1539,12 @@ export class ActivationAuthorizations {
         return { state: 'not-found' };
       }
       if (outcome === 'unavailable') return { state: 'unavailable' };
-      if (outcome === 'paused' || outcome === 'error') return { state: 'error', sessionToken };
-      if (outcome === 'already-active' || outcome === 'acquired') return { state: 'claimed', sessionToken };
-      if (outcome === 'confirming') return { state: 'confirming', sessionToken };
-      return { state: 'no-numbers', sessionToken };
+      if (outcome === 'paused' || outcome === 'error') return { state: 'error', sessionToken, setSessionCookie: newlyClaimed };
+      if (outcome === 'already-active' || outcome === 'acquired') return { state: 'claimed', sessionToken, setSessionCookie: newlyClaimed };
+      if (outcome === 'confirming') return { state: 'confirming', sessionToken, setSessionCookie: newlyClaimed };
+      return { state: 'no-numbers', sessionToken, setSessionCookie: newlyClaimed };
     } catch {
-      return { state: 'error', sessionToken };
+      return { state: 'error', sessionToken, setSessionCookie: newlyClaimed };
     }
   }
 
@@ -1719,16 +1777,16 @@ export class ActivationAuthorizations {
     number: HeroSmsNumber,
     fallbackPrice: number,
   ): Promise<boolean> {
-    const authorization = await client.query<{ expires_at: Date; status: string }>(
-      'SELECT expires_at, status FROM activation_authorizations WHERE id = $1 FOR UPDATE',
+    const authorization = await client.query<{ expires_at: Date | null; number_acquisition_expires_at: Date | null; status: string }>(
+      'SELECT expires_at, number_acquisition_expires_at, status FROM activation_authorizations WHERE id = $1 FOR UPDATE',
       [authorizationId],
     );
-    const expiresAt = authorization.rows[0]?.expires_at;
+    const acquisitionExpiresAt = authorizationAcquisitionDeadline(authorization.rows[0]);
     const authorizationStatus = authorization.rows[0]?.status;
-    if (!expiresAt || !authorizationStatus) throw new Error('激活授权不存在');
+    if (!acquisitionExpiresAt || !authorizationStatus) throw new Error('激活授权不存在');
     const confirmedAt = this.now();
-    const deliverable = expiresAt > confirmedAt && authorizationStatus !== 'revoked';
-    if (authorizationStatus !== 'revoked' && !deliverable) {
+    const deliverable = acquisitionExpiresAt > confirmedAt && authorizationStatus !== 'revoked';
+    if (authorizationStatus !== 'revoked' && !deliverable && authorization.rows[0]?.expires_at) {
       await this.expireAuthorization(client, authorizationId, confirmedAt);
     }
     const normalizedTimes = normalizeProviderActivationTimes(number, confirmedAt);

@@ -101,6 +101,11 @@ async function cleanupBatchAuthorizations(database: Database): Promise<void> {
     if (!ids.rowCount) return;
     const authorizationIds = ids.rows.map((row) => row.id);
     await client.query('DELETE FROM lifecycle_events WHERE authorization_id = ANY($1::uuid[])', [authorizationIds]);
+    await client.query('DELETE FROM supplier_activation_refunds WHERE supplier_activation_id IN (SELECT id FROM supplier_activations WHERE authorization_id = ANY($1::uuid[]))', [authorizationIds]);
+    await client.query('DELETE FROM supplier_activations WHERE authorization_id = ANY($1::uuid[])', [authorizationIds]);
+    await client.query('DELETE FROM number_acquisition_candidates WHERE request_id IN (SELECT id FROM number_acquisition_requests WHERE authorization_id = ANY($1::uuid[]))', [authorizationIds]);
+    await client.query('DELETE FROM number_acquisition_requests WHERE authorization_id = ANY($1::uuid[])', [authorizationIds]);
+    await client.query('DELETE FROM authorization_candidate_countries WHERE authorization_id = ANY($1::uuid[])', [authorizationIds]);
     await client.query('DELETE FROM activation_authorizations WHERE id = ANY($1::uuid[])', [authorizationIds]);
   });
 }
@@ -238,6 +243,244 @@ if (!databaseUrl) {
       assert.equal(index, 4, '碰撞应只重新生成发生碰撞的 token');
       const collisionRows = await database.pool.query<{ count: string }>('SELECT count(*)::text AS count FROM activation_authorizations WHERE token_suffix = $1', [collidingSuffix]);
       assert.equal(collisionRows.rows[0]?.count, '1');
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('批量链接 GET 不领取，首次 POST 原子绑定并固定完整候选配置', async () => {
+    let now = new Date('2026-08-01T00:00:00.000Z');
+    let quoteCalls = 0;
+    const heroSms = scriptedHeroSms({
+      quotes: async () => {
+        quoteCalls += 1;
+        throw new Error('领取后实时查询暂时失败');
+      },
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 2, countryName: '英国' },
+        { countryId: 1, countryName: '美国' },
+      ]);
+      const session = await login(app);
+      const created = await createBatch(app, session, '1');
+      assert.equal(created.statusCode, 201);
+      const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1];
+      assert.ok(token);
+
+      const preview = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(preview.statusCode, 200);
+      assert.match(preview.body, /<h1>OpenAI<\/h1>/);
+      assert.match(preview.body, /获取号码/);
+      assert.doesNotMatch(preview.body, /链接剩余时间|候选地区|价格|库存|HeroSMS|供应商|期限|授权/);
+
+      const claim = await app.inject({ method: 'POST', url: `/a/${token}` + '/numbers', headers: { cookie: 'recipient_session=stale-client-value' } });
+      assert.equal(claim.statusCode, 503);
+      assert.match(claim.body, /暂时无法获取号码，请联系发送者/);
+      assert.match(claim.body, /链接剩余时间/);
+      assert.doesNotMatch(claim.body, /授权/);
+      const recipientCookie = cookieValue(claim, 'recipient_session');
+      assert.notEqual(recipientCookie, 'stale-client-value');
+      assert.match(String(claim.headers['set-cookie']), /Max-Age=90000/);
+      assert.match(String(claim.headers['set-cookie']), /HttpOnly; Secure; SameSite=Strict/);
+      assert.match(String(claim.headers['set-cookie']), new RegExp(`Path=\\/a\\/${token}`));
+
+      const authorization = await database.pool.query<{
+        status: string; claimed_at: Date | null; number_acquisition_expires_at: Date | null;
+        expires_at: Date | null; recipient_session_hash: string | null;
+      }>(
+        'SELECT status, claimed_at, number_acquisition_expires_at, expires_at, recipient_session_hash FROM activation_authorizations WHERE token_suffix = $1',
+        [token.slice(-8)],
+      );
+      assert.equal(authorization.rows.length, 1);
+      assert.equal(authorization.rows[0]?.status, 'in_progress');
+      assert.equal(authorization.rows[0]?.claimed_at?.toISOString(), now.toISOString());
+      assert.equal(authorization.rows[0]?.number_acquisition_expires_at?.toISOString(), new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString());
+      assert.equal(authorization.rows[0]?.expires_at, null);
+      assert.ok(authorization.rows[0]?.recipient_session_hash);
+
+      const candidates = await database.pool.query<{
+        position: number; country_id: number; country_name: string; quoted_price: string | null; quoted_stock: number | null; used_at: Date | null;
+      }>(
+        `SELECT position, country_id, country_name, quoted_price::text, quoted_stock, used_at
+         FROM authorization_candidate_countries
+         WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
+         ORDER BY position`,
+        [token.slice(-8)],
+      );
+      assert.deepEqual(candidates.rows, [
+        { position: 1, country_id: 1, country_name: '美国', quoted_price: null, quoted_stock: null, used_at: null },
+        { position: 2, country_id: 2, country_name: '英国', quoted_price: null, quoted_stock: null, used_at: null },
+        { position: 3, country_id: 1, country_name: '美国', quoted_price: null, quoted_stock: null, used_at: null },
+      ]);
+
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 3, countryName: '法国' },
+        { countryId: 3, countryName: '法国' },
+        { countryId: 2, countryName: '英国' },
+      ]);
+      now = new Date('2026-08-01T01:00:00.000Z');
+      const retry = await app.inject({
+        method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: `recipient_session=${recipientCookie}` },
+      });
+      assert.equal(retry.statusCode, 503);
+      assert.equal((retry.cookies.find((cookie) => cookie.name === 'recipient_session')?.value), undefined, '后续访问不能重新设置 Cookie');
+      assert.equal(quoteCalls, 2);
+      const lostCookiePost = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(lostCookiePost.statusCode, 409);
+      assert.match(lostCookiePost.body, /此链接已被领取，当前浏览器无法访问，请联系发送者/);
+      assert.equal(lostCookiePost.cookies.find((cookie) => cookie.name === 'recipient_session'), undefined);
+      const retained = await database.pool.query<{ country_id: number; country_name: string }>(
+        `SELECT country_id, country_name FROM authorization_candidate_countries
+         WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1) ORDER BY position`,
+        [token.slice(-8)],
+      );
+      assert.deepEqual(retained.rows, [
+        { country_id: 1, country_name: '美国' },
+        { country_id: 2, country_name: '英国' },
+        { country_id: 1, country_name: '美国' },
+      ]);
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('默认候选配置不完整时领取整体回滚并保留待领取链接', async () => {
+    let now = new Date('2026-08-02T00:00:00.000Z');
+    let providerCalls = 0;
+    const heroSms = scriptedHeroSms({
+      balance: async () => { providerCalls += 1; return 10; },
+      services: async () => { providerCalls += 1; return [{ code: 'openai', name: 'OpenAI' }]; },
+      countries: async () => { providerCalls += 1; return [{ id: 1, name: '美国' }]; },
+      quotes: async () => { providerCalls += 1; return [{ countryId: 1, price: 0.8, stock: 1 }]; },
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '1');
+      const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1];
+      assert.ok(token);
+      const claim = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claim.statusCode, 503);
+      assert.match(claim.body, /暂时无法获取号码，请联系发送者/);
+      assert.equal(claim.cookies.find((cookie) => cookie.name === 'recipient_session'), undefined);
+      assert.equal(providerCalls, 0, '领取配置校验失败时不应调用 HeroSMS');
+
+      const authorization = await database.pool.query<{
+        status: string; claimed_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null;
+      }>(
+        'SELECT status, claimed_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE token_suffix = $1',
+        [token.slice(-8)],
+      );
+      assert.deepEqual(authorization.rows[0], {
+        status: 'unclaimed', claimed_at: null, number_acquisition_expires_at: null, recipient_session_hash: null,
+      });
+      const candidates = await database.pool.query(
+        'SELECT 1 FROM authorization_candidate_countries WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)',
+        [token.slice(-8)],
+      );
+      assert.equal(candidates.rowCount, 0);
+
+      const stillAvailable = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(stillAvailable.statusCode, 200);
+      assert.match(stillAvailable.body, /OpenAI/);
+      assert.match(stillAvailable.body, /获取号码/);
+
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 2, countryName: '英国' },
+        { countryId: 3, countryName: '法国' },
+      ]);
+      now = new Date('2026-08-02T00:01:00.000Z');
+      const repaired = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(repaired.statusCode, 303);
+      assert.ok(repaired.cookies.find((cookie) => cookie.name === 'recipient_session'));
+      assert.equal(providerCalls, 1);
+      const afterRepair = await database.pool.query<{ status: string; country_name: string }>(
+        `SELECT auth.status, candidate.country_name
+         FROM activation_authorizations auth
+         JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id
+         WHERE auth.token_suffix = $1 ORDER BY candidate.position`,
+        [token.slice(-8)],
+      );
+      assert.deepEqual(afterRepair.rows, [
+        { status: 'in_progress', country_name: '美国' },
+        { status: 'in_progress', country_name: '英国' },
+        { status: 'in_progress', country_name: '法国' },
+      ]);
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('同一链接并发领取只绑定一个浏览器且竞争者不能访问', async () => {
+    let now = new Date('2026-08-03T00:00:00.000Z');
+    const heroSms = scriptedHeroSms();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 2, countryName: '英国' },
+        { countryId: 3, countryName: '法国' },
+      ]);
+      const session = await login(app);
+      const created = await createBatch(app, session, '1');
+      const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1];
+      assert.ok(token);
+
+      const [first, second] = await Promise.all([
+        app.inject({ method: 'POST', url: `/a/${token}/numbers` }),
+        app.inject({ method: 'POST', url: `/a/${token}/numbers` }),
+      ]);
+      const responses = [first, second];
+      assert.equal(responses.filter((response) => response.statusCode === 303).length, 1);
+      assert.equal(responses.filter((response) => response.statusCode === 409).length, 1);
+      const unavailable = responses.find((response) => response.statusCode === 409);
+      assert.ok(unavailable);
+      assert.match(unavailable.body, /此链接已被领取，当前浏览器无法访问，请联系发送者/);
+      const bound = responses.find((response) => response.statusCode === 303);
+      assert.ok(bound);
+      assert.ok(bound.cookies.find((cookie) => cookie.name === 'recipient_session'));
+      const boundCookie = cookieValue(bound, 'recipient_session');
+      const boundPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: `recipient_session=${boundCookie}` } });
+      assert.equal(boundPage.statusCode, 200);
+      assert.match(boundPage.body, /链接剩余时间/);
+      assert.doesNotMatch(boundPage.body, /授权/);
+
+      const authorization = await database.pool.query<{
+        status: string; claimed_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null;
+      }>(
+        'SELECT status, claimed_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE token_suffix = $1',
+        [token.slice(-8)],
+      );
+      assert.deepEqual({
+        status: authorization.rows[0]?.status,
+        claimed_at: authorization.rows[0]?.claimed_at,
+        number_acquisition_expires_at: authorization.rows[0]?.number_acquisition_expires_at,
+        hasSession: Boolean(authorization.rows[0]?.recipient_session_hash),
+      }, {
+        status: 'in_progress', claimed_at: now,
+        number_acquisition_expires_at: new Date(now.getTime() + 24 * 60 * 60 * 1000), hasSession: true,
+      });
+      const candidates = await database.pool.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM authorization_candidate_countries WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)',
+        [token.slice(-8)],
+      );
+      assert.equal(candidates.rows[0]?.count, '3');
+      const activations = await database.pool.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM supplier_activations WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)',
+        [token.slice(-8)],
+      );
+      assert.equal(activations.rows[0]?.count, '1');
+
+      const competingGet = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(competingGet.statusCode, 200);
+      assert.match(competingGet.body, /此链接已被领取，当前浏览器无法访问，请联系发送者/);
     } finally {
       await cleanupBatchAuthorizations(database);
       await app.close();
@@ -443,10 +686,10 @@ if (!databaseUrl) {
       assert.doesNotMatch(numberPage.body, new RegExp(`${activationId}|HeroSMS|价格|库存`));
 
       const lostCookie = await app.inject({ method: 'GET', url: `/a/${token}` });
-      assert.match(lostCookie.body, /此链接不可用，请联系发送者/);
+      assert.match(lostCookie.body, /此链接已被领取，当前浏览器无法访问，请联系发送者/);
       const cannotRebind = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(cannotRebind.statusCode, 409);
-      assert.match(cannotRebind.body, /此链接不可用，请联系发送者/);
+      assert.match(cannotRebind.body, /此链接已被领取，当前浏览器无法访问，请联系发送者/);
 
       const stored = await database.pool.query<{ used_at: Date | null }>(
         `SELECT candidate.used_at FROM authorization_candidate_countries candidate

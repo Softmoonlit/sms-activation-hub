@@ -211,11 +211,11 @@ test('仅打开链接（聊天软件预览）不领取号码，跨浏览器绑�
     await expect(recipientPage.locator('.number')).toBeVisible();
     await recipientContext.close();
 
-    // 第三次：不同浏览器上下文尝试用同一链接，应被拒绝（unavailable 页面）
+    // 第三次：不同浏览器上下文尝试用同一链接，应被拒绝（浏览器绑定页面）
     const otherContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const otherPage = await otherContext.newPage();
     await otherPage.goto(`${origin}/a/${token}`);
-    await expect(otherPage.getByText('此链接不可用，请联系发送者')).toBeVisible();
+    await expect(otherPage.getByText('此链接已被领取，当前浏览器无法访问，请联系发送者')).toBeVisible();
     await otherContext.close();
   } finally {
     await app.close();

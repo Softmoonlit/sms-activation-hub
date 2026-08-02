@@ -95,7 +95,7 @@ test('移动视口完成领取、浏览器绑定、号码显示、换号确认�
     const otherContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const otherPage = await otherContext.newPage();
     await otherPage.goto(`${origin}/a/${token}`);
-    await expect(otherPage.getByText('此链接不可用，请联系发送者')).toBeVisible();
+    await expect(otherPage.getByText('此链接已被领取，当前浏览器无法访问，请联系发送者')).toBeVisible();
     await otherContext.close();
     await context.close();
   } finally {

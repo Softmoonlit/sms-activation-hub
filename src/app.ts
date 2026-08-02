@@ -284,7 +284,7 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   const remaining = deadline
     ? `<span data-countdown="${deadline}" data-format="hours-minutes">${escapeHtml(deadline)}</span>`
     : '领取前永久有效';
-  const availableRemaining = deadline ? `<p>授权剩余时间：${remaining}</p>` : '';
+  const availableRemaining = deadline ? `<p>链接剩余时间：${remaining}</p>` : '';
   const countdownScript = COUNTDOWN_SCRIPT;
   const acquisitionForm = (label = '获取号码') => `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">${label}</button></form>`;
   if (view.state === 'available') {
@@ -296,13 +296,13 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
       ? `${countryMarkup}<div class="success-badge">🎉 已收到验证码</div><p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
       : `${countryMarkup}<p>短信已收到，暂时无法显示验证码，请联系发送者</p>`;
     const structuredCodePollingScript = view.verificationCode ? '' : '<script>setTimeout(()=>location.reload(),5000)</script>';
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${delivery}<ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}${structuredCodePollingScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${delivery}<ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}${structuredCodePollingScript}`);
   }
   if (view.state === 'claimed' && view.replacementInProgress) {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在更换号码</p><ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在更换号码</p><ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
   }
   if (view.state === 'claimed' && view.activationTimeoutInProgress) {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在确认激活超时</p><ul class="facts"><li>授权剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在确认激活超时</p><ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
   }
   if (view.state === 'claimed' && view.phoneNumber) {
     const e164 = view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`;
@@ -313,26 +313,26 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     const numberRemaining = `<span data-countdown="${numberExpiryIso}" data-format="minutes-seconds">${escapeHtml(numberExpiryIso)}</span>`;
     const cancelRemaining = `<span data-countdown="${cancelAvailableIso}" data-format="cancel-countdown">${escapeHtml(cancelAvailableIso)}</span>`;
     const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><ol class="guide-steps"><li>复制上方号码，填入 OpenAI 验证页面并发送验证码</li><li>发送后请保持本页面开着，系统将自动接收并显示验证码</li></ol></div><div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>${guideMarkup}${replacementAction}<ul class="facts"><li>授权剩余时间：${remaining}</li><li>号码有效至：${numberRemaining}</li><li>可换号时间：${cancelRemaining}</li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>${guideMarkup}${replacementAction}<ul class="facts"><li>链接剩余时间：${remaining}</li><li>号码有效至：${numberRemaining}</li><li>可换号时间：${cancelRemaining}</li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
   }
   if (view.state === 'claimed' && view.acquisitionState) {
     const status = view.acquisitionState === 'manual' ? '号码获取结果待发送者处理' : '正在确认号码获取结果';
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p><p>${status}</p></section></main>${countdownScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>链接剩余时间：${remaining}</p><p>${status}</p></section></main>${countdownScript}`);
   }
   const terminalMessage = view.remainingNumberCount === 0
     ? '<p>可用号码次数已用尽</p>'
     : view.nextNumberAvailable
       ? '<p>当前激活已超时。</p>' + acquisitionForm('获取下一个号码')
       : acquisitionForm();
-  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>授权剩余时间：${remaining}</p>${errorMarkup}${terminalMessage}</section></main>${countdownScript}`);
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>链接剩余时间：${remaining}</p>${errorMarkup}${terminalMessage}</section></main>${countdownScript}`);
 }
 
 function replacementConfirmationPage(token: string): string {
   return htmlPage('确认更换号码', `<main class="recipient"><section class="panel"><h1>更换号码</h1><p>更换后当前号码将不能继续使用。</p><form method="post" action="/a/${encodeURIComponent(token)}/replacement/confirm"><button name="replacement" value="wait" type="submit" autofocus>继续等待</button><button name="replacement" value="confirm" type="submit">确认更换号码</button></form></section></main>`);
 }
 
-function unavailableRecipientPage(): string {
-  return htmlPage('链接不可用', '<main class="recipient"><section class="panel"><h1>链接不可用</h1><p>此链接不可用，请联系发送者</p></section></main>');
+function unavailableRecipientPage(message = '此链接不可用，请联系发送者'): string {
+  return htmlPage('链接不可用', `<main class="recipient"><section class="panel"><h1>链接不可用</h1><p>${escapeHtml(message)}</p></section></main>`);
 }
 
 function escapeHtml(value: string): string {
@@ -720,6 +720,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const result = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage());
+    if (result.state === 'browser-mismatch') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
     return reply.type('text/html; charset=utf-8').send(recipientPage(request.params.token, result));
   });
 
@@ -727,9 +728,19 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const result = await activationAuthorizations.claimAndGetNumber(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
-    reply.setCookie(RECIPIENT_COOKIE, result.sessionToken, {
-      httpOnly: true, maxAge: 24 * 60 * 60, path: `/a/${request.params.token}`, sameSite: 'strict', secure: true,
-    });
+    if (result.state === 'browser-mismatch') {
+      return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
+    }
+    if (result.state === 'claim-failed') {
+      const view = await activationAuthorizations.recipientState(request.params.token);
+      if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+      return reply.code(503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, '暂时无法获取号码，请联系发送者'));
+    }
+    if (result.setSessionCookie) {
+      reply.setCookie(RECIPIENT_COOKIE, result.sessionToken, {
+        httpOnly: true, maxAge: 25 * 60 * 60, path: `/a/${request.params.token}`, sameSite: 'strict', secure: true,
+      });
+    }
     if (result.state === 'claimed') return reply.redirect(`/a/${request.params.token}`, 303);
     const view = await activationAuthorizations.recipientState(request.params.token, result.sessionToken);
     if (result.state === 'confirming') {
@@ -745,6 +756,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const view = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
+    if (view.state === 'browser-mismatch') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
     if (!view.replacementAvailable) {
       return reply.code(409).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, '当前号码暂时不能更换，请继续等待。'));
     }
@@ -760,6 +772,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const view = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
+    if (view.state === 'browser-mismatch') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
     if (result.state === 'replaced') return reply.redirect(`/a/${request.params.token}`, 303);
     if (result.state === 'confirming') return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
     const message = result.state === 'too-early'
