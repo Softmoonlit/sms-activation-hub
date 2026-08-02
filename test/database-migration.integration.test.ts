@@ -224,6 +224,33 @@ if (!databaseUrl) {
       ]);
       assert.equal(await database.completeDefaultCandidateLocations(), undefined);
 
+      const legacyDeliveredId = randomUUID();
+      const legacyReceivedAt = new Date('2026-08-10T00:03:00.000Z');
+      await database.pool.query(
+        `INSERT INTO activation_authorizations
+           (id, recipient_identifier, normalized_recipient_identifier, token_hash, status, created_at, expires_at)
+         VALUES ($1, '旧短信记录', '旧短信记录', 'legacy-sms-token-hash', 'sms_delivered', $2, $3)`,
+        [legacyDeliveredId, createdAt, new Date('2026-08-11T00:00:00.000Z')],
+      );
+      await database.pool.query(
+        `INSERT INTO authorization_candidate_countries
+           (authorization_id, position, country_id, country_name, quoted_price, quoted_stock)
+         VALUES ($1, 1, 1, '美国', NULL, NULL)`,
+        [legacyDeliveredId],
+      );
+      await database.pool.query(
+        `INSERT INTO supplier_activations
+           (authorization_id, candidate_position, country_id, provider_activation_id, status, phone_number, activation_cost, currency, acquired_at, cancel_available_at, expires_at, sms_code, sms_text, sms_received_at)
+         VALUES ($1, 1, 1, $2, 'sms_delivered', '+14155550123', 0.8, 'USD', $3, $3, $4, '482913', 'legacy body', $5)`,
+        [legacyDeliveredId, `legacy-sms-${randomUUID()}`, createdAt, new Date('2026-08-01T00:20:00.000Z'), legacyReceivedAt],
+      );
+      await database.initialize();
+      const legacyDelivered = await database.pool.query<{ status: string; result_view_until: Date | null }>(
+        'SELECT status, result_view_until FROM activation_authorizations WHERE id = $1', [legacyDeliveredId],
+      );
+      assert.equal(legacyDelivered.rows[0]?.status, 'sms_delivered');
+      assert.equal(legacyDelivered.rows[0]?.result_view_until?.toISOString(), '2026-08-10T00:08:00.000Z');
+
       await database.initialize();
       const persisted = await database.pool.query<{ status: string; token_suffix: string; country_name: string | null }>(
         `SELECT auth.status, auth.token_suffix, candidate.country_name

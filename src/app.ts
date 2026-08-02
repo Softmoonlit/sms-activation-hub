@@ -7,7 +7,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
 import { ActivationAuthorizations, AuthorizationValidationError, DuplicateActiveAuthorizationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationPreflight, type AuthorizationSummary, type AuthorizationTokenGeneratorInput, type BatchAuthorizationPreflight, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
-import { countryFlag, countryFlagHtml, formatCurrency, formatDateTime } from './country-flag.js';
+import { countryFlagHtml, formatCurrency, formatDateTime } from './country-flag.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
 import { HeroSmsHttpAdapter, type HeroSms } from './herosms.js';
@@ -294,12 +294,25 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${availableRemaining}${errorMarkup}${acquisitionForm()}</section></main>${countdownScript}`);
   }
   if (view.state === 'claimed' && view.smsDelivered) {
-    const countryMarkup = view.countryName ? `<p class="country">${countryFlag(view.countryName)} ${escapeHtml(view.countryName)}</p>` : '';
+    const e164 = view.phoneNumber ? (view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`) : undefined;
+    const countryMarkup = view.countryName ? `<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName)}</p>` : '';
+    const numberMarkup = e164
+      ? `<p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
+      : '';
+    const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><ol class="guide-steps"><li>复制上方号码，填入 OpenAI 验证页面并发送验证码</li><li>发送后请保持本页面开着，系统将自动接收并显示验证码</li></ol></div>`;
     const delivery = view.verificationCode
-      ? `${countryMarkup}<div class="success-badge">🎉 已收到验证码</div><p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
-      : `${countryMarkup}<p>短信已收到，暂时无法显示验证码，请联系发送者</p>`;
+      ? `<div class="success-badge">🎉 已收到验证码</div><p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
+      : '<p>短信已收到，暂时无法显示验证码，请联系发送者</p>';
+    const resultViewUntil = view.resultViewUntil?.toISOString();
+    const resultViewRemaining = resultViewUntil
+      ? `<li>验证码可查看至：<span data-countdown="${escapeHtml(resultViewUntil)}" data-format="minutes-seconds">${escapeHtml(resultViewUntil)}</span></li>`
+      : '';
+    const refreshDelay = view.resultViewRemainingMs;
+    const refreshScript = refreshDelay !== undefined
+      ? `<script>setTimeout(()=>location.reload(),${Math.max(1000, Math.ceil(refreshDelay))});</script>`
+      : '';
     const structuredCodePollingScript = view.verificationCode ? '' : '<script>setTimeout(()=>location.reload(),5000)</script>';
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${delivery}<ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}${structuredCodePollingScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${countryMarkup}${numberMarkup}${guideMarkup}${delivery}<ul class="facts">${resultViewRemaining}</ul></section></main>${countdownScript}${structuredCodePollingScript}${refreshScript}`);
   }
   if (view.state === 'claimed' && view.replacementInProgress) {
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在更换号码</p><ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
@@ -468,6 +481,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   await app.register(formbody);
 
   let closing = false;
+  const pendingFinishTasks = new Set<Promise<void>>();
   let authorizationExpiryTimer: NodeJS.Timeout | undefined;
   let revocationCancellationTimer: NodeJS.Timeout | undefined;
   const retryRevocationCancellationScheduling = (): void => {
@@ -519,6 +533,12 @@ export async function createApp(config: AppConfig, database = new Database(confi
     authorizationExpiryTimer.unref();
   };
 
+  const recipientState = async (token: string, sessionToken?: string): Promise<Awaited<ReturnType<ActivationAuthorizations['recipientState']>>> => {
+    const view = await activationAuthorizations.recipientState(token, sessionToken);
+    void scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
+    return view;
+  };
+
   app.addHook('onRequest', async (_request, reply) => {
     reply.header('Referrer-Policy', 'no-referrer');
     reply.header('X-Robots-Tag', 'noindex, nofollow, noarchive');
@@ -549,7 +569,16 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await activationAuthorizations.receiveHeroSmsWebhook({
       activationId, serviceCode, text, countryId, receivedAt, ...(code ? { code } : {}),
     });
-    setImmediate(() => { void activationAuthorizations.finishDeliveredActivations().catch(() => undefined); });
+    void scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
+    const finishTask = new Promise<void>((resolve) => {
+      setImmediate(() => {
+        void activationAuthorizations.finishDeliveredActivations(activationId)
+          .catch(() => undefined)
+          .finally(resolve);
+      });
+    });
+    pendingFinishTasks.add(finishTask);
+    void finishTask.then(() => { pendingFinishTasks.delete(finishTask); });
     return reply.code(200).send();
   });
 
@@ -720,7 +749,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
 
   app.get<{ Params: { token: string } }>('/a/:token', async (request, reply) => {
-    const result = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    const result = await recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage());
     if (result.state === 'browser-mismatch') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
@@ -735,7 +764,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
       return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
     }
     if (result.state === 'claim-failed') {
-      const view = await activationAuthorizations.recipientState(request.params.token);
+      const view = await recipientState(request.params.token);
       if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
       return reply.code(503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, RECIPIENT_ACQUISITION_ERROR_MESSAGE));
     }
@@ -745,7 +774,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
       });
     }
     if (result.state === 'claimed') return reply.redirect(`/a/${request.params.token}`, 303);
-    const view = await activationAuthorizations.recipientState(request.params.token, result.sessionToken);
+    const view = await recipientState(request.params.token, result.sessionToken);
     if (result.state === 'confirming') {
       return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
     }
@@ -756,7 +785,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
 
   app.post<{ Params: { token: string } }>('/a/:token/replacement', async (request, reply) => {
-    const view = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    const view = await recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
     if (view.state === 'browser-mismatch') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
@@ -772,7 +801,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const result = await activationAuthorizations.requestNumberReplacement(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
-    const view = await activationAuthorizations.recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    const view = await recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
     if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
     if (view.state === 'browser-mismatch') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
@@ -889,6 +918,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await activationAuthorizations.pollWaitingActivations();
     await activationAuthorizations.finishDeliveredActivations();
     await activationAuthorizations.deleteExpiredSensitiveDeliveryData();
+    await scheduleNextAuthorizationExpiry();
   };
   let backgroundTasksRunning = false;
   const expirationSweep = setInterval(() => {
@@ -908,6 +938,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     clearInterval(expirationSweep);
     if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
     if (revocationCancellationTimer) clearTimeout(revocationCancellationTimer);
+    await Promise.all(pendingFinishTasks);
     await database.close();
   });
   return app;

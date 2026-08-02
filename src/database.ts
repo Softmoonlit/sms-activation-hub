@@ -185,10 +185,32 @@ export class Database {
         WHERE token_suffix IS NOT NULL;
 
       DROP INDEX IF EXISTS activation_authorizations_unclaimed_recipient_idx;
+      UPDATE activation_authorizations
+      SET normalized_recipient_identifier = NULL
+      WHERE id IN (
+        SELECT id FROM (
+          SELECT id,
+                 row_number() OVER (
+                   PARTITION BY normalized_recipient_identifier
+                   ORDER BY CASE status
+                     WHEN 'result_available' THEN 1
+                     WHEN 'sms_delivered' THEN 2
+                     WHEN 'in_progress' THEN 3
+                     WHEN 'unclaimed' THEN 4
+                     ELSE 5
+                   END, last_activity_at DESC NULLS LAST, created_at DESC, id DESC
+                 ) AS duplicate_rank
+          FROM activation_authorizations
+          WHERE normalized_recipient_identifier IS NOT NULL
+            AND status IN ('unclaimed', 'in_progress', 'result_available', 'sms_delivered')
+        ) duplicates
+        WHERE duplicates.duplicate_rank > 1
+      );
+
       DROP INDEX IF EXISTS activation_authorizations_unended_recipient_idx;
       CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_unended_recipient_idx
         ON activation_authorizations (normalized_recipient_identifier)
-        WHERE normalized_recipient_identifier IS NOT NULL AND status IN ('unclaimed', 'in_progress');
+        WHERE normalized_recipient_identifier IS NOT NULL AND status IN ('unclaimed', 'in_progress', 'result_available', 'sms_delivered');
 
       CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_recipient_session_idx
         ON activation_authorizations (recipient_session_hash)
@@ -283,6 +305,18 @@ export class Database {
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_refund_reconciliation_status_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_refund_reconciliation_status_check
         CHECK (refund_reconciliation_status IN ('pending', 'resolved'));
+
+      UPDATE activation_authorizations auth
+      SET result_view_until = (
+        SELECT max(activation.sms_received_at) + INTERVAL '5 minutes'
+        FROM supplier_activations activation
+        WHERE activation.authorization_id = auth.id AND activation.sms_received_at IS NOT NULL
+      )
+      WHERE auth.status = 'sms_delivered' AND auth.result_view_until IS NULL
+        AND EXISTS (
+          SELECT 1 FROM supplier_activations activation
+          WHERE activation.authorization_id = auth.id AND activation.sms_received_at IS NOT NULL
+        );
 
       UPDATE supplier_activations
         SET status = 'manual_reconciliation'
@@ -526,9 +560,11 @@ export class Database {
     await this.expireDueAuthorizations(now);
     const result = await this.pool.query(
       `SELECT 1 FROM activation_authorizations
-       WHERE normalized_recipient_identifier = $1 AND status IN ('unclaimed', 'in_progress')
+       WHERE normalized_recipient_identifier = $1
+         AND (status IN ('unclaimed', 'in_progress')
+           OR (status IN ('result_available', 'sms_delivered') AND result_view_until > $2))
        LIMIT 1`,
-      [normalizedRecipientIdentifier],
+      [normalizedRecipientIdentifier, now],
     );
     return result.rowCount === 1;
   }
@@ -607,10 +643,11 @@ export class Database {
     await this.expireDueAuthorizations(now);
     const result = await this.pool.query<{
       id: string; recipient_identifier: string | null; token_suffix: string | null; internal_note: string | null;
-      status: AuthorizationStatus; created_at: Date; expires_at: Date | null; last_activity_at: Date;
+      status: AuthorizationStatus; created_at: Date; expires_at: Date | null; number_acquisition_expires_at: Date | null; result_view_until: Date | null; last_activity_at: Date;
       activation_status: string | null; acquisition_status: string | null; has_pending_exception: boolean;
     }>(
       `SELECT auth.id, auth.recipient_identifier, auth.token_suffix, auth.internal_note, auth.status, auth.created_at, auth.expires_at,
+              auth.number_acquisition_expires_at, auth.result_view_until,
               COALESCE(auth.last_activity_at, auth.created_at) AS last_activity_at,
               activation.status AS activation_status, acquisition.status AS acquisition_status,
               EXISTS (
@@ -639,8 +676,14 @@ export class Database {
       createdAt: row.created_at,
       ...(row.expires_at !== null ? { expiresAt: row.expires_at } : {}),
       lastActivityAt: row.last_activity_at,
-      canRevoke: ['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(row.status)
-        && (row.expires_at === null || row.expires_at > now),
+      canRevoke: (() => {
+        const accessDeadline = row.number_acquisition_expires_at ?? row.expires_at;
+        const activeActivation = ['acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming'].includes(row.activation_status ?? '');
+        return ['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(row.status)
+          && ((accessDeadline === null || accessDeadline > now)
+            || (row.status === 'result_available' && row.result_view_until !== null && row.result_view_until > now)
+            || (row.status === 'in_progress' && activeActivation));
+      })(),
       ...(row.activation_status ? { currentActivationStatus: row.activation_status } : {}),
       hasPendingException: row.has_pending_exception || row.acquisition_status === 'reconciling' || row.acquisition_status === 'manual',
     }));
@@ -659,7 +702,16 @@ export class Database {
     await this.transaction(async (client) => {
       const due = await client.query<{ id: string; status: AuthorizationStatus }>(
         `SELECT id, status FROM activation_authorizations
-         WHERE expires_at IS NOT NULL AND expires_at <= $1
+         WHERE COALESCE(number_acquisition_expires_at, expires_at) IS NOT NULL
+           AND COALESCE(number_acquisition_expires_at, expires_at) <= $1
+           AND status NOT IN ('result_available', 'sms_delivered')
+           AND NOT (
+             status = 'in_progress' AND EXISTS (
+               SELECT 1 FROM supplier_activations activation
+               WHERE activation.authorization_id = activation_authorizations.id
+                 AND activation.status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'completion_confirming')
+             )
+           )
            AND (token_hash IS NOT NULL OR recipient_session_hash IS NOT NULL)
          FOR UPDATE`,
         [now],
@@ -691,7 +743,16 @@ export class Database {
            ended_at = COALESCE(ended_at, $2),
            ended_reason = COALESCE(ended_reason, 'claim_window_ended'),
            token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
-       WHERE id = $1 AND expires_at IS NOT NULL AND expires_at <= $2`,
+       WHERE id = $1 AND COALESCE(number_acquisition_expires_at, expires_at) IS NOT NULL
+         AND COALESCE(number_acquisition_expires_at, expires_at) <= $2
+         AND status NOT IN ('result_available', 'sms_delivered')
+         AND NOT (
+           status = 'in_progress' AND EXISTS (
+             SELECT 1 FROM supplier_activations activation
+             WHERE activation.authorization_id = activation_authorizations.id
+               AND activation.status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'completion_confirming')
+           )
+         )`,
       [id, now],
     );
   }
