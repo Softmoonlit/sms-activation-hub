@@ -269,6 +269,120 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
+  test('首次与后继号码获取按相同候选报价顺序尝试并规范化供应商时间', async () => {
+    let now = new Date('2026-08-01T00:00:00.000Z');
+    const attemptedCountries: number[] = [];
+    let acquiredCount = 0;
+    const heroSms = scriptedHeroSms({
+      quotes: async () => [
+        { countryId: 1, price: 1.3, stock: 2 },
+        { countryId: 2, price: 0.4, stock: 1 },
+        { countryId: 3, price: 0.9, stock: 3 },
+      ],
+      getNumber: async (_serviceCode, countryId) => {
+        attemptedCountries.push(countryId);
+        if (countryId === 2) throw new HeroSmsResponseError('no-numbers');
+        acquiredCount += 1;
+        return {
+          activationId: `shared-flow-${acquiredCount}-${randomUUID()}`,
+          phoneNumber: acquiredCount === 1 ? '+14155550123' : '+442079460123',
+          activationCost: 0.8, currency: 'USD',
+          activationTime: now,
+          activationEndTime: new Date(now.getTime() - 1_000),
+        };
+      },
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+
+      const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(first.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
+      const firstPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(firstPage.body, /data-countdown="2026-08-01T00:20:00.000Z"/);
+
+      now = new Date('2026-08-01T00:02:00.000Z');
+      const replacement = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replacement.statusCode, 303);
+      assert.deepEqual(attemptedCountries, [2, 3, 2, 1]);
+
+      const replacementPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(replacementPage.body, /data-countdown="2026-08-01T00:22:00.000Z"/);
+    } finally { await app.close(); }
+  });
+
+  test('后继号码获取结果不确定时复用同一对账流程且确认前不重复获取', async () => {
+    let now = new Date('2026-08-01T06:00:00.000Z');
+    const firstActivationId = `shared-uncertain-first-${randomUUID()}`;
+    const replacementActivationId = `shared-uncertain-replacement-${randomUUID()}`;
+    let getNumberCalls = 0;
+    let reconciliationAvailable = false;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        if (getNumberCalls === 1) {
+          return {
+            activationId: firstActivationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+            activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+          };
+        }
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activeActivations: async () => {
+        if (!reconciliationAvailable) throw new HeroSmsResponseError('provider');
+        return [{
+          activationId: replacementActivationId, phoneNumber: '+442079460124', activationCost: 0.8, currency: 'USD',
+          serviceCode: 'openai', countryId: 2, activationTime: new Date('2026-08-01T06:02:00.000Z'), status: '1',
+        }];
+      },
+      activationHistory: async () => [],
+      cancelActivation: async (activationId) => {
+        assert.equal(activationId, firstActivationId);
+        return 'cancelled';
+      },
+    });
+    const opened = await openApplication(heroSms, () => now);
+    let token = '';
+    let recipientCookie = '';
+    try {
+      const session = await login(opened.app);
+      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      const first = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
+
+      now = new Date('2026-08-01T06:02:00.000Z');
+      const confirming = await opened.app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(confirming.statusCode, 202);
+      assert.match(confirming.body, /正在确认号码获取结果/);
+      assert.equal(getNumberCalls, 2);
+
+      const retry = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
+      assert.equal(retry.statusCode, 202);
+      assert.equal(getNumberCalls, 2, '结果确认前重试不得再次调用供应商');
+    } finally { await opened.app.close(); }
+
+    reconciliationAvailable = true;
+    const restarted = await openApplication(heroSms, () => now);
+    try {
+      const recovered = await restarted.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(recovered.body, /\+44 20 7946 0124/);
+      assert.equal(getNumberCalls, 2);
+    } finally { await restarted.app.close(); }
+  });
+
   test('PostgreSQL 全局串行号码获取，并在调用前重新检查授权期限', async () => {
     let now = new Date('2026-08-01T00:00:00.000Z');
     let activeCalls = 0;
