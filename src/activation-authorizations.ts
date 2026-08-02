@@ -143,7 +143,7 @@ type PreparedNumberCandidate = {
 };
 
 type PreparedNumberAcquisition =
-  | { kind: 'expired' | 'unavailable' | 'already-active' | 'no-candidates' }
+  | { kind: 'expired' | 'unavailable' | 'already-active' | 'no-candidates' | 'configuration-error' }
   | { kind: 'ready'; candidates: PreparedNumberCandidate[] };
 
 export interface HeroSmsWebhookEvent {
@@ -1231,15 +1231,17 @@ export class ActivationAuthorizations {
     if (!candidatesResult.rowCount) return { kind: 'no-candidates' };
 
     const quoteByCountry = new Map(quotes.map((quote) => [quote.countryId, quote]));
-    const candidates = candidatesResult.rows
-      .map((candidate) => ({
-        position: candidate.position,
-        countryId: candidate.country_id,
-        quote: quoteByCountry.get(candidate.country_id),
-      }))
-      .filter((candidate): candidate is { position: number; countryId: number; quote: HeroSmsQuote } => Boolean(candidate.quote && candidate.quote.stock > 0))
-      .sort((left, right) => left.quote.price - right.quote.price || left.countryId - right.countryId || left.position - right.position)
-      .map((candidate) => ({ position: candidate.position, countryId: candidate.countryId, requestedPrice: candidate.quote.price }));
+    const candidates: PreparedNumberCandidate[] = [];
+    for (const candidate of candidatesResult.rows) {
+      const quote = quoteByCountry.get(candidate.country_id);
+      if (!quote || !Number.isFinite(quote.price) || quote.price < 0
+        || !Number.isInteger(quote.stock) || quote.stock < 0) {
+        return { kind: 'configuration-error' };
+      }
+      // 只有供应商明确报告 stock 为零时才跳过位置；该位置仍保留给后续请求。
+      if (quote.stock === 0) continue;
+      candidates.push({ position: candidate.position, countryId: candidate.country_id, requestedPrice: quote.price });
+    }
     return { kind: 'ready', candidates };
   }
 
@@ -1283,14 +1285,6 @@ export class ActivationAuthorizations {
       return 'unavailable';
     }
 
-    let quotes: HeroSmsQuote[];
-    try {
-      quotes = await this.heroSms.quotes(this.openAiServiceCode);
-    } catch {
-      await clearPendingReplacement();
-      return 'error';
-    }
-
     try {
       return await this.withAcquisitionLock(async (client) => {
         const unresolved = await client.query<{ authorization_id: string }>(
@@ -1298,6 +1292,14 @@ export class ActivationAuthorizations {
         );
         const pending = unresolved.rows[0];
         if (pending) return pending.authorization_id === authorizationId ? 'confirming' : 'paused';
+
+        let quotes: HeroSmsQuote[];
+        try {
+          quotes = await this.heroSms.quotes(this.openAiServiceCode);
+        } catch {
+          await clearPendingReplacement();
+          return 'error';
+        }
 
         let prepared: PreparedNumberAcquisition;
         await client.query('BEGIN');
@@ -1310,6 +1312,10 @@ export class ActivationAuthorizations {
         }
 
         if (prepared.kind !== 'ready') {
+          if (prepared.kind === 'configuration-error') {
+            await clearPendingReplacement();
+            return 'error';
+          }
           if (prepared.kind === 'no-candidates') {
             await client.query("UPDATE activation_authorizations SET status = 'quota_exhausted' WHERE id = $1 AND status = 'in_progress'", [authorizationId]);
             await clearPendingReplacement();

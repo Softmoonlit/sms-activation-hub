@@ -62,6 +62,9 @@ function activationStatusLabel(status: string): string {
   return activationStatusLabels[status] ? `${activationStatusLabels[status]}（${status}）` : status;
 }
 
+const RECIPIENT_NO_NUMBERS_MESSAGE = '当前暂无可用号码，请稍后重试';
+const RECIPIENT_ACQUISITION_ERROR_MESSAGE = '暂时无法获取号码，请联系发送者';
+
 function htmlPage(title: string, content: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -316,7 +319,7 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>${guideMarkup}${replacementAction}<ul class="facts"><li>链接剩余时间：${remaining}</li><li>号码有效至：${numberRemaining}</li><li>可换号时间：${cancelRemaining}</li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
   }
   if (view.state === 'claimed' && view.acquisitionState) {
-    const status = view.acquisitionState === 'manual' ? '号码获取结果待发送者处理' : '正在确认号码获取结果';
+    const status = view.acquisitionState === 'manual' ? '号码状态待发送者处理' : '正在确认号码获取结果，请稍候';
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>链接剩余时间：${remaining}</p><p>${status}</p></section></main>${countdownScript}`);
   }
   const terminalMessage = view.remainingNumberCount === 0
@@ -734,7 +737,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (result.state === 'claim-failed') {
       const view = await activationAuthorizations.recipientState(request.params.token);
       if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
-      return reply.code(503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, '暂时无法获取号码，请联系发送者'));
+      return reply.code(503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, RECIPIENT_ACQUISITION_ERROR_MESSAGE));
     }
     if (result.setSessionCookie) {
       reply.setCookie(RECIPIENT_COOKIE, result.sessionToken, {
@@ -747,8 +750,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
       return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
     }
     const message = result.state === 'no-numbers'
-      ? '当前暂无可用号码，请联系发送者'
-      : '暂时无法获取号码，请联系发送者';
+      ? RECIPIENT_NO_NUMBERS_MESSAGE
+      : RECIPIENT_ACQUISITION_ERROR_MESSAGE;
     return reply.code(result.state === 'no-numbers' ? 409 : 503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, message));
   });
 
@@ -778,8 +781,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const message = result.state === 'too-early'
       ? '当前号码暂时不能更换，请继续等待。'
       : result.state === 'no-numbers'
-        ? '当前暂无可用号码，请联系发送者'
-        : '暂时无法更换号码，请联系发送者';
+        ? RECIPIENT_NO_NUMBERS_MESSAGE
+        : RECIPIENT_ACQUISITION_ERROR_MESSAGE;
     return reply.code(result.state === 'too-early' || result.state === 'no-numbers' ? 409 : 503)
       .type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, message));
   });
