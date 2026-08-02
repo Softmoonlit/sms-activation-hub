@@ -383,6 +383,49 @@ if (!databaseUrl) {
     } finally { await restarted.app.close(); }
   });
 
+  test('首次获取在报价查询期间并发撤销时返回不可用而不是 404', async () => {
+    let blockQuotes = false;
+    let resolveQuotesStarted!: () => void;
+    const quotesStarted = new Promise<void>((resolve) => { resolveQuotesStarted = resolve; });
+    let releaseQuotes: (() => void) | undefined;
+    const quotesReleased = new Promise<void>((resolve) => { releaseQuotes = resolve; });
+    const heroSms = scriptedHeroSms({
+      quotes: async () => {
+        if (blockQuotes) {
+          resolveQuotesStarted();
+          await quotesReleased;
+        }
+        return [
+          { countryId: 1, price: 0.8, stock: 3 },
+          { countryId: 2, price: 1.2, stock: 2 },
+          { countryId: 3, price: 1.5, stock: 1 },
+        ];
+      },
+    });
+    const { app } = await openApplication(heroSms);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `并发撤销-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      blockQuotes = true;
+      const claim = app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      await quotesStarted;
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const authorizationId = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(authorizationId);
+      assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${authorizationId}/revoke`, {})).statusCode, 303);
+
+      releaseQuotes?.();
+      const result = await claim;
+      assert.equal(result.statusCode, 409);
+      assert.match(result.body, /此链接不可用，请联系发送者/);
+    } finally {
+      releaseQuotes?.();
+      await app.close();
+    }
+  });
+
   test('PostgreSQL 全局串行号码获取，并在调用前重新检查授权期限', async () => {
     let now = new Date('2026-08-01T00:00:00.000Z');
     let activeCalls = 0;

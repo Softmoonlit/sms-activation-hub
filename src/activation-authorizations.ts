@@ -1174,9 +1174,13 @@ export class ActivationAuthorizations {
       [authorizationId],
     );
     const authorization = eligibility.rows[0];
-    if (!authorization || authorization.status !== 'in_progress' || !authorization.expires_at || authorization.expires_at <= this.now()) {
+    if (!authorization || !authorization.expires_at || authorization.expires_at <= this.now()) {
       await clearPendingReplacement();
       return 'expired';
+    }
+    if (authorization.status !== 'in_progress') {
+      await clearPendingReplacement();
+      return 'unavailable';
     }
 
     let quotes: HeroSmsQuote[];
@@ -1234,9 +1238,23 @@ export class ActivationAuthorizations {
           );
           const requestId = request.rows[0]?.id;
           if (!requestId) {
-            const availability = await this.numberAcquisitionAvailability(authorizationId, sessionHash);
+            const currentResult = await client.query<{ status: string; expires_at: Date | null; recipient_session_hash: string | null }>(
+              'SELECT status, expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
+              [authorizationId],
+            );
+            const current = currentResult.rows[0];
+            const currentTime = this.now();
+            if (!current || !current.expires_at || current.expires_at <= currentTime) {
+              if (current?.status === 'in_progress') await this.expireAuthorization(client, authorizationId, currentTime);
+              await clearPendingReplacement();
+              return 'expired';
+            }
+            if (current.status !== 'in_progress' || (sessionHash !== undefined && current.recipient_session_hash !== sessionHash)) {
+              await clearPendingReplacement();
+              return 'unavailable';
+            }
             await clearPendingReplacement();
-            return availability === 'expired' ? 'expired' : availability === 'unavailable' ? 'unavailable' : 'error';
+            return 'error';
           }
 
           const currentAuthorization = await client.query<{ status: string; expires_at: Date | null; recipient_session_hash: string | null }>(
