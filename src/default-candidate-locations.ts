@@ -1,5 +1,5 @@
-import { Database } from './database.js';
-import type { HeroSms } from './herosms.js';
+import { Database, type DefaultCandidateLocation } from './database.js';
+import type { HeroSms, HeroSmsCountry, HeroSmsQuote } from './herosms.js';
 
 export interface CandidateLocation {
   id: number;
@@ -8,16 +8,50 @@ export interface CandidateLocation {
   stock?: number;
 }
 
+export interface ConfiguredCandidateLocation {
+  position: number;
+  countryId: number;
+  countryName?: string;
+}
+
 export interface CandidateLocationSettings {
-  balance: number;
+  balance?: number;
   configuredCountryIds: number[];
+  configuredLocations: ConfiguredCandidateLocation[];
   locations: CandidateLocation[];
+  configurationComplete: boolean;
+  heroSmsAvailable: boolean;
 }
 
 export class CandidateLocationValidationError extends Error {
   constructor() {
     super('请选择三个可查询的候选地区。');
   }
+}
+
+interface RemoteCandidateLocationSettings {
+  balance: number;
+  locations: CandidateLocation[];
+}
+
+function completeConfiguration(locations: DefaultCandidateLocation[]): boolean {
+  return locations.length === 3 && locations.every((location, index) => (
+    location.position === index + 1 && Boolean(location.countryName?.trim())
+  ));
+}
+
+function queryableLocation(location: CandidateLocation | undefined): location is CandidateLocation & { price: number; stock: number } {
+  return Boolean(
+    location
+    && location.name.trim()
+    && location.price !== undefined
+    && Number.isFinite(location.price)
+    && location.price >= 0
+    && location.stock !== undefined
+    && Number.isFinite(location.stock)
+    && Number.isInteger(location.stock)
+    && location.stock >= 0,
+  );
 }
 
 export class DefaultCandidateLocations {
@@ -28,44 +62,56 @@ export class DefaultCandidateLocations {
   ) {}
 
   async settings(): Promise<CandidateLocationSettings> {
-    const [balance, services, countries, quotes, configuredCountryIds] = await Promise.all([
-      this.heroSms.balance(),
-      this.heroSms.services(),
-      this.heroSms.countries(),
-      this.heroSms.quotes(this.openAiServiceCode),
-      this.database.defaultCandidateCountryIds(),
-    ]);
-    if (!services.some((service) => service.code === this.openAiServiceCode)) {
-      throw new CandidateLocationValidationError();
-    }
-
-    const quotesByCountry = new Map(quotes.map((quote) => [quote.countryId, quote]));
-    const locations = countries
-      .map((country) => {
-        const quote = quotesByCountry.get(country.id);
-        return quote ? { ...country, price: quote.price, stock: quote.stock } : country;
-      })
-      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN') || a.id - b.id);
-    return {
-      balance,
-      configuredCountryIds,
-      locations,
+    const configuredLocations = await this.database.defaultCandidateLocations();
+    const base = {
+      configuredCountryIds: configuredLocations.map((location) => location.countryId),
+      configuredLocations,
+      configurationComplete: completeConfiguration(configuredLocations),
     };
+    try {
+      const remote = await this.remoteSettings();
+      return { ...base, ...remote, heroSmsAvailable: true };
+    } catch {
+      return { ...base, heroSmsAvailable: false, locations: [] };
+    }
   }
 
   async replace(countryIds: number[]): Promise<void> {
     if (countryIds.length !== 3) {
       throw new CandidateLocationValidationError();
     }
-    const settings = await this.settings();
-    const locationById = new Map(settings.locations.map((location) => [location.id, location]));
+    const remote = await this.remoteSettings();
+    const locationById = new Map(remote.locations.map((location) => [location.id, location]));
     const selected = countryIds.map((countryId) => locationById.get(countryId));
-    if (selected.some((location) => !location || location.price === undefined || location.stock === undefined)) {
+    const completeSelected = selected.map((location) => {
+      if (!queryableLocation(location)) throw new CandidateLocationValidationError();
+      return { countryId: location.id, countryName: location.name };
+    });
+    await this.database.replaceDefaultCandidateLocations(completeSelected);
+  }
+
+  private async remoteSettings(): Promise<RemoteCandidateLocationSettings> {
+    const [balance, services, countries, quotes] = await Promise.all([
+      this.heroSms.balance(),
+      this.heroSms.services(),
+      this.heroSms.countries(),
+      this.heroSms.quotes(this.openAiServiceCode),
+    ]);
+    if (!services.some((service) => service.code === this.openAiServiceCode)) {
       throw new CandidateLocationValidationError();
     }
-    await this.database.replaceDefaultCandidateLocations(selected.map((location) => ({
-      countryId: location!.id,
-      countryName: location!.name,
-    })));
+
+    const locations = this.locationsWithQuotes(countries, quotes);
+    return { balance, locations };
+  }
+
+  private locationsWithQuotes(countries: HeroSmsCountry[], quotes: HeroSmsQuote[]): CandidateLocation[] {
+    const quotesByCountry = new Map(quotes.map((quote) => [quote.countryId, quote]));
+    return countries
+      .map((country) => {
+        const quote = quotesByCountry.get(country.id);
+        return quote ? { ...country, price: quote.price, stock: quote.stock } : country;
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN') || a.id - b.id);
   }
 }

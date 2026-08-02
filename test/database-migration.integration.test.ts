@@ -219,6 +219,10 @@ if (!databaseUrl) {
         'SELECT country_id, country_name FROM default_candidate_countries WHERE position = 1',
       );
       assert.deepEqual(legacyLocation.rows[0], { country_id: 99, country_name: null });
+      assert.deepEqual(await database.defaultCandidateLocations(), [
+        { position: 1, countryId: 99 },
+      ]);
+      assert.equal(await database.completeDefaultCandidateLocations(), undefined);
 
       await database.initialize();
       const persisted = await database.pool.query<{ status: string; token_suffix: string; country_name: string | null }>(

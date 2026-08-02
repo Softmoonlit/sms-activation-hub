@@ -339,29 +339,44 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character] ?? character);
 }
 
+function jsonForScript(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  return (serialized ?? 'null').replace(/[<>&]/g, (character) => ({ '<': '\\u003c', '>': '\\u003e', '&': '\\u0026' })[character] ?? character);
+}
+
 function settingsPage(path: string, csrfToken: string, settings: CandidateLocationSettings, error?: string, saved?: boolean): string {
-  // Serialise locations once as a JSON array embedded in the page script.
-  // Each entry: [id, displayName] — displayName includes price/stock so it matches the old option text.
-  const locationsJson = JSON.stringify(settings.locations.map((l) => {
-    const quote = l.price === undefined || l.stock === undefined ? '暂无报价' : `价格 ${l.price.toString()}，库存 ${l.stock}`;
-    return [l.id, `${l.name}，${quote}`];
+  // 只把当前 HeroSMS 可查询数据嵌入页面；报价和库存不会写入默认配置。
+  const locationsJson = jsonForScript(settings.locations.map((location) => {
+    const quote = location.price === undefined || location.stock === undefined ? '暂无报价' : `价格 ${location.price.toString()}，库存 ${location.stock}`;
+    return [location.id, `${location.name}，${quote}`];
   }));
-  const initialIds = JSON.stringify(settings.configuredCountryIds.map((id) => id ?? null));
+  const configuredByPosition = new Map(settings.configuredLocations.map((location) => [location.position, location]));
+  const configuredPositions = [1, 2, 3].map((position) => configuredByPosition.get(position));
+  const initialIds = jsonForScript(configuredPositions.map((location) => location?.countryId ?? null));
+  const initialNames = jsonForScript(configuredPositions.map((location) => location?.countryName ?? null));
   const comboboxes = [0, 1, 2].map((position) => {
-    const selectedId = settings.configuredCountryIds[position];
-    const selectedLocation = selectedId !== undefined ? settings.locations.find((l) => l.id === selectedId) : undefined;
-    const selectedName = selectedLocation
-      ? escapeHtml(`${selectedLocation.name}，${selectedLocation.price === undefined || selectedLocation.stock === undefined ? '暂无报价' : `价格 ${selectedLocation.price.toString()}，库存 ${selectedLocation.stock}`}`)
+    const configured = configuredPositions[position];
+    const selectedId = configured?.countryId;
+    const selectedLocation = selectedId !== undefined ? settings.locations.find((location) => location.id === selectedId) : undefined;
+    const selectedName = configured?.countryName
+      ? escapeHtml(`${configured.countryName}${selectedLocation ? `，${selectedLocation.price === undefined || selectedLocation.stock === undefined ? '暂无报价' : `价格 ${selectedLocation.price.toString()}，库存 ${selectedLocation.stock}`}` : `，地区 ID ${configured.countryId}`}`)
       : '';
     const inputClass = selectedName ? ' cb-selected' : '';
     return `<label>候选地区 ${position + 1}<div class="cb" id="cb${position}"><input class="cb-input${inputClass}" type="text" value="${selectedName}" placeholder="输入地区名称搜索并选择…" autocomplete="off" aria-label="候选地区 ${position + 1}" aria-haspopup="listbox"><button type="button" class="cb-clear" tabindex="-1" title="清除选择">✕</button><input type="hidden" name="candidate${position + 1}" value="${selectedId ?? ''}"><ul class="cb-list" role="listbox"></ul></div></label>`;
   }).join('');
-  const comboboxScript = `<script>(()=>{const LOCS=${locationsJson};const INIT=${initialIds};function esc(s){return s.replace(/[&<>'"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'})[c]??c);}function hl(text,q){if(!q)return esc(text);const i=text.toLowerCase().indexOf(q.toLowerCase());if(i<0)return esc(text);return esc(text.slice(0,i))+'<span class="cb-hl">'+esc(text.slice(i,i+q.length))+'</span>'+esc(text.slice(i+q.length));}function init(idx){const wrap=document.getElementById('cb'+idx);const inp=wrap.querySelector('.cb-input');const clr=wrap.querySelector('.cb-clear');const hid=wrap.querySelector('input[type=hidden]');const list=wrap.querySelector('.cb-list');let selId=INIT[idx];let selName=selId!=null?(LOCS.find(l=>l[0]===selId)||[null,''])[1]:'';let activeIdx=-1;function render(q){list.innerHTML='';activeIdx=-1;const matched=LOCS.filter(l=>!q||l[1].toLowerCase().includes(q.toLowerCase()));if(!matched.length){list.innerHTML='<li class="cb-empty">无匹配地区</li>';}else{matched.forEach((l,i)=>{const li=document.createElement('li');li.className='cb-opt';li.setAttribute('role','option');li.dataset.id=l[0];li.dataset.name=l[1];li.innerHTML=hl(l[1],q);li.addEventListener('mousedown',e=>{e.preventDefault();pick(l[0],l[1]);});list.appendChild(li);});}list.classList.add('cb-open');}function pick(id,name){selId=id;selName=name;hid.value=id;inp.value=name;inp.classList.add('cb-selected');list.classList.remove('cb-open');}function clear(){selId=null;selName='';hid.value='';inp.value='';inp.classList.remove('cb-selected');list.classList.remove('cb-open');inp.focus();}inp.addEventListener('focus',()=>render(inp.classList.contains('cb-selected')?'':inp.value));inp.addEventListener('input',()=>{if(inp.classList.contains('cb-selected')&&inp.value!==selName){inp.classList.remove('cb-selected');hid.value='';selId=null;}render(inp.value);});inp.addEventListener('blur',()=>{setTimeout(()=>{list.classList.remove('cb-open');if(selId&&inp.value!==selName){inp.value=selName;inp.classList.add('cb-selected');}else if(!selId){inp.value='';inp.classList.remove('cb-selected');}},150);});inp.addEventListener('keydown',e=>{const opts=[...list.querySelectorAll('.cb-opt')];if(e.key==='ArrowDown'){e.preventDefault();activeIdx=Math.min(activeIdx+1,opts.length-1);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='ArrowUp'){e.preventDefault();activeIdx=Math.max(activeIdx-1,0);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='Enter'&&activeIdx>=0&&opts[activeIdx]){e.preventDefault();const o=opts[activeIdx];pick(Number(o.dataset.id),o.dataset.name);}else if(e.key==='Escape'){list.classList.remove('cb-open');inp.blur();}});clr.addEventListener('click',clear);}[0,1,2].forEach(init);document.addEventListener('click',e=>{if(!e.target.closest('.cb'))document.querySelectorAll('.cb-list').forEach(l=>l.classList.remove('cb-open'));});})();<\/script>`;
+  const comboboxScript = `<script>(()=>{const LOCS=${locationsJson};const INIT=${initialIds};const INIT_NAMES=${initialNames};function esc(s){return s.replace(/[&<>'"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'})[c]??c);}function hl(text,q){if(!q)return esc(text);const i=text.toLowerCase().indexOf(q.toLowerCase());if(i<0)return esc(text);return esc(text.slice(0,i))+'<span class="cb-hl">'+esc(text.slice(i,i+q.length))+'</span>'+esc(text.slice(i+q.length));}function init(idx){const wrap=document.getElementById('cb'+idx);const inp=wrap.querySelector('.cb-input');const clr=wrap.querySelector('.cb-clear');const hid=wrap.querySelector('input[type=hidden]');const list=wrap.querySelector('.cb-list');let selId=INIT[idx];let selName=INIT_NAMES[idx]?inp.value:'';let activeIdx=-1;function render(q){list.innerHTML='';activeIdx=-1;const matched=LOCS.filter(l=>!q||l[1].toLowerCase().includes(q.toLowerCase()));if(!matched.length){list.innerHTML='<li class="cb-empty">无匹配地区</li>';}else{matched.forEach((l,i)=>{const li=document.createElement('li');li.className='cb-opt';li.setAttribute('role','option');li.dataset.id=l[0];li.dataset.name=l[1];li.innerHTML=hl(l[1],q);li.addEventListener('mousedown',e=>{e.preventDefault();pick(l[0],l[1]);});list.appendChild(li);});}list.classList.add('cb-open');}function pick(id,name){selId=id;selName=name;hid.value=id;inp.value=name;inp.classList.add('cb-selected');list.classList.remove('cb-open');}function clear(){selId=null;selName='';hid.value='';inp.value='';inp.classList.remove('cb-selected');list.classList.remove('cb-open');inp.focus();}inp.addEventListener('focus',()=>render(inp.classList.contains('cb-selected')?'':inp.value));inp.addEventListener('input',()=>{if(inp.classList.contains('cb-selected')&&inp.value!==selName){inp.classList.remove('cb-selected');hid.value='';selId=null;}render(inp.value);});inp.addEventListener('blur',()=>{setTimeout(()=>{list.classList.remove('cb-open');if(selId!=null&&inp.value!==selName){inp.value=selName;inp.classList.add('cb-selected');}else if(selId==null){inp.value='';inp.classList.remove('cb-selected');}},150);});inp.addEventListener('keydown',e=>{const opts=[...list.querySelectorAll('.cb-opt')];if(e.key==='ArrowDown'){e.preventDefault();activeIdx=Math.min(activeIdx+1,opts.length-1);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='ArrowUp'){e.preventDefault();activeIdx=Math.max(activeIdx-1,0);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='Enter'&&activeIdx>=0&&opts[activeIdx]){e.preventDefault();const o=opts[activeIdx];pick(Number(o.dataset.id),o.dataset.name);}else if(e.key==='Escape'){list.classList.remove('cb-open');inp.blur();}});clr.addEventListener('click',clear);}[0,1,2].forEach(init);document.addEventListener('click',e=>{if(!e.target.closest('.cb'))document.querySelectorAll('.cb-list').forEach(l=>l.classList.remove('cb-open'));});})();<\/script>`;
   const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
   const savedBadge = saved
     ? `<span id="save-toast" role="status" aria-live="polite" style="margin-left:.75rem;color:#166534;font-size:.875rem">✓ 已保存</span><script>(()=>{setTimeout(()=>{const t=document.getElementById('save-toast');if(t)t.remove();history.replaceState(null,'',location.pathname);},3000);})();<\/script>`
     : '';
-  return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', `<section class="settings"><p><strong>HeroSMS 已连接</strong>${savedBadge}</p><p>余额：${settings.balance.toFixed(2)}</p>${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}">${comboboxes}<button type="submit">保存默认候选地区</button></form></section>${comboboxScript}`);
+  const heroStatus = settings.heroSmsAvailable
+    ? `<p><strong>HeroSMS 已连接</strong>${savedBadge}</p>`
+    : `<p class="error" role="alert">暂时无法读取 HeroSMS 设置；以下仅显示数据库中已保存的候选位置。</p>${savedBadge}`;
+  const balanceMarkup = settings.balance === undefined ? '' : `<p>余额：${settings.balance.toFixed(2)}</p>`;
+  const configurationWarning = settings.configurationComplete
+    ? ''
+    : '<p class="error" role="alert">当前默认候选地区配置不完整，请重新选择并保存三个候选地区。</p>';
+  return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', `<section class="settings">${heroStatus}${balanceMarkup}${configurationWarning}${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}">${comboboxes}<button type="submit">保存默认候选地区</button></form></section>${comboboxScript}`);
 }
 
 function settingsUnavailablePage(path: string, csrfToken: string): string {
@@ -824,7 +839,12 @@ export async function createApp(config: AppConfig, database = new Database(confi
           return reply.code(503).type('text/html; charset=utf-8').send(settingsUnavailablePage(config.adminPath, session.csrfToken));
         }
       }
-      return reply.code(503).type('text/html; charset=utf-8').send(settingsUnavailablePage(config.adminPath, session.csrfToken));
+      try {
+        const settings = await defaultCandidateLocations.settings();
+        return reply.code(503).type('text/html; charset=utf-8').send(settingsPage(config.adminPath, session.csrfToken, settings));
+      } catch {
+        return reply.code(503).type('text/html; charset=utf-8').send(settingsUnavailablePage(config.adminPath, session.csrfToken));
+      }
     }
   });
 
