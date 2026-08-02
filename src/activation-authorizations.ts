@@ -2,10 +2,18 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import type { PoolClient } from 'pg';
 
-import { Database } from './database.js';
+import { AUTHORIZATION_STATUS_LABELS, Database, type AuthorizationListOptions, type AuthorizationStatus } from './database.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsQuote } from './herosms.js';
 
-const AUTHORIZATION_LIFETIME_MS = 24 * 60 * 60 * 1000;
+const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
+const AUTHORIZATION_LIFETIME_MS = CLAIM_ACQUISITION_LIFETIME_MS;
+
+export interface CreatedAuthorization {
+  id: string;
+  token: string;
+  tokenSuffix: string;
+  expiresAt?: Date;
+}
 
 export interface AuthorizationPreflight {
   recipientIdentifier: string;
@@ -15,19 +23,22 @@ export interface AuthorizationPreflight {
   candidates: Array<{ countryId: number; countryName: string; price: number; stock: number }>;
 }
 
-export interface CreatedAuthorization {
-  id: string;
-  token: string;
-  expiresAt: Date;
+export interface AuthorizationListPage {
+  items: AuthorizationSummary[];
+  total: number;
+  page: number;
+  pageCount: number;
 }
 
 export interface AuthorizationSummary {
   id: string;
-  recipientIdentifier: string;
+  recipientIdentifier?: string;
+  tokenSuffix?: string;
   internalNote?: string;
-  status: '待领取' | '进行中' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
+  status: '待领取' | '进行中' | '结果可查看' | '已结束' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
   createdAt: Date;
-  expiresAt: Date;
+  expiresAt?: Date;
+  lastActivityAt: Date;
   canRevoke: boolean;
   currentActivationStatus?: string;
   hasPendingException: boolean;
@@ -35,9 +46,18 @@ export interface AuthorizationSummary {
 
 export interface AuthorizationDetail {
   id: string;
-  recipientIdentifier: string;
+  recipientIdentifier?: string;
+  tokenSuffix?: string;
   status: AuthorizationSummary['status'];
-  expiresAt: Date;
+  createdAt: Date;
+  claimedAt?: Date;
+  expiresAt?: Date;
+  numberAcquisitionExpiresAt?: Date;
+  resultViewUntil?: Date;
+  endPromptUntil?: Date;
+  endedAt?: Date;
+  endedReason?: string;
+  lastActivityAt?: Date;
   revokedAt?: Date;
   acquisitionCount: number;
   canRevoke: boolean;
@@ -56,7 +76,7 @@ export interface AuthorizationDetail {
     verificationCode?: string;
     unrecognizedSmsText?: string;
   };
-  candidates: Array<{ countryName: string; quotedPrice: number; used: boolean }>;
+  candidates: Array<{ countryName: string; quotedPrice?: number; quotedStock?: number; used: boolean }>;
   activations: Array<{
     countryName: string;
     providerActivationId: string;
@@ -117,7 +137,8 @@ export type ClaimResult =
 
 export interface AcquisitionReconciliation {
   id: string;
-  recipientIdentifier: string;
+  tokenSuffix?: string;
+  recipientIdentifier?: string;
   countryName: string;
   status: '获取结果确认中' | '结果待人工对账';
   requestedAt: Date;
@@ -135,10 +156,6 @@ function normalizeRecipientIdentifier(value: string): string {
   return value.trim().toLocaleLowerCase('zh-CN');
 }
 
-function tokenHash(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
-}
-
 function candidateSnapshots(
   configuredCountryIds: number[],
   countries: HeroSmsCountry[],
@@ -154,6 +171,18 @@ function candidateSnapshots(
     }
     return { countryId, countryName: country.name, price: quote.price, stock: quote.stock };
   });
+}
+
+function tokenHash(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+function isAuthorizationAccessible(expiresAt: Date | null, now: Date): boolean {
+  return expiresAt === null || expiresAt > now;
+}
+
+function optionalDate(value: Date | null): Date | undefined {
+  return value ?? undefined;
 }
 
 export class ActivationAuthorizations {
@@ -229,11 +258,12 @@ export class ActivationAuthorizations {
         normalizedRecipientIdentifier: preflight.normalizedRecipientIdentifier,
         internalNote: preflight.internalNote,
         tokenHash: tokenHash(token),
+        tokenSuffix: token.slice(-8),
         createdAt,
         expiresAt,
         candidates: preflight.candidates,
       });
-      return { id, token, expiresAt };
+      return { id, token, tokenSuffix: token.slice(-8), expiresAt };
     } catch (error) {
       if (error && typeof error === 'object' && 'constraint' in error && error.constraint === 'activation_authorizations_unended_recipient_idx') {
         throw new DuplicateActiveAuthorizationError();
@@ -242,25 +272,65 @@ export class ActivationAuthorizations {
     }
   }
 
-  async list(): Promise<AuthorizationSummary[]> {
-    return this.database.listActivationAuthorizations(this.now());
+  validateCreationCount(value: string | number | undefined): number {
+    const count = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
+    if (!Number.isInteger(count) || count < 1 || count > 50) {
+      throw new AuthorizationValidationError('创建数量必须是 1 至 50 的整数。');
+    }
+    return count;
+  }
+
+  async createBatch(count: number): Promise<CreatedAuthorization[]> {
+    this.validateCreationCount(count);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const createdAt = this.now();
+      const generated = Array.from({ length: count }, () => {
+        const token = randomBytes(32).toString('base64url');
+        return { token, tokenHash: tokenHash(token), tokenSuffix: token.slice(-8), createdAt };
+      });
+      try {
+        const ids = await this.database.createActivationAuthorizations(generated);
+        return generated.map((item, index) => ({ id: ids[index]!, token: item.token, tokenSuffix: item.tokenSuffix }));
+      } catch (error) {
+        const duplicate = error && typeof error === 'object' && 'code' in error && error.code === '23505';
+        if (!duplicate || attempt === 4) throw error;
+      }
+    }
+    throw new Error('创建激活授权失败');
+  }
+
+  async list(): Promise<AuthorizationSummary[]>;
+  async list(options: AuthorizationListOptions): Promise<AuthorizationListPage>;
+  async list(options?: AuthorizationListOptions): Promise<AuthorizationSummary[] | AuthorizationListPage> {
+    const page = await this.database.listActivationAuthorizations(options ?? { page: 1, order: 'created' }, this.now());
+    return options ? page : page.items;
   }
 
   async revoke(id: string): Promise<boolean> {
     const cancellation = await this.database.transaction(async (client) => {
-      const result = await client.query<{
-        status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired'; expires_at: Date;
-      }>('SELECT status, expires_at FROM activation_authorizations WHERE id = $1 FOR UPDATE', [id]);
+      const result = await client.query<{ status: AuthorizationStatus; expires_at: Date | null }>('SELECT status, expires_at FROM activation_authorizations WHERE id = $1 FOR UPDATE', [id]);
       const authorization = result.rows[0];
       const now = this.now();
-      if (!authorization || authorization.expires_at <= now) {
-        if (authorization) await this.expireAuthorization(client, id, now);
-        return undefined;
-      }
-      if (!['unclaimed', 'in_progress', 'sms_delivered'].includes(authorization.status)) return undefined;
+      if (!authorization || !isAuthorizationAccessible(authorization.expires_at, now)
+        || !['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(authorization.status)) return undefined;
       await client.query(
-        "UPDATE activation_authorizations SET status = 'revoked', revoked_at = $2, recipient_session_hash = NULL WHERE id = $1",
+        `UPDATE activation_authorizations
+         SET status = CASE WHEN expires_at IS NULL THEN 'ended' ELSE 'revoked' END,
+             revoked_at = $2, ended_at = $2, ended_reason = 'admin_revoked', last_activity_at = $2,
+             token_hash = CASE WHEN expires_at IS NULL THEN NULL ELSE token_hash END,
+             recipient_session_hash = NULL
+         WHERE id = $1`,
         [id, now],
+      );
+      await client.query(
+        `UPDATE supplier_activations SET phone_number = NULL, sms_code = NULL, sms_text = NULL
+         WHERE authorization_id = $1`,
+        [id],
+      );
+      await client.query(
+        `DELETE FROM number_acquisition_candidates candidate USING number_acquisition_requests request
+         WHERE candidate.request_id = request.id AND request.authorization_id = $1`,
+        [id],
       );
       const activationResult = await client.query<{ provider_activation_id: string; status: string; cancel_available_at: Date; expires_at: Date }>(
         `SELECT provider_activation_id, status, cancel_available_at, expires_at FROM supplier_activations
@@ -308,12 +378,17 @@ export class ActivationAuthorizations {
 
   async detail(id: string): Promise<AuthorizationDetail | undefined> {
     const result = await this.database.pool.query<{
-      id: string; recipient_identifier: string; authorization_status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired';
-      authorization_expires_at: Date; revoked_at: Date | null; country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
+      id: string; recipient_identifier: string | null; token_suffix: string | null; authorization_status: AuthorizationStatus;
+      created_at: Date; claimed_at: Date | null; authorization_expires_at: Date | null; number_acquisition_expires_at: Date | null;
+      result_view_until: Date | null; end_prompt_until: Date | null; ended_at: Date | null; ended_reason: string | null; last_activity_at: Date | null;
+      revoked_at: Date | null; country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
       sms_code: string | null; sms_text: string | null; phone_number: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
       acquisition_country_name: string | null; cancel_available_at: Date | null;
     }>(
-      `SELECT auth.id, auth.recipient_identifier, auth.status AS authorization_status, auth.expires_at AS authorization_expires_at, auth.revoked_at,
+      `SELECT auth.id, auth.recipient_identifier, auth.token_suffix, auth.status AS authorization_status,
+              auth.created_at, auth.claimed_at, auth.expires_at AS authorization_expires_at,
+              auth.number_acquisition_expires_at, auth.result_view_until, auth.end_prompt_until,
+              auth.ended_at, auth.ended_reason, auth.last_activity_at, auth.revoked_at,
               candidate.country_name, activation.status AS activation_status, activation.expires_at AS number_expires_at,
               activation.phone_number, activation.sms_code, activation.sms_text,
               (SELECT count(*) FROM authorization_candidate_countries candidate WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NOT NULL)::text AS used_count,
@@ -339,8 +414,8 @@ export class ActivationAuthorizations {
     const row = result.rows[0];
     if (!row) return undefined;
     const [candidateResult, activationResult] = await Promise.all([
-      this.database.pool.query<{ country_name: string; quoted_price: string; used_at: Date | null }>(
-        'SELECT country_name, quoted_price::text, used_at FROM authorization_candidate_countries WHERE authorization_id = $1 ORDER BY position', [id],
+      this.database.pool.query<{ country_name: string; quoted_price: string | null; quoted_stock: string | null; used_at: Date | null }>(
+        'SELECT country_name, quoted_price::text, quoted_stock::text, used_at FROM authorization_candidate_countries WHERE authorization_id = $1 ORDER BY position', [id],
       ),
       this.database.pool.query<{
         country_name: string; provider_activation_id: string; status: NonNullable<AuthorizationDetail['activation']>['status']; activation_cost: string; currency: string;
@@ -369,21 +444,38 @@ export class ActivationAuthorizations {
       costsByCurrency.set(activation.currency, cost);
     }
     const costs = [...costsByCurrency.entries()].map(([currency, cost]) => ({ ...cost, currency, netCost: cost.activationCost - cost.confirmedRefund }));
-    const labels = { unclaimed: '待领取', in_progress: '进行中', sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期' } as const;
-    const canRevoke = row.authorization_expires_at > this.now() && ['unclaimed', 'in_progress', 'sms_delivered'].includes(row.authorization_status);
+    const canRevoke = isAuthorizationAccessible(row.authorization_expires_at, this.now())
+      && ['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(row.authorization_status);
     const revocationConsequence = !canRevoke ? undefined
       : row.acquisition_status ? '先完成供应商对账，确认号码后取消。'
         : row.activation_status === 'waiting_sms'
           ? (row.cancel_available_at && row.cancel_available_at > this.now() ? '将在可取消时请求取消当前供应商激活。'
             : row.number_expires_at && row.number_expires_at <= this.now() ? '当前激活已结束，仅终止接收者访问。' : '立即请求取消当前供应商激活。')
-          : row.authorization_status === 'sms_delivered' ? '只终止接收者访问，不请求供应商取消。'
+          : row.authorization_status === 'result_available' || row.authorization_status === 'sms_delivered' ? '只终止接收者访问，不请求供应商取消。'
             : '立即终止接收者访问。';
     const ACTIVE_ACTIVATION_STATUSES = new Set(['acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming']);
     return {
-      id: row.id, recipientIdentifier: row.recipient_identifier, status: labels[row.authorization_status], expiresAt: row.authorization_expires_at,
+      id: row.id,
+      ...(row.recipient_identifier !== null ? { recipientIdentifier: row.recipient_identifier } : {}),
+      ...(row.token_suffix !== null ? { tokenSuffix: row.token_suffix } : {}),
+      status: AUTHORIZATION_STATUS_LABELS[row.authorization_status],
+      createdAt: row.created_at,
+      ...(optionalDate(row.claimed_at) ? { claimedAt: row.claimed_at! } : {}),
+      ...(optionalDate(row.authorization_expires_at) ? { expiresAt: row.authorization_expires_at! } : {}),
+      ...(optionalDate(row.number_acquisition_expires_at) ? { numberAcquisitionExpiresAt: row.number_acquisition_expires_at! } : {}),
+      ...(optionalDate(row.result_view_until) ? { resultViewUntil: row.result_view_until! } : {}),
+      ...(optionalDate(row.end_prompt_until) ? { endPromptUntil: row.end_prompt_until! } : {}),
+      ...(optionalDate(row.ended_at) ? { endedAt: row.ended_at! } : {}),
+      ...(row.ended_reason ? { endedReason: row.ended_reason } : {}),
+      ...(optionalDate(row.last_activity_at) ? { lastActivityAt: row.last_activity_at! } : {}),
       ...(row.revoked_at ? { revokedAt: row.revoked_at } : {}),
       acquisitionCount: Number(row.used_count), canRevoke,
-      candidates: candidateResult.rows.map((candidate) => ({ countryName: candidate.country_name, quotedPrice: Number(candidate.quoted_price), used: candidate.used_at !== null })),
+      candidates: candidateResult.rows.map((candidate) => ({
+        countryName: candidate.country_name,
+        ...(candidate.quoted_price !== null ? { quotedPrice: Number(candidate.quoted_price) } : {}),
+        ...(candidate.quoted_stock !== null ? { quotedStock: Number(candidate.quoted_stock) } : {}),
+        used: candidate.used_at !== null,
+      })),
       activations,
       costs,
       ...(revocationConsequence ? { revocationConsequence } : {}),
@@ -410,8 +502,8 @@ export class ActivationAuthorizations {
     // 页面访问也必须让二十分钟边界生效，不能等待下一次分钟扫描继续交付旧号码。
     await this.reconcileTimedOutActivations(target.rows[0].id);
     const result = await this.database.pool.query<{
-      id: string; status: 'unclaimed' | 'in_progress' | 'sms_delivered' | 'quota_exhausted' | 'revoked' | 'expired';
-      expires_at: Date; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
+      id: string; status: AuthorizationStatus;
+      expires_at: Date | null; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
       acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string;
       acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; sms_code: string | null;
       last_activation_status: string | null; last_activation_timed_out_at: Date | null;
@@ -441,17 +533,18 @@ export class ActivationAuthorizations {
     const authorization = result.rows[0];
     if (!authorization) return { state: 'not-found' };
     const now = this.now();
-    if (authorization.expires_at <= now) {
+    if (authorization.expires_at !== null && authorization.expires_at <= now) {
       await this.database.expireAuthorization(authorization.id, now);
       return { state: 'not-found' };
     }
-    if (authorization.status === 'revoked') return { state: 'unavailable', expiresAt: authorization.expires_at };
-    if (authorization.status === 'unclaimed') return { state: 'available', expiresAt: authorization.expires_at };
+    const expiresAt = optionalDate(authorization.expires_at);
+    if (authorization.status === 'revoked') return { state: 'unavailable', ...(expiresAt ? { expiresAt } : {}) };
+    if (authorization.status === 'unclaimed') return { state: 'available', ...(expiresAt ? { expiresAt } : {}) };
     if (!sessionToken || !authorization.recipient_session_hash || tokenHash(sessionToken) !== authorization.recipient_session_hash) {
-      return { state: 'unavailable', expiresAt: authorization.expires_at };
+      return { state: 'unavailable', ...(expiresAt ? { expiresAt } : {}) };
     }
     return {
-      state: 'claimed', expiresAt: authorization.expires_at,
+      state: 'claimed', ...(expiresAt ? { expiresAt } : {}),
       ...(authorization.country_name ? { countryName: authorization.country_name } : {}),
       ...(authorization.phone_number ? { phoneNumber: authorization.phone_number } : {}),
       ...(authorization.acquired_at ? { acquiredAt: authorization.acquired_at } : {}),
@@ -1289,9 +1382,9 @@ export class ActivationAuthorizations {
 
   async listAcquisitionReconciliations(): Promise<AcquisitionReconciliation[]> {
     const requests = await this.database.pool.query<{
-      id: string; recipient_identifier: string; country_name: string; status: 'requesting' | 'reconciling' | 'manual'; requested_at: Date;
+      id: string; recipient_identifier: string | null; token_suffix: string | null; country_name: string; status: 'requesting' | 'reconciling' | 'manual'; requested_at: Date;
     }>(
-      `SELECT request.id, auth.recipient_identifier, candidate.country_name, request.status, request.requested_at
+      `SELECT request.id, auth.recipient_identifier, auth.token_suffix, candidate.country_name, request.status, request.requested_at
        FROM number_acquisition_requests request
        JOIN activation_authorizations auth ON auth.id = request.authorization_id
        JOIN authorization_candidate_countries candidate ON candidate.authorization_id = request.authorization_id AND candidate.position = request.candidate_position
@@ -1304,8 +1397,12 @@ export class ActivationAuthorizations {
         [request.id],
       );
       result.push({
-        id: request.id, recipientIdentifier: request.recipient_identifier, countryName: request.country_name,
-        status: request.status === 'manual' ? '结果待人工对账' : '获取结果确认中', requestedAt: request.requested_at,
+        id: request.id,
+        ...(request.recipient_identifier !== null ? { recipientIdentifier: request.recipient_identifier } : {}),
+        ...(request.token_suffix !== null ? { tokenSuffix: request.token_suffix } : {}),
+        countryName: request.country_name,
+        status: request.status === 'manual' ? '结果待人工对账' : '获取结果确认中',
+        requestedAt: request.requested_at,
         candidates: candidates.rows.map((candidate) => ({
           activationId: candidate.provider_activation_id,
           ...(candidate.country_id !== null ? { countryId: candidate.country_id } : {}),

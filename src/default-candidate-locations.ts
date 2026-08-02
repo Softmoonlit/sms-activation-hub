@@ -58,10 +58,14 @@ export class DefaultCandidateLocations {
       throw new CandidateLocationValidationError();
     }
     const settings = await this.settings();
-    const queryableCountryIds = new Set(settings.locations.filter((location) => location.price !== undefined && location.stock !== undefined).map((location) => location.id));
-    if (countryIds.some((countryId) => !queryableCountryIds.has(countryId))) {
+    const locationById = new Map(settings.locations.map((location) => [location.id, location]));
+    const selected = countryIds.map((countryId) => locationById.get(countryId));
+    if (selected.some((location) => !location || location.price === undefined || location.stock === undefined)) {
       throw new CandidateLocationValidationError();
     }
-    await this.database.replaceDefaultCandidateCountryIds(countryIds);
+    await this.database.replaceDefaultCandidateLocations(selected.map((location) => ({
+      countryId: location!.id,
+      countryName: location!.name,
+    })));
   }
 }

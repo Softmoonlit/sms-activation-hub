@@ -112,10 +112,14 @@ if (!databaseUrl) {
       assert.match(settings.body, /中国/);
       assert.match(settings.body, /库存 0/);
       assert.match(settings.body, /价格 0\.1234/);
-      const francePos = settings.body.indexOf('法国');
-      const usPos = settings.body.indexOf('美国');
-      const ukPos = settings.body.indexOf('英国');
-      const chinaPos = settings.body.indexOf('中国');
+      const locationsScriptStart = settings.body.indexOf('const LOCS=');
+      const locationsScriptEnd = settings.body.indexOf(';const INIT=', locationsScriptStart);
+      assert.ok(locationsScriptStart >= 0 && locationsScriptEnd > locationsScriptStart, '设置页应包含地区数据脚本');
+      const locationsScript = settings.body.slice(locationsScriptStart, locationsScriptEnd);
+      const francePos = locationsScript.indexOf('法国');
+      const usPos = locationsScript.indexOf('美国');
+      const ukPos = locationsScript.indexOf('英国');
+      const chinaPos = locationsScript.indexOf('中国');
       assert.ok(francePos < usPos && usPos < ukPos && ukPos < chinaPos, '候选国家选项应按中文拼音首字母排序（法国 < 美国 < 英国 < 中国）');
 
       const saved = await app.inject({
@@ -125,12 +129,12 @@ if (!databaseUrl) {
         payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidate1=1&candidate2=2&candidate3=3`,
       });
       assert.equal(saved.statusCode, 303);
-      assert.equal(saved.headers.location, `/${config.adminPath}/settings`);
+      assert.equal(saved.headers.location, `/${config.adminPath}/settings?saved=1`);
 
       const afterSave = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
-      assert.match(afterSave.body, /option value="1" selected/);
-      assert.match(afterSave.body, /option value="2" selected/);
-      assert.match(afterSave.body, /option value="3" selected/);
+      assert.match(afterSave.body, /name="candidate1" value="1"/);
+      assert.match(afterSave.body, /name="candidate2" value="2"/);
+      assert.match(afterSave.body, /name="candidate3" value="3"/);
     } finally {
       await app.close();
     }
@@ -167,7 +171,9 @@ if (!databaseUrl) {
       assert.match(rejected.body, /三个可查询的候选地区/);
 
       const settings = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
-      assert.equal((settings.body.match(/option value="1" selected/g) || []).length, 3);
+      assert.equal((settings.body.match(/name="candidate1" value="1"/g) || []).length, 1);
+      assert.equal((settings.body.match(/name="candidate2" value="1"/g) || []).length, 1);
+      assert.equal((settings.body.match(/name="candidate3" value="1"/g) || []).length, 1);
     } finally {
       await app.close();
     }

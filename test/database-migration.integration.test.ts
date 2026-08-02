@@ -102,4 +102,137 @@ if (!databaseUrl) {
       await adminDatabase.close();
     }
   });
+
+  test('扩展授权模型可重复迁移并兼容永久待领取与旧撤销记录', async () => {
+    const schemaName = `authorization_model_${randomUUID().replaceAll('-', '')}`;
+    const adminDatabase = new Database(databaseUrl);
+    await adminDatabase.pool.query(`CREATE SCHEMA ${schemaName}`);
+
+    const scopedUrl = new URL(databaseUrl);
+    scopedUrl.searchParams.set('options', `-csearch_path=${schemaName}`);
+    const database = new Database(scopedUrl.toString());
+    const createdAt = new Date('2026-08-01T00:00:00.000Z');
+    const legacyAuthorizationId = randomUUID();
+    try {
+      await database.initialize();
+      await database.pool.query(
+        `INSERT INTO activation_authorizations
+           (id, recipient_identifier, normalized_recipient_identifier, token_hash, recipient_session_hash, status, created_at, expires_at)
+         VALUES ($1, '旧撤销记录', '旧撤销记录', 'legacy-token-hash', 'legacy-session-hash', 'revoked', $2, $3)`,
+        [legacyAuthorizationId, createdAt, new Date('2026-08-02T00:00:00.000Z')],
+      );
+
+      await database.pool.query(`
+        DROP INDEX activation_authorizations_token_suffix_idx;
+        ALTER TABLE activation_authorizations
+          DROP CONSTRAINT activation_authorizations_token_suffix_check,
+          DROP CONSTRAINT activation_authorizations_status_check,
+          DROP COLUMN token_suffix,
+          DROP COLUMN claimed_at,
+          DROP COLUMN number_acquisition_expires_at,
+          DROP COLUMN result_view_until,
+          DROP COLUMN end_prompt_until,
+          DROP COLUMN ended_at,
+          DROP COLUMN ended_reason,
+          DROP COLUMN last_activity_at,
+          ALTER COLUMN recipient_identifier SET NOT NULL,
+          ALTER COLUMN normalized_recipient_identifier SET NOT NULL,
+          ALTER COLUMN expires_at SET NOT NULL;
+        ALTER TABLE authorization_candidate_countries
+          ALTER COLUMN quoted_price SET NOT NULL,
+          ALTER COLUMN quoted_stock SET NOT NULL;
+        ALTER TABLE default_candidate_countries DROP COLUMN country_name;
+      `);
+      await database.pool.query(
+        `ALTER TABLE activation_authorizations ADD CONSTRAINT activation_authorizations_status_check
+           CHECK (status IN ('unclaimed', 'in_progress', 'sms_delivered', 'quota_exhausted', 'revoked', 'expired'))`,
+      );
+      await database.pool.query(
+        `ALTER TABLE activation_authorizations ADD CONSTRAINT activation_authorizations_check
+           CHECK (expires_at = created_at + INTERVAL '24 hours')`,
+      );
+
+      await database.initialize();
+
+      const columns = await database.pool.query<{ column_name: string; is_nullable: string }>(
+        `SELECT column_name, is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'activation_authorizations'
+           AND column_name = ANY($2::text[])`,
+        [schemaName, ['token_suffix', 'claimed_at', 'number_acquisition_expires_at', 'result_view_until', 'end_prompt_until', 'ended_at', 'ended_reason', 'last_activity_at']],
+      );
+      assert.deepEqual(
+        new Map(columns.rows.map((row) => [row.column_name, row.is_nullable])),
+        new Map([
+          ['token_suffix', 'YES'], ['claimed_at', 'YES'], ['number_acquisition_expires_at', 'YES'], ['result_view_until', 'YES'],
+          ['end_prompt_until', 'YES'], ['ended_at', 'YES'], ['ended_reason', 'YES'], ['last_activity_at', 'YES'],
+        ]),
+      );
+
+      const legacy = await database.pool.query<{ token_hash: string | null; recipient_session_hash: string | null; status: string }>(
+        'SELECT token_hash, recipient_session_hash, status FROM activation_authorizations WHERE id = $1', [legacyAuthorizationId],
+      );
+      assert.deepEqual(legacy.rows[0], { token_hash: 'legacy-token-hash', recipient_session_hash: null, status: 'revoked' });
+      assert.equal((await database.authorizationByTokenHash('legacy-token-hash'))?.status, 'revoked');
+
+      const permanentId = randomUUID();
+      await database.pool.query(
+        `INSERT INTO activation_authorizations
+           (id, token_hash, token_suffix, status, created_at, claimed_at, number_acquisition_expires_at, result_view_until, end_prompt_until, ended_at, ended_reason, last_activity_at)
+         VALUES ($1, 'permanent-token-hash', 'AB12_cd3', 'result_available', $2, $2, $3, $4, $5, NULL, NULL, $2)`,
+        [permanentId, createdAt, new Date('2026-08-02T00:00:00.000Z'), new Date('2026-08-02T00:05:00.000Z'), new Date('2026-08-02T00:07:00.000Z')],
+      );
+      await database.pool.query(
+        `INSERT INTO authorization_candidate_countries
+           (authorization_id, position, country_id, country_name, quoted_price, quoted_stock)
+         VALUES ($1, 1, 1, '美国', NULL, NULL)`,
+        [permanentId],
+      );
+      const permanent = await database.pool.query<{
+        recipient_identifier: string | null; normalized_recipient_identifier: string | null; expires_at: Date | null;
+        token_suffix: string; status: string; quoted_price: string | null; quoted_stock: number | null;
+      }>(
+        `SELECT auth.recipient_identifier, auth.normalized_recipient_identifier, auth.expires_at, auth.token_suffix, auth.status,
+                candidate.quoted_price::text, candidate.quoted_stock
+         FROM activation_authorizations auth
+         JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id
+         WHERE auth.id = $1`,
+        [permanentId],
+      );
+      assert.deepEqual(permanent.rows[0], {
+        recipient_identifier: null, normalized_recipient_identifier: null, expires_at: null,
+        token_suffix: 'AB12_cd3', status: 'result_available', quoted_price: null, quoted_stock: null,
+      });
+
+      await assert.rejects(
+        database.pool.query(
+          `INSERT INTO activation_authorizations (token_suffix, status, created_at)
+           VALUES ('AB12_cd3', 'ended', $1)`,
+          [createdAt],
+        ),
+        (error: unknown) => Boolean(error && typeof error === 'object' && 'code' in error && error.code === '23505'),
+      );
+      await database.pool.query(
+        'INSERT INTO default_candidate_countries (position, country_id) VALUES (1, 99)',
+      );
+      const legacyLocation = await database.pool.query<{ country_id: number; country_name: string | null }>(
+        'SELECT country_id, country_name FROM default_candidate_countries WHERE position = 1',
+      );
+      assert.deepEqual(legacyLocation.rows[0], { country_id: 99, country_name: null });
+
+      await database.initialize();
+      const persisted = await database.pool.query<{ status: string; token_suffix: string; country_name: string | null }>(
+        `SELECT auth.status, auth.token_suffix, candidate.country_name
+         FROM activation_authorizations auth
+         JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id
+         WHERE auth.id = $1`,
+        [permanentId],
+      );
+      assert.deepEqual(persisted.rows[0], { status: 'result_available', token_suffix: 'AB12_cd3', country_name: '美国' });
+    } finally {
+      await database.close();
+      await adminDatabase.pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
+      await adminDatabase.close();
+    }
+  });
 }

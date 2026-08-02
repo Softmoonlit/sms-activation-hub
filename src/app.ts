@@ -163,12 +163,18 @@ function adminPage(title: string, heading: string, path: string, csrfToken: stri
   return htmlPage(title, `<main class="shell"><header><h1>${headingWithIcon(heading)}</h1><nav><a href="${navigationPath}">${navLabelWithIcon(navigationLabel)}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
 }
 
-function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[], error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
+function adminShell(path: string, csrfToken: string, authorizations: AuthorizationSummary[] | { items: AuthorizationSummary[] }, error?: string, reconciliations: AcquisitionReconciliation[] = []): string {
+  const authorizationItems = Array.isArray(authorizations) ? authorizations : authorizations.items;
   const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
-  const recent = authorizations.length === 0 ? '<p class="empty">尚未创建激活授权。</p>' : authorizations.map((authorization) => `<article class="authorization"><p><strong>${escapeHtml(authorization.recipientIdentifier)}</strong> · ${authorization.status}</p>${authorization.currentActivationStatus ? `<p>当前激活状态：${escapeHtml(activationStatusLabel(authorization.currentActivationStatus))}</p>` : '<p>当前激活状态：尚无供应商激活</p>'}${authorization.hasPendingException ? '<p class="error">待处理异常</p>' : ''}${authorization.internalNote ? `<p>${escapeHtml(authorization.internalNote)}</p>` : ''}<p>到期时间：${escapeHtml(authorization.expiresAt.toISOString())}</p><p><a href="/${path}/authorizations/${authorization.id}">查看详情</a></p>${authorization.canRevoke ? `<p><a href="/${path}/authorizations/${authorization.id}/revoke">撤销授权</a></p>` : ''}</article>`).join('');
+  const recent = authorizationItems.length === 0 ? '<p class="empty">尚未创建激活授权。</p>' : authorizationItems.map((authorization) => {
+    const identifier = authorization.recipientIdentifier ?? `链接末 8 位：${authorization.tokenSuffix ?? '未知'}`;
+    const expiry = authorization.expiresAt ? `<p>到期时间：${escapeHtml(authorization.expiresAt.toISOString())}</p>` : '<p>领取前永久有效</p>';
+    return `<article class="authorization"><p><strong>${escapeHtml(identifier)}</strong> · ${authorization.status}</p>${authorization.currentActivationStatus ? `<p>当前激活状态：${escapeHtml(activationStatusLabel(authorization.currentActivationStatus))}</p>` : '<p>当前激活状态：尚无供应商激活</p>'}${authorization.hasPendingException ? '<p class="error">待处理异常</p>' : ''}${authorization.internalNote ? `<p>${escapeHtml(authorization.internalNote)}</p>` : ''}${expiry}<p><a href="/${path}/authorizations/${authorization.id}">查看详情</a></p>${authorization.canRevoke ? `<p><a href="/${path}/authorizations/${authorization.id}/revoke">撤销授权</a></p>` : ''}</article>`;
+  }).join('');
   const reconciliationMarkup = reconciliations.length === 0 ? '' : `<section class="card"><h2>号码获取对账</h2><p class="error">全局号码获取队列已暂停，处理完成后自动恢复。</p>${reconciliations.map((request) => {
     const candidates = request.candidates.map((candidate) => `<li>激活 ID ${escapeHtml(candidate.activationId)}${candidate.countryId !== undefined ? `，地区 ${candidate.countryId}` : ''}${candidate.activationTime ? `，时间 ${escapeHtml(candidate.activationTime.toISOString())}` : ''}<form method="post" action="/${path}/acquisition-requests/${request.id}/candidates/${encodeURIComponent(candidate.activationId)}/link"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">关联此供应商激活</button></form></li>`).join('');
-    return `<article class="authorization"><p><strong>${escapeHtml(request.recipientIdentifier)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(request.requestedAt.toISOString())}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
+    const recipient = request.recipientIdentifier ?? `链接末 8 位：${request.tokenSuffix ?? '未知'}`;
+    return `<article class="authorization"><p><strong>${escapeHtml(recipient)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(request.requestedAt.toISOString())}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
   }).join('')}</section>`;
   const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>创建激活授权</h2><p>填写接收者标识，下一步将执行 HeroSMS 预检并显示确认汇总。</p><form method="post" action="/${path}/authorizations/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>接收者标识<input name="recipientIdentifier" required maxlength="200"></label><button type="submit">预检并确认</button></form></section><section class="card"><h2>最近激活授权</h2>${recent}</section></section>`;
   return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', content);
@@ -177,7 +183,12 @@ function adminShell(path: string, csrfToken: string, authorizations: Authorizati
 const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll('[data-countdown]');if(!elements.length)return;const update=()=>{let reload=false;elements.forEach((el)=>{const target=Date.parse(el.dataset.countdown);const seconds=Math.max(0,Math.floor((target-Date.now())/1000));const fmt=el.dataset.format;if(fmt==='hours-minutes'){if(seconds<=0){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);el.textContent=(h>0?h+'小时 ':'')+m+'分钟';}}else if(fmt==='minutes-seconds'){if(seconds<=0){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}else if(fmt==='cancel-countdown'){if(seconds<=0){el.textContent='已可'+String.fromCharCode(25442,21495);if(!el.dataset.reloaded){el.dataset.reloaded='true';reload=true;}}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}});if(reload){setTimeout(()=>location.reload(),500);}};update();setInterval(update,1000);})();</script>`;
 
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
-  const candidates = detail.candidates.map((candidate) => `<li>${escapeHtml(candidate.countryName)}：预检价格 ${candidate.quotedPrice}，${candidate.used ? '已获取' : '未获取'}</li>`).join('');
+  const candidates = detail.candidates.map((candidate) => {
+    const snapshot = candidate.quotedPrice === undefined && candidate.quotedStock === undefined
+      ? '领取时配置，未保存报价库存快照'
+      : `预检价格 ${candidate.quotedPrice ?? '未知'}，库存 ${candidate.quotedStock ?? '未知'}`;
+    return `<li>${escapeHtml(candidate.countryName)}：${snapshot}，${candidate.used ? '已获取' : '未获取'}</li>`;
+  }).join('');
   const activations = detail.activations.length === 0 ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${detail.activations.map((activation) => `<li><strong>${escapeHtml(activation.countryName)}：</strong>${escapeHtml(activationStatusLabel(activation.status))}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt))}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理' : ''}</li>`).join('')}</ul>`;
   const costs = detail.costs.length === 0 ? '<p>尚无费用。</p>' : `<ul class="summary">${detail.costs.map((cost) => `<li>累计激活费用：${cost.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；已确认退款：${cost.confirmedRefund.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；净成本：${cost.netCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}</li>`).join('')}</ul>`;
   const numberExpiryIso = detail.activation ? detail.activation.numberExpiresAt.toISOString() : '';
@@ -188,11 +199,14 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
     : '';
   const currentActivation = detail.activation ? `<section class="card"><h2>当前供应商激活</h2><ul class="summary"><li><strong>地区：</strong>${escapeHtml(detail.activation.countryName)}</li><li><strong>激活状态：</strong>${escapeHtml(activationStatusLabel(detail.activation.status))}</li><li><strong>号码有效至：</strong>${numberRemaining}</li>${detail.activation.phoneNumber ? `<li><strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}</li>` : ''}${detail.activation.verificationCode ? `<li><strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}</li>` : ''}</ul>${detail.activation.unrecognizedSmsText ? `<h3>无法识别验证码的短信正文</h3><p class="token">${escapeHtml(detail.activation.unrecognizedSmsText)}</p>` : ''}</section>` : '';
   const revoke = detail.canRevoke ? `<p><a href="/${path}/authorizations/${detail.id}/revoke">撤销授权</a></p>` : '';
-  const authExpiryIso = detail.expiresAt.toISOString();
+  const authExpiryIso = detail.expiresAt?.toISOString();
   const authRemaining = detail.revokedAt
     ? '已撤销'
-    : `<span data-countdown="${authExpiryIso}" data-format="hours-minutes">${escapeHtml(authExpiryIso)}</span>`;
-  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(detail.recipientIdentifier)}</h2><p>授权状态：${detail.status}</p><p>获取额度：${detail.acquisitionCount}/3</p><p>授权到期时间：${authRemaining}</p>${revoke}</section><section class="card"><h2>候选地区</h2><ul class="summary">${candidates}</ul></section><section class="card"><h2>供应商激活</h2>${activations}</section><section class="card"><h2>成本</h2>${costs}</section>${currentActivation}</section>${COUNTDOWN_SCRIPT}`;
+    : authExpiryIso
+      ? `<span data-countdown="${authExpiryIso}" data-format="hours-minutes">${escapeHtml(authExpiryIso)}</span>`
+      : '领取前永久有效';
+  const identifier = detail.recipientIdentifier ?? `链接末 8 位：${detail.tokenSuffix ?? '未知'}`;
+  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(identifier)}</h2><p>授权状态：${detail.status}</p><p>获取额度：${detail.acquisitionCount}/3</p><p>授权到期时间：${authRemaining}</p>${revoke}</section><section class="card"><h2>候选地区</h2><ul class="summary">${candidates}</ul></section><section class="card"><h2>供应商激活</h2>${activations}</section><section class="card"><h2>成本</h2>${costs}</section>${currentActivation}</section>${COUNTDOWN_SCRIPT}`;
   return adminPage('激活授权详情', '激活授权详情', path, csrfToken, `/${path}`, '返回首页', content);
 }
 
@@ -202,7 +216,8 @@ function authorizationRevocationConfirmationPage(path: string, csrfToken: string
     : detail.acquisition
       ? `<li><strong>当前地区：</strong>${escapeHtml(detail.acquisition.countryName)}</li><li><strong>当前激活状态：</strong>${detail.acquisition.status}</li>`
       : '<li><strong>当前激活状态：</strong>尚未获取号码</li>';
-  const content = `<section class="dashboard"><section class="card"><h2>确认撤销授权</h2><ul class="summary"><li><strong>接收者标识：</strong>${escapeHtml(detail.recipientIdentifier)}</li><li><strong>授权状态：</strong>${detail.status}</li>${activation}<li><strong>已获取次数：</strong>${detail.acquisitionCount}</li><li><strong>撤销后：</strong>${escapeHtml(detail.revocationConsequence ?? '该激活授权已经不可撤销。')}</li></ul><form method="post" action="/${path}/authorizations/${detail.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认撤销授权</button></form></section></section>`;
+  const identifier = detail.recipientIdentifier ?? `链接末 8 位：${detail.tokenSuffix ?? '未知'}`;
+  const content = `<section class="dashboard"><section class="card"><h2>确认撤销授权</h2><ul class="summary"><li><strong>接收者标识：</strong>${escapeHtml(identifier)}</li><li><strong>授权状态：</strong>${detail.status}</li>${activation}<li><strong>已获取次数：</strong>${detail.acquisitionCount}</li><li><strong>撤销后：</strong>${escapeHtml(detail.revocationConsequence ?? '该激活授权已经不可撤销。')}</li></ul><form method="post" action="/${path}/authorizations/${detail.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认撤销授权</button></form></section></section>`;
   return adminPage('确认撤销授权', '确认撤销授权', path, csrfToken, `/${path}/authorizations/${detail.id}`, '返回详情', content);
 }
 
@@ -224,9 +239,10 @@ function authorizationConfirmationPage(path: string, csrfToken: string, prefligh
   return adminPage('确认激活授权', '确认激活授权', path, csrfToken, `/${path}`, '返回首页', content);
 }
 
-function authorizationCreatedPage(path: string, csrfToken: string, authorizationUrl: string, expiresAt: Date): string {
+function authorizationCreatedPage(path: string, csrfToken: string, authorizationUrl: string, expiresAt?: Date): string {
   const escapedUrl = escapeHtml(authorizationUrl);
-  const content = `<section class="dashboard"><section class="card"><h2>激活授权已创建</h2><p>完整授权链接仅显示这一次。丢失后请撤销并重新创建。</p><p class="token" id="authorization-url">${escapedUrl}</p><p>到期时间：${escapeHtml(expiresAt.toISOString())}</p><button type="button" onclick="copyValue(this, document.getElementById('authorization-url').textContent)">复制授权链接</button></section></section>`;
+  const expiry = expiresAt ? `<p>到期时间：${escapeHtml(expiresAt.toISOString())}</p>` : '<p>领取前永久有效</p>';
+  const content = `<section class="dashboard"><section class="card"><h2>激活授权已创建</h2><p>完整授权链接仅显示这一次。丢失后请撤销并重新创建。</p><p class="token" id="authorization-url">${escapedUrl}</p>${expiry}<button type="button" onclick="copyValue(this, document.getElementById('authorization-url').textContent)">复制授权链接</button></section></section>`;
   return adminPage('激活授权已创建', '激活授权已创建', path, csrfToken, `/${path}`, '返回首页', content);
 }
 
@@ -240,8 +256,10 @@ function formatInternationalNumber(value: string): string {
 function recipientPage(token: string, view: RecipientAuthorizationView, message?: string): string {
   const action = `/a/${encodeURIComponent(token)}/numbers`;
   const errorMarkup = message ? `<p class="error" role="alert">${escapeHtml(message)}</p>` : '';
-  const deadline = view.expiresAt!.toISOString();
-  const remaining = `<span data-countdown="${deadline}" data-format="hours-minutes">${escapeHtml(deadline)}</span>`;
+  const deadline = view.expiresAt?.toISOString();
+  const remaining = deadline
+    ? `<span data-countdown="${deadline}" data-format="hours-minutes">${escapeHtml(deadline)}</span>`
+    : '领取前永久有效';
   const countdownScript = COUNTDOWN_SCRIPT;
   const acquisitionForm = (label = '获取号码') => `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">${label}</button></form>`;
   if (view.state === 'available') {
