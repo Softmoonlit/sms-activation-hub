@@ -176,29 +176,8 @@ export class Database {
       );
     `);
 
-    // 检查是否存在未完结的旧模型记录
-    const columnCheck = await this.pool.query<{ column_name: string }>(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_name = 'activation_authorizations'
-         AND column_name = ANY($1::text[])`,
-      [['recipient_identifier', 'expires_at']],
-    );
-    if (columnCheck.rows.length > 0) {
-      const activeLegacyCheck = await this.pool.query(
-        `SELECT id FROM activation_authorizations
-         WHERE status IN ('unclaimed', 'in_progress', 'result_available', 'sms_delivered', 'quota_exhausted')
-           AND (
-             recipient_identifier IS NOT NULL
-             OR expires_at IS NOT NULL
-             OR (claimed_at IS NULL AND status <> 'unclaimed')
-           )
-         LIMIT 1`,
-      );
-      if (activeLegacyCheck.rows.length > 0) {
-        throw new Error('存在未完结的旧模型激活授权，收缩迁移无法安全继续');
-      }
-    }
-
+    // 补齐新模型列：必须先于旧模型记录检查执行（检查查询引用了 claimed_at 等新列，
+    // 旧库升级时这些列可能尚不存在）
     await this.pool.query(`
       ALTER TABLE activation_authorizations
         ADD COLUMN IF NOT EXISTS token_suffix TEXT;
@@ -218,6 +197,36 @@ export class Database {
         ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;
       ALTER TABLE activation_authorizations
         ADD COLUMN IF NOT EXISTS recipient_session_hash TEXT;
+    `);
+
+    // 检查是否存在未完结的旧模型记录（限定当前 schema，避免跨 schema 误判其他库的旧表）
+    const columnCheck = await this.pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND table_name = 'activation_authorizations'
+         AND column_name = ANY($1::text[])`,
+      [['recipient_identifier', 'expires_at']],
+    );
+    if (columnCheck.rows.length > 0) {
+      const activeLegacyCheck = await this.pool.query(
+        `SELECT id FROM activation_authorizations
+         WHERE status IN ('unclaimed', 'in_progress', 'result_available', 'sms_delivered', 'quota_exhausted')
+           AND (
+             recipient_identifier IS NOT NULL
+             OR expires_at IS NOT NULL
+             OR (claimed_at IS NULL AND status <> 'unclaimed')
+           )
+         LIMIT 1`,
+      );
+      if (activeLegacyCheck.rows.length > 0) {
+        throw new Error('存在未完结的旧模型激活授权，收缩迁移无法安全继续');
+      }
+    }
+
+    // 旧库的状态约束不含 ended/result_available，必须先移除旧约束再收敛，
+    // 否则 UPDATE 到新状态会违反旧 CHECK 约束
+    await this.pool.query(`
+      ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_status_check;
 
       UPDATE activation_authorizations
         SET status = 'ended',
@@ -265,7 +274,6 @@ export class Database {
             END
         WHERE status = 'sms_delivered';
 
-      ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_status_check;
       ALTER TABLE activation_authorizations ADD CONSTRAINT activation_authorizations_status_check
         CHECK (status IN ('unclaimed', 'in_progress', 'result_available', 'ended'));
 
