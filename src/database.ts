@@ -293,6 +293,7 @@ export class Database {
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS completion_claimed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_poll_after TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS replacement_pending BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS end_use_pending BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS supplier_cancelled_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timed_out_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS refund_reconciliation_status TEXT NOT NULL DEFAULT 'resolved';
@@ -705,6 +706,7 @@ export class Database {
          WHERE COALESCE(number_acquisition_expires_at, expires_at) IS NOT NULL
            AND COALESCE(number_acquisition_expires_at, expires_at) <= $1
            AND status NOT IN ('result_available', 'sms_delivered')
+           AND NOT (status = 'ended' AND end_prompt_until > $1)
            AND NOT (
              status = 'in_progress' AND EXISTS (
                SELECT 1 FROM supplier_activations activation
@@ -746,6 +748,7 @@ export class Database {
        WHERE id = $1 AND COALESCE(number_acquisition_expires_at, expires_at) IS NOT NULL
          AND COALESCE(number_acquisition_expires_at, expires_at) <= $2
          AND status NOT IN ('result_available', 'sms_delivered')
+         AND NOT (status = 'ended' AND end_prompt_until > $2)
          AND NOT (
            status = 'in_progress' AND EXISTS (
              SELECT 1 FROM supplier_activations activation

@@ -183,7 +183,7 @@ function adminShell(path: string, csrfToken: string, authorizations: Authorizati
   return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', content);
 }
 
-const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll('[data-countdown]');if(!elements.length)return;const update=()=>{let reload=false;elements.forEach((el)=>{const target=Date.parse(el.dataset.countdown);const seconds=Math.max(0,Math.floor((target-Date.now())/1000));const fmt=el.dataset.format;if(fmt==='hours-minutes'){if(seconds<=0){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);el.textContent=(h>0?h+'小时 ':'')+m+'分钟';}}else if(fmt==='minutes-seconds'){if(seconds<=0){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}else if(fmt==='cancel-countdown'){if(seconds<=0){el.textContent='已可'+String.fromCharCode(25442,21495);if(!el.dataset.reloaded){el.dataset.reloaded='true';reload=true;}}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}});if(reload){setTimeout(()=>location.reload(),500);}};update();setInterval(update,1000);})();</script>`;
+const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll('[data-countdown]');if(!elements.length)return;const update=()=>{let reload=false;elements.forEach((el)=>{const target=Date.parse(el.dataset.countdown);const seconds=Math.max(0,Math.floor((target-Date.now())/1000));const fmt=el.dataset.format;if(fmt==='hours-minutes'){if(seconds<=0){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);el.textContent=(h>0?h+'小时 ':'')+m+'分钟';}}else if(fmt==='minutes-seconds'){if(seconds<=0){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}else if(fmt==='cancel-countdown'){if(seconds<=0){el.textContent='已可'+(el.dataset.action==='end'?String.fromCharCode(32467,26463):String.fromCharCode(25442,21495));if(!el.dataset.reloaded){el.dataset.reloaded='true';reload=true;}}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}});if(reload){setTimeout(()=>location.reload(),500);}};update();setInterval(update,1000);})();</script>`;
 
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
   const candidateItems = detail.candidates.map((candidate) => {
@@ -314,37 +314,50 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     const structuredCodePollingScript = view.verificationCode ? '' : '<script>setTimeout(()=>location.reload(),5000)</script>';
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${countryMarkup}${numberMarkup}${guideMarkup}${delivery}<ul class="facts">${resultViewRemaining}</ul></section></main>${countdownScript}${structuredCodePollingScript}${refreshScript}`);
   }
-  if (view.state === 'claimed' && view.replacementInProgress) {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在更换号码</p><ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
+  if (view.state === 'claimed' && view.quotaExhaustedPromptUntil) {
+    const promptUntil = view.quotaExhaustedPromptUntil.toISOString();
+    const refreshDelay = Math.max(1_000, Math.ceil(view.quotaExhaustedPromptUntil.getTime() - Date.now()));
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>可用号码次数已用尽，请联系发送者</p><ul class="facts"><li>提示结束时间：<span data-countdown="${escapeHtml(promptUntil)}" data-format="minutes-seconds">${escapeHtml(promptUntil)}</span></li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),${refreshDelay});</script>`);
+  }
+  if (view.state === 'claimed' && view.currentNumberActionInProgress) {
+    const action = view.currentNumberActionInProgress === 'end' ? '正在结束使用' : '正在更换号码';
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>${action}</p><ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
   }
   if (view.state === 'claimed' && view.activationTimeoutInProgress) {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在确认激活超时</p><ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在确认号码状态</p><ul class="facts"><li>链接剩余时间：${remaining}</li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),5000)</script>`);
   }
   if (view.state === 'claimed' && view.phoneNumber) {
     const e164 = view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`;
     const smsPollingScript = '<script>setTimeout(()=>location.reload(),5000)</script>';
-    const replacementAction = view.replacementAvailable ? `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">更换号码</button></form>` : '';
+    const currentNumberAction = view.currentNumberAction;
+    const actionLabel = currentNumberAction === 'end' ? '结束使用' : '更换号码';
+    const actionTimeLabel = currentNumberAction === 'end' ? '可结束时间' : '可换号时间';
+    const replacementAction = currentNumberAction && view.currentNumberActionAvailable ? `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">${actionLabel}</button></form>` : '';
     const numberExpiryIso = view.numberExpiresAt!.toISOString();
     const cancelAvailableIso = view.cancelAvailableAt!.toISOString();
     const numberRemaining = `<span data-countdown="${numberExpiryIso}" data-format="minutes-seconds">${escapeHtml(numberExpiryIso)}</span>`;
-    const cancelRemaining = `<span data-countdown="${cancelAvailableIso}" data-format="cancel-countdown">${escapeHtml(cancelAvailableIso)}</span>`;
+    const cancelRemaining = `<span data-countdown="${cancelAvailableIso}" data-format="cancel-countdown" data-action="${currentNumberAction === 'end' ? 'end' : 'replace'}">${escapeHtml(cancelAvailableIso)}</span>`;
     const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><ol class="guide-steps"><li>复制上方号码，填入 OpenAI 验证页面并发送验证码</li><li>发送后请保持本页面开着，系统将自动接收并显示验证码</li></ol></div><div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>${guideMarkup}${replacementAction}<ul class="facts"><li>链接剩余时间：${remaining}</li><li>号码有效至：${numberRemaining}</li><li>可换号时间：${cancelRemaining}</li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName ?? '')}</p><p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>${guideMarkup}${replacementAction}<ul class="facts"><li>链接剩余时间：${remaining}</li><li>号码有效至：${numberRemaining}</li><li>${actionTimeLabel}：${cancelRemaining}</li><li>剩余可用号码次数：${view.remainingNumberCount}</li></ul></section></main>${countdownScript}${smsPollingScript}`);
   }
   if (view.state === 'claimed' && view.acquisitionState) {
     const status = view.acquisitionState === 'manual' ? '号码状态待发送者处理' : '正在确认号码获取结果，请稍候';
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>链接剩余时间：${remaining}</p><p>${status}</p></section></main>${countdownScript}`);
   }
   const terminalMessage = view.remainingNumberCount === 0
-    ? '<p>可用号码次数已用尽</p>'
+    ? '<p>可用号码次数已用尽，请联系发送者</p>'
     : view.nextNumberAvailable
-      ? '<p>当前激活已超时。</p>' + acquisitionForm('获取下一个号码')
+      ? `<p>号码已过期</p><p>剩余可用号码次数：${view.remainingNumberCount}</p>` + acquisitionForm('获取下一个号码')
       : acquisitionForm();
   return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>链接剩余时间：${remaining}</p>${errorMarkup}${terminalMessage}</section></main>${countdownScript}`);
 }
 
-function replacementConfirmationPage(token: string): string {
-  return htmlPage('确认更换号码', `<main class="recipient"><section class="panel"><h1>更换号码</h1><p>更换后当前号码将不能继续使用。</p><form method="post" action="/a/${encodeURIComponent(token)}/replacement/confirm"><button name="replacement" value="wait" type="submit" autofocus>继续等待</button><button name="replacement" value="confirm" type="submit">确认更换号码</button></form></section></main>`);
+function replacementConfirmationPage(token: string, action: 'replace' | 'end'): string {
+  const endingUse = action === 'end';
+  const title = endingUse ? '结束使用此号码' : '更换号码';
+  const consequence = endingUse ? '结束后当前号码将不能继续使用' : '更换后当前号码将不能继续使用。';
+  const confirmation = endingUse ? '确认结束' : '确认更换号码';
+  return htmlPage(endingUse ? '确认结束使用' : '确认更换号码', `<main class="recipient"><section class="panel"><h1>${title}</h1><p>${consequence}</p><form method="post" action="/a/${encodeURIComponent(token)}/replacement/confirm"><button name="replacement" value="wait" type="submit" autofocus>继续等待</button><button class="danger" name="replacement" value="confirm" type="submit">${confirmation}</button></form></section></main>`);
 }
 
 function unavailableRecipientPage(message = '此链接不可用，请联系发送者'): string {
@@ -789,10 +802,10 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
     if (view.state === 'browser-mismatch') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
-    if (!view.replacementAvailable) {
-      return reply.code(409).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, '当前号码暂时不能更换，请继续等待。'));
+    if (!view.currentNumberAction || !view.currentNumberActionAvailable) {
+      return reply.code(409).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, '当前号码暂时不能操作，请继续等待。'));
     }
-    return reply.type('text/html; charset=utf-8').send(replacementConfirmationPage(request.params.token));
+    return reply.type('text/html; charset=utf-8').send(replacementConfirmationPage(request.params.token, view.currentNumberAction));
   });
 
   app.post<{ Body: ReplacementBody; Params: { token: string } }>('/a/:token/replacement/confirm', async (request, reply) => {
@@ -805,10 +818,10 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
     if (view.state === 'browser-mismatch') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
-    if (result.state === 'replaced') return reply.redirect(`/a/${request.params.token}`, 303);
+    if (result.state === 'replaced' || result.state === 'ended') return reply.redirect(`/a/${request.params.token}`, 303);
     if (result.state === 'confirming') return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
     const message = result.state === 'too-early'
-      ? '当前号码暂时不能更换，请继续等待。'
+      ? '当前号码暂时不能操作，请继续等待。'
       : result.state === 'no-numbers'
         ? RECIPIENT_NO_NUMBERS_MESSAGE
         : RECIPIENT_ACQUISITION_ERROR_MESSAGE;

@@ -1,4 +1,5 @@
 .agents/
+.zcode/
 .scratch/
 AGENTS.md
 docs/agents/

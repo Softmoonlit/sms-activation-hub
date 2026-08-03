@@ -8,7 +8,9 @@ import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type 
 const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const AUTHORIZATION_LIFETIME_MS = CLAIM_ACQUISITION_LIFETIME_MS;
 const RESULT_VIEW_LIFETIME_MS = 5 * 60 * 1000;
+const END_PROMPT_LIFETIME_MS = 2 * 60 * 1000;
 const RESULT_VIEW_ENDED_REASON = 'result_view_expired';
+const QUOTA_EXHAUSTED_ENDED_REASON = 'quota_exhausted';
 
 export interface CreatedAuthorization {
   id: string;
@@ -107,18 +109,20 @@ export interface RecipientAuthorizationView {
   numberExpiresAt?: Date;
   remainingNumberCount?: number;
   acquisitionState?: 'confirming' | 'manual';
-  replacementAvailable?: boolean;
-  replacementInProgress?: boolean;
+  currentNumberAction?: 'replace' | 'end';
+  currentNumberActionAvailable?: boolean;
+  currentNumberActionInProgress?: 'replace' | 'end';
   activationTimeoutInProgress?: boolean;
   nextNumberAvailable?: boolean;
   resultViewUntil?: Date;
   resultViewRemainingMs?: number;
+  quotaExhaustedPromptUntil?: Date;
   smsDelivered?: boolean;
   verificationCode?: string;
 }
 
 export type ReplacementResult =
-  | { state: 'replaced' | 'confirming' | 'no-numbers' | 'error' }
+  | { state: 'replaced' | 'ended' | 'confirming' | 'no-numbers' | 'error' }
   | { state: 'too-early' | 'unavailable' | 'not-found' };
 
 type ReplacementTransition =
@@ -302,12 +306,45 @@ export class ActivationAuthorizations {
     await this.deleteExpiredSensitiveDeliveryData();
   }
 
+  private async expireQuotaExhaustedPrompt(authorizationId?: string): Promise<void> {
+    const now = this.now();
+    await this.database.pool.query(
+      `UPDATE activation_authorizations
+       SET token_hash = NULL, recipient_session_hash = NULL
+       WHERE status = 'ended' AND ended_reason = $1 AND end_prompt_until IS NOT NULL
+         AND end_prompt_until <= $2 AND ($3::uuid IS NULL OR id = $3)`,
+      [QUOTA_EXHAUSTED_ENDED_REASON, now, authorizationId ?? null],
+    );
+  }
+
+  private async endForExhaustedQuota(client: PoolClient, authorizationId: string, now: Date): Promise<void> {
+    const ended = await client.query(
+      `UPDATE activation_authorizations auth
+       SET status = 'ended', ended_reason = $2, ended_at = $3,
+           end_prompt_until = $4, last_activity_at = $3
+       WHERE auth.id = $1 AND auth.status = 'in_progress'
+         AND NOT EXISTS (
+           SELECT 1 FROM authorization_candidate_countries candidate
+           WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NULL
+         )`,
+      [authorizationId, QUOTA_EXHAUSTED_ENDED_REASON, now, new Date(now.getTime() + END_PROMPT_LIFETIME_MS)],
+    );
+    if (!ended.rowCount) return;
+    await client.query(
+      `UPDATE supplier_activations
+       SET phone_number = NULL, sms_code = NULL, sms_text = NULL
+       WHERE authorization_id = $1`,
+      [authorizationId],
+    );
+  }
+
   async nextRecipientAccessExpiry(): Promise<Date | undefined> {
     const result = await this.database.pool.query<{ expires_at: Date | null }>(
       `SELECT min(deadline) AS expires_at
        FROM (
          SELECT CASE
            WHEN auth.status IN ('result_available', 'sms_delivered') THEN auth.result_view_until
+           WHEN auth.status = 'ended' AND auth.ended_reason = $1 THEN auth.end_prompt_until
            WHEN auth.status = 'in_progress' AND EXISTS (
              SELECT 1 FROM supplier_activations activation
              WHERE activation.authorization_id = auth.id
@@ -319,7 +356,8 @@ export class ActivationAuthorizations {
          WHERE auth.token_hash IS NOT NULL OR auth.recipient_session_hash IS NOT NULL
        ) access_deadlines
        WHERE deadline IS NOT NULL`,
-    );
+    [QUOTA_EXHAUSTED_ENDED_REASON],
+  );
     return result.rows[0]?.expires_at ?? undefined;
   }
 
@@ -476,13 +514,13 @@ export class ActivationAuthorizations {
       if (!activation || activation.expires_at <= now) return null;
       if (activation.status === 'cancellation_confirming' || activation.cancel_available_at > now) {
         await client.query(
-          "UPDATE supplier_activations SET replacement_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
+          "UPDATE supplier_activations SET replacement_pending = false, end_use_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
           [activation.provider_activation_id],
         );
         return null;
       }
       await client.query(
-        "UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
+        "UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = false, end_use_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
         [activation.provider_activation_id],
       );
       return activation.provider_activation_id;
@@ -672,6 +710,7 @@ export class ActivationAuthorizations {
       );
       for (const authorization of expired.rows) await this.endResultView(client, authorization.id, now);
     });
+    await this.expireQuotaExhaustedPrompt(authorizationId);
   }
 
   async recipientState(token: string, sessionToken?: string): Promise<RecipientAuthorizationView> {
@@ -685,22 +724,22 @@ export class ActivationAuthorizations {
     await this.reconcileTimedOutActivations(target.rows[0].id);
     await this.deleteExpiredSensitiveDeliveryData();
     const result = await this.database.pool.query<{
-      id: string; status: AuthorizationStatus;
-      expires_at: Date | null; number_acquisition_expires_at: Date | null; result_view_until: Date | null; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
+      id: string; status: AuthorizationStatus; ended_reason: string | null;
+      expires_at: Date | null; number_acquisition_expires_at: Date | null; result_view_until: Date | null; end_prompt_until: Date | null; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
       acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string;
-      acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; sms_code: string | null;
+      acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; end_use_pending: boolean | null; sms_code: string | null;
       last_activation_status: string | null; last_activation_timed_out_at: Date | null;
     }>(
-      `SELECT auth.id, auth.status, auth.expires_at, auth.number_acquisition_expires_at,
+      `SELECT auth.id, auth.status, auth.ended_reason, auth.expires_at, auth.number_acquisition_expires_at,
               COALESCE(auth.result_view_until, (
                 SELECT max(item.sms_received_at) + INTERVAL '5 minutes'
                 FROM supplier_activations item
                 WHERE item.authorization_id = auth.id AND item.sms_received_at IS NOT NULL
               )) AS result_view_until,
-              auth.recipient_session_hash,
+              auth.end_prompt_until, auth.recipient_session_hash,
               candidate.country_name, activation.phone_number, activation.acquired_at,
               activation.cancel_available_at, activation.expires_at AS number_expires_at,
-              activation.status AS activation_status, activation.sms_code,
+              activation.status AS activation_status, activation.end_use_pending, activation.sms_code,
               (SELECT count(*) FROM authorization_candidate_countries used WHERE used.authorization_id = auth.id AND used.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status, last_activation.status AS last_activation_status,
               last_activation.timed_out_at AS last_activation_timed_out_at
@@ -726,6 +765,9 @@ export class ActivationAuthorizations {
     if (accessDeadline !== null && accessDeadline <= now
       && !(['result_available', 'sms_delivered'].includes(authorization.status)
         && authorization.result_view_until && authorization.result_view_until > now)
+      && !(authorization.status === 'ended'
+        && authorization.ended_reason === QUOTA_EXHAUSTED_ENDED_REASON
+        && authorization.end_prompt_until && authorization.end_prompt_until > now)
       && !(authorization.status === 'in_progress'
         && authorization.activation_status && ['acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'completion_confirming'].includes(authorization.activation_status))) {
       await this.database.expireAuthorization(authorization.id, now);
@@ -738,6 +780,11 @@ export class ActivationAuthorizations {
       return authorization.status === 'in_progress' || authorization.status === 'result_available' || authorization.status === 'sms_delivered'
         ? { state: 'browser-mismatch', ...(expiresAt ? { expiresAt } : {}) }
         : { state: 'unavailable', ...(expiresAt ? { expiresAt } : {}) };
+    }
+    if (authorization.status === 'ended'
+      && authorization.ended_reason === QUOTA_EXHAUSTED_ENDED_REASON
+      && authorization.end_prompt_until && authorization.end_prompt_until > now) {
+      return { state: 'claimed', quotaExhaustedPromptUntil: authorization.end_prompt_until };
     }
     const deliveryContextVisible = authorization.activation_status !== 'manual_reconciliation' || authorization.last_activation_timed_out_at === null;
     return {
@@ -753,10 +800,13 @@ export class ActivationAuthorizations {
       } : {}),
       remainingNumberCount: 3 - Number(authorization.used_count),
       ...(authorization.acquisition_status ? { acquisitionState: authorization.acquisition_status === 'manual' ? 'manual' as const : 'confirming' as const } : {}),
-      ...(expiresAt && expiresAt > now
-        && authorization.activation_status === 'waiting_sms' && authorization.cancel_available_at && authorization.cancel_available_at <= now
-        && Number(authorization.used_count) < 3 ? { replacementAvailable: true } : {}),
-      ...(authorization.activation_status === 'cancellation_confirming' ? { replacementInProgress: true } : {}),
+      ...(expiresAt && expiresAt > now && authorization.activation_status === 'waiting_sms'
+        ? { currentNumberAction: Number(authorization.used_count) < 3 ? 'replace' as const : 'end' as const } : {}),
+      ...(expiresAt && expiresAt > now && authorization.activation_status === 'waiting_sms'
+        && authorization.cancel_available_at && authorization.cancel_available_at <= now
+        ? { currentNumberActionAvailable: true } : {}),
+      ...(authorization.activation_status === 'cancellation_confirming'
+        ? { currentNumberActionInProgress: authorization.end_use_pending ? 'end' as const : 'replace' as const } : {}),
       ...(authorization.last_activation_status === 'manual_reconciliation' && authorization.last_activation_timed_out_at ? { activationTimeoutInProgress: true } : {}),
       ...(authorization.last_activation_status === 'timed_out' && Number(authorization.used_count) < 3 ? { nextNumberAvailable: true } : {}),
       ...(authorization.status === 'result_available' || authorization.status === 'sms_delivered' ? { smsDelivered: true } : {}),
@@ -819,7 +869,7 @@ export class ActivationAuthorizations {
         await client.query(
           `UPDATE supplier_activations
            SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4, sms_poll_after = NULL,
-               replacement_pending = false, authorization_expiry_cancellation_pending = false,
+               replacement_pending = false, end_use_pending = false, authorization_expiry_cancellation_pending = false,
                authorization_revocation_cancellation_pending = false,
                authorization_revocation_cancellation_retry_after = NULL,
                refund_reconciliation_status = CASE WHEN status = 'manual_reconciliation' THEN 'resolved' ELSE refund_reconciliation_status END,
@@ -993,6 +1043,13 @@ export class ActivationAuthorizations {
       );
       for (const authorization of expired.rows) await this.endResultView(client, authorization.id, now);
       await client.query(
+        `UPDATE activation_authorizations
+         SET token_hash = NULL, recipient_session_hash = NULL
+         WHERE status = 'ended' AND ended_reason = $1 AND end_prompt_until IS NOT NULL
+           AND end_prompt_until <= $2`,
+        [QUOTA_EXHAUSTED_ENDED_REASON, now],
+      );
+      await client.query(
         `UPDATE supplier_activations activation
          SET phone_number = NULL, sms_code = NULL, sms_text = NULL
          WHERE activation.expires_at <= $1
@@ -1023,7 +1080,7 @@ export class ActivationAuthorizations {
       `UPDATE supplier_activations
        SET status = 'manual_reconciliation', timed_out_at = COALESCE(timed_out_at, $1),
            refund_reconciliation_status = 'pending', timeout_reconciliation_claimed_at = NULL,
-           timeout_reconciliation_claim_token = NULL, replacement_pending = false,
+           timeout_reconciliation_claim_token = NULL, replacement_pending = false, end_use_pending = false,
            authorization_expiry_cancellation_pending = false,
            authorization_revocation_cancellation_pending = false,
            authorization_revocation_cancellation_retry_after = NULL,
@@ -1149,16 +1206,7 @@ export class ActivationAuthorizations {
          WHERE id = $1`,
         [activationId],
       );
-      await client.query(
-        `UPDATE activation_authorizations auth
-         SET status = 'quota_exhausted'
-         WHERE auth.id = $1 AND auth.status = 'in_progress'
-           AND NOT EXISTS (
-             SELECT 1 FROM authorization_candidate_countries candidate
-             WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NULL
-           )`,
-        [confirmedAuthorizationId],
-      );
+      await this.endForExhaustedQuota(client, confirmedAuthorizationId, this.now());
     });
   }
 
@@ -1276,6 +1324,7 @@ export class ActivationAuthorizations {
       'SELECT id FROM activation_authorizations WHERE token_hash = $1', [tokenHash(token)],
     );
     if (!target.rows[0]) return { state: 'not-found' };
+    await this.expireResultView(target.rows[0].id);
     await this.reconcileTimedOutActivations(target.rows[0].id);
     const transition = await this.database.transaction(async (client): Promise<ReplacementTransition> => {
       const authorizationResult = await client.query<{ id: string; status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
@@ -1294,7 +1343,7 @@ export class ActivationAuthorizations {
         'SELECT count(*)::text AS count FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NOT NULL',
         [authorization.id],
       );
-      if (Number(used.rows[0]?.count) >= 3) return { kind: 'no-numbers' };
+      const endingUse = Number(used.rows[0]?.count) >= 3;
       const currentResult = await client.query<{ provider_activation_id: string; cancel_available_at: Date }>(
         `SELECT provider_activation_id, cancel_available_at FROM supplier_activations
          WHERE authorization_id = $1 AND status = 'waiting_sms' FOR UPDATE`,
@@ -1303,8 +1352,10 @@ export class ActivationAuthorizations {
       const current = currentResult.rows[0];
       if (!current || current.cancel_available_at > now) return { kind: 'too-early' };
       const updated = await client.query(
-        "UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = true WHERE authorization_id = $1 AND status = 'waiting_sms'",
-        [authorization.id],
+        `UPDATE supplier_activations
+         SET status = 'cancellation_confirming', replacement_pending = $2, end_use_pending = $3
+         WHERE authorization_id = $1 AND status = 'waiting_sms'`,
+        [authorization.id, !endingUse, endingUse],
       );
       return updated.rowCount === 1 ? { kind: 'cancel', activationId: current.provider_activation_id } : { kind: 'unavailable' };
     });
@@ -1314,7 +1365,7 @@ export class ActivationAuthorizations {
       const cancellation = await this.heroSms.cancelActivation(transition.activationId);
       if (cancellation === 'too-early') {
         await this.database.pool.query(
-          "UPDATE supplier_activations SET status = 'waiting_sms', replacement_pending = false WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'",
+          "UPDATE supplier_activations SET status = 'waiting_sms', replacement_pending = false, end_use_pending = false WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'",
           [transition.activationId],
         );
         return { state: 'too-early' };
@@ -1324,7 +1375,9 @@ export class ActivationAuthorizations {
         return { state: 'confirming' };
       }
       const confirmed = await this.confirmCancellation(transition.activationId);
-      return confirmed?.replacementAllowed ? this.acquireReplacementNumber(confirmed.authorizationId) : { state: 'confirming' };
+      if (!confirmed) return { state: 'confirming' };
+      if (confirmed.replacementAllowed) return this.acquireReplacementNumber(confirmed.authorizationId);
+      return confirmed.ended ? { state: 'ended' } : { state: 'confirming' };
     } catch {
       // 请求结果不明确时必须保留取消确认状态，等待供应商状态对账。
       return { state: 'confirming' };
@@ -1340,7 +1393,9 @@ export class ActivationAuthorizations {
         const status = await this.heroSms.activationStatus(activation.provider_activation_id);
         if (status.providerStatus === 'cancelled') {
           const confirmed = await this.confirmCancellation(activation.provider_activation_id);
-          if (confirmed?.replacementAllowed) await this.acquireReplacementNumber(confirmed.authorizationId);
+          if (confirmed?.replacementAllowed) {
+            await this.acquireReplacementNumber(confirmed.authorizationId);
+          }
         } else if (status.delivered && status.text && status.receivedAt) {
           await this.receiveHeroSmsWebhook({
             activationId: activation.provider_activation_id,
@@ -1358,7 +1413,7 @@ export class ActivationAuthorizations {
   async cancelRevokedActivations(): Promise<void> {
     for (;;) {
       const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
-        `UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = false
+        `UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = false, end_use_pending = false
          WHERE id = (
            SELECT id FROM supplier_activations
            WHERE status = 'waiting_sms' AND authorization_revocation_cancellation_pending AND cancel_available_at <= $1
@@ -1409,7 +1464,7 @@ export class ActivationAuthorizations {
   async runPendingReplacementAcquisitions(): Promise<void> {
     const now = this.now();
     await this.database.pool.query(
-      `UPDATE supplier_activations activation SET replacement_pending = false
+      `UPDATE supplier_activations activation SET replacement_pending = false, end_use_pending = false
        FROM activation_authorizations auth
        WHERE activation.authorization_id = auth.id AND activation.status = 'cancelled' AND activation.replacement_pending
          AND (auth.status <> 'in_progress' OR COALESCE(auth.number_acquisition_expires_at, auth.expires_at) <= $1)`,
@@ -1426,7 +1481,7 @@ export class ActivationAuthorizations {
     for (const replacement of pending.rows) await this.acquireReplacementNumber(replacement.authorization_id);
   }
 
-  private async confirmCancellation(providerActivationId: string): Promise<{ authorizationId: string; replacementAllowed: boolean } | undefined> {
+  private async confirmCancellation(providerActivationId: string): Promise<{ authorizationId: string; replacementAllowed: boolean; ended: boolean } | undefined> {
     return this.database.transaction(async (client) => {
       const identity = await client.query<{ authorization_id: string }>(
         `SELECT authorization_id FROM supplier_activations
@@ -1437,11 +1492,11 @@ export class ActivationAuthorizations {
       if (!authorizationId) return undefined;
       await client.query('SELECT id FROM activation_authorizations WHERE id = $1 FOR UPDATE', [authorizationId]);
       const result = await client.query<{
-        id: string; authorization_id: string; replacement_pending: boolean; authorization_status: string;
+        id: string; authorization_id: string; replacement_pending: boolean; end_use_pending: boolean; authorization_status: string;
         authorization_expires_at: Date | null; number_acquisition_expires_at: Date | null;
         activation_cost: string; currency: string;
       }>(
-        `SELECT activation.id, activation.authorization_id, activation.replacement_pending,
+        `SELECT activation.id, activation.authorization_id, activation.replacement_pending, activation.end_use_pending,
                 auth.status AS authorization_status,
                 auth.expires_at AS authorization_expires_at, auth.number_acquisition_expires_at,
                 activation.activation_cost::text, activation.currency
@@ -1454,27 +1509,30 @@ export class ActivationAuthorizations {
       );
       const activation = result.rows[0];
       if (!activation) return undefined;
+      const confirmedAt = this.now();
       const acquisitionExpiresAt = authorizationAcquisitionDeadline(activation);
       const replacementAllowed = activation.replacement_pending
         && activation.authorization_status === 'in_progress'
         && acquisitionExpiresAt !== null
-        && acquisitionExpiresAt > this.now();
+        && acquisitionExpiresAt > confirmedAt;
+      const endsUse = activation.end_use_pending && activation.authorization_status === 'in_progress';
       await client.query(
         `UPDATE supplier_activations
          SET status = 'cancelled', supplier_cancelled_at = COALESCE(supplier_cancelled_at, $2),
              phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL,
-             replacement_pending = $3, authorization_expiry_cancellation_pending = false,
+             replacement_pending = $3, end_use_pending = false, authorization_expiry_cancellation_pending = false,
              authorization_revocation_cancellation_pending = false,
              authorization_revocation_cancellation_retry_after = NULL
          WHERE id = $1`,
-        [activation.id, this.now(), replacementAllowed],
+        [activation.id, confirmedAt, replacementAllowed],
       );
+      if (endsUse) await this.endForExhaustedQuota(client, activation.authorization_id, confirmedAt);
       await client.query(
         `INSERT INTO supplier_activation_refunds (supplier_activation_id, amount, currency, confirmed_at)
          VALUES ($1, $2, $3, $4) ON CONFLICT (supplier_activation_id) DO NOTHING`,
-        [activation.id, activation.activation_cost, activation.currency, this.now()],
+        [activation.id, activation.activation_cost, activation.currency, confirmedAt],
       );
-      return { authorizationId: activation.authorization_id, replacementAllowed };
+      return { authorizationId: activation.authorization_id, replacementAllowed, ended: endsUse };
     });
   }
 
@@ -1495,7 +1553,9 @@ export class ActivationAuthorizations {
 
   private async clearPendingReplacement(authorizationId: string): Promise<void> {
     await this.database.pool.query(
-      "UPDATE supplier_activations SET replacement_pending = false WHERE authorization_id = $1 AND status = 'cancelled' AND replacement_pending",
+      `UPDATE supplier_activations
+       SET replacement_pending = false, end_use_pending = false
+       WHERE authorization_id = $1 AND status = 'cancelled' AND replacement_pending`,
       [authorizationId],
     );
   }
@@ -1638,7 +1698,7 @@ export class ActivationAuthorizations {
             return 'error';
           }
           if (prepared.kind === 'no-candidates') {
-            await client.query("UPDATE activation_authorizations SET status = 'quota_exhausted' WHERE id = $1 AND status = 'in_progress'", [authorizationId]);
+            await this.endForExhaustedQuota(client, authorizationId, this.now());
             await clearPendingReplacement();
             return 'no-numbers';
           }
@@ -1777,7 +1837,7 @@ export class ActivationAuthorizations {
     }
   }
 
-  private async acquireReplacementNumber(authorizationId: string): Promise<Extract<ReplacementResult, { state: 'replaced' | 'confirming' | 'no-numbers' | 'error' }>> {
+  private async acquireReplacementNumber(authorizationId: string): Promise<{ state: 'replaced' | 'confirming' | 'no-numbers' | 'error' }> {
     try {
       const outcome = await this.acquireNumberForAuthorization(authorizationId, { clearPendingReplacement: true });
       if (outcome === 'acquired') return { state: 'replaced' };
@@ -1796,6 +1856,7 @@ export class ActivationAuthorizations {
       'SELECT id FROM activation_authorizations WHERE token_hash = $1', [tokenHash(token)],
     );
     if (!target.rows[0]) return { state: 'not-found' };
+    await this.expireResultView(target.rows[0].id);
     await this.reconcileTimedOutActivations(target.rows[0].id);
     let sessionToken = existingSessionToken ?? randomBytes(32).toString('base64url');
     let newlyClaimed = false;
