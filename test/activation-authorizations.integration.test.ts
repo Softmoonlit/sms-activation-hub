@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -3830,6 +3830,124 @@ if (!databaseUrl) {
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
       assert.equal(detail.statusCode, 200);
       assert.match(detail.body, /链接末 8 位：未知/);
+    } finally { await app.close(); }
+  });
+
+  test('按生命周期裁剪管理员详情：覆盖待领取、进行中、结果可查看、额度用尽、期限结束和管理员撤销详情', async () => {
+    let now = new Date('2026-08-01T00:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+    await resetAuthorizationTables(database);
+    await database.replaceDefaultCandidateLocations([
+      { countryId: 1, countryName: '美国' },
+      { countryId: 2, countryName: '英国' },
+      { countryId: 3, countryName: '法国' },
+    ]);
+    try {
+      const session = await login(app);
+
+      // 1. 待领取详情 (unclaimed)
+      const created = await createBatch(app, session, '1');
+      assert.equal(created.statusCode, 201);
+      const token1 = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token1);
+      const suffix1 = token1.slice(-8);
+      const home1 = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id1 = authorizationIdFromHome(home1.body, token1);
+
+      const detail1 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
+      assert.equal(detail1.statusCode, 200);
+      assert.match(detail1.body, new RegExp(`链接末 8 位：${suffix1}`));
+      assert.match(detail1.body, /授权状态：待领取/);
+      assert.match(detail1.body, /创建时间/);
+      assert.match(detail1.body, /撤销授权/);
+      assert.doesNotMatch(detail1.body, /候选地区|供应商激活|成本|获取额度|新号码获取截止时间|授权到期时间|领取时间|尚无/);
+      assert.doesNotMatch(detail1.body, new RegExp(token1));
+
+      // 2. 进行中详情 (in_progress)
+      const claimRes = await app.inject({
+        method: 'POST', url: `/a/${token1}/numbers`,
+      });
+      assert.equal(claimRes.statusCode, 303);
+
+      const detail2 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
+      assert.equal(detail2.statusCode, 200);
+      assert.match(detail2.body, /授权状态：进行中/);
+      assert.match(detail2.body, /创建时间/);
+      assert.match(detail2.body, /领取时间/);
+      assert.match(detail2.body, /新号码获取截止时间/);
+      assert.match(detail2.body, /获取额度：1\/3/);
+      assert.match(detail2.body, /候选地区/);
+      assert.match(detail2.body, /位置 1（美国）：<\/strong>已消耗/);
+      assert.doesNotMatch(detail2.body, /报价|预检价格|库存/);
+      assert.match(detail2.body, /撤销授权/);
+
+      // 3. 结果可查看详情 (result_available)
+      const actRes = await database.pool.query<{ provider_activation_id: string }>(
+        'SELECT provider_activation_id FROM supplier_activations WHERE authorization_id = $1 ORDER BY acquired_at DESC LIMIT 1', [id1],
+      );
+      const actId = actRes.rows[0]?.provider_activation_id; assert.ok(actId);
+      const webhookRes = await app.inject({
+        method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+        payload: { activationId: actId, service: 'openai', country: 1, receivedAt: '2026-08-01T00:05:00.000Z', code: '654321', text: 'Your code is 654321' },
+      });
+      assert.equal(webhookRes.statusCode, 200);
+
+      const detail3 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
+      assert.equal(detail3.statusCode, 200);
+      assert.match(detail3.body, /授权状态：结果可查看/);
+      assert.match(detail3.body, /完整号码：/);
+      assert.match(detail3.body, /验证码：/);
+      assert.match(detail3.body, /654321/);
+      assert.match(detail3.body, /撤销授权/);
+
+      // 4. 管理员撤销详情 (admin_revoked)
+      const revokeRes = await post(app, session, `/${config.adminPath}/authorizations/${id1}/revoke`, {});
+      assert.equal(revokeRes.statusCode, 303);
+      const detail4 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
+      assert.equal(detail4.statusCode, 200);
+      assert.match(detail4.body, /授权状态：已结束/);
+      assert.match(detail4.body, /结束原因：管理员撤销/);
+      assert.doesNotMatch(detail4.body, /撤销授权/);
+      assert.doesNotMatch(detail4.body, /654321/);
+
+      // 5. 额度用尽详情 (quota_exhausted)
+      const createdB = await createBatch(app, session, '1');
+      const tokenB = createdB.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(tokenB);
+      const homeB = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const idB = authorizationIdFromHome(homeB.body, tokenB);
+      await database.pool.query(
+        "UPDATE activation_authorizations SET status = 'ended', claimed_at = $2, ended_at = $2, ended_reason = 'quota_exhausted' WHERE id = $1",
+        [idB, now],
+      );
+      for (let pos = 1; pos <= 3; pos++) {
+        await database.pool.query(
+          "INSERT INTO authorization_candidate_countries (authorization_id, position, country_id, country_name, quoted_price, quoted_stock, used_at) VALUES ($1, $2, 1, '美国', 1.5, 10, $3)",
+          [idB, pos, now],
+        );
+      }
+      const detail5 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${idB}`, headers: { cookie: session.cookie } });
+      assert.equal(detail5.statusCode, 200);
+      assert.match(detail5.body, /授权状态：已结束/);
+      assert.match(detail5.body, /结束原因：获取额度用尽/);
+      assert.match(detail5.body, /获取额度：3\/3/);
+      assert.doesNotMatch(detail5.body, /撤销授权/);
+
+      // 6. 期限结束详情 (claim_window_ended)
+      const createdC = await createBatch(app, session, '1');
+      const tokenC = createdC.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(tokenC);
+      const homeC = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const idC = authorizationIdFromHome(homeC.body, tokenC);
+      const claimC = await app.inject({ method: 'POST', url: `/a/${tokenC}/numbers` });
+      assert.ok([200, 202, 303].includes(claimC.statusCode));
+      const cookC = `recipient_session=${cookieValue(claimC, 'recipient_session')}`;
+      await database.pool.query(
+        "UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'claim_window_ended' WHERE token_hash = $1",
+        [createHash('sha256').update(tokenC).digest('hex'), now],
+      );
+      const detail6 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${idC}`, headers: { cookie: session.cookie } });
+      assert.equal(detail6.statusCode, 200);
+      assert.match(detail6.body, /授权状态：已到期|授权状态：已结束/);
+      assert.match(detail6.body, /结束原因：领取后期限结束/);
+      assert.doesNotMatch(detail6.body, /撤销授权/);
     } finally { await app.close(); }
   });
 }

@@ -623,3 +623,87 @@ test('移动视口库存列表 20 条紧凑卡片不重叠、箭头固定尺寸�
     await app.close();
   }
 });
+
+test('桌面与移动视口管理员详情页：导航、待领取/领取后信息裁剪、敏感字段窗口与无溢出布局', async ({ browser }) => {
+  const database = new Database(databaseUrl!);
+  const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
+  await app.listen({ host: '127.0.0.1', port: 32124 });
+  try {
+    const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
+    await resetAuthorizationTables(database);
+    await database.replaceDefaultCandidateLocations([
+      { countryId: 1, countryName: '美国' },
+      { countryId: 2, countryName: '英国' },
+      { countryId: 3, countryName: '法国' },
+    ]);
+    const links = await createBatch(app, cookie, csrf, '1');
+    const token = links[0]!;
+    const suffix = token.slice(-8);
+
+    // 1. 桌面视口 - 待领取详情导航与裁剪
+    const desktopContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const desktopPage = await desktopContext.newPage();
+    await desktopContext.addCookies([
+      { name: 'admin_session', value: sessionValue, domain: '127.0.0.1', path: '/' },
+      { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
+    ]);
+    await desktopPage.goto(`${origin}/${config.adminPath}`);
+    await desktopPage.locator('article.authorization').first().getByRole('link', { name: '查看详情' }).click();
+    await expect(desktopPage.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
+    await expect(desktopPage.locator('h2', { hasText: `链接末 8 位：${suffix}` })).toBeVisible();
+    await expect(desktopPage.getByText('授权状态：待领取')).toBeVisible();
+    await expect(desktopPage.getByText('创建时间：')).toBeVisible();
+    await expect(desktopPage.getByRole('link', { name: '撤销授权' })).toBeVisible();
+    await expect(desktopPage.getByRole('heading', { name: '候选地区', level: 2 })).toBeHidden();
+    await expect(desktopPage.getByRole('heading', { name: '供应商激活', level: 2 })).toBeHidden();
+    await expect(desktopPage.getByRole('heading', { name: '成本', level: 2 })).toBeHidden();
+    await assertNoOverflow(desktopPage, '桌面待领取详情页');
+
+    // 2. 领取授权并获取号码（进入进行中与敏感窗口）
+    const claimRes = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+    assert.ok([200, 202, 303].includes(claimRes.statusCode));
+
+    // 刷新桌面详情页
+    await desktopPage.reload();
+    await expect(desktopPage.getByText('授权状态：进行中')).toBeVisible();
+    await expect(desktopPage.getByText('领取时间：')).toBeVisible();
+    await expect(desktopPage.getByText('新号码获取截止时间：')).toBeVisible();
+    await expect(desktopPage.getByRole('heading', { name: '候选地区', level: 2 })).toBeVisible();
+    await expect(desktopPage.getByText('位置 1（美国）：已消耗')).toBeVisible();
+    await expect(desktopPage.getByRole('heading', { name: '当前供应商激活', level: 2 })).toBeVisible();
+    await expect(desktopPage.getByText('完整号码：+442079460777')).toBeVisible();
+    await assertNoOverflow(desktopPage, '桌面进行中详情页');
+
+    // 4. 移动视口验证敏感字段窗口与无溢出
+    const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const mobilePage = await mobileContext.newPage();
+    await mobileContext.addCookies([
+      { name: 'admin_session', value: sessionValue, domain: '127.0.0.1', path: '/' },
+      { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
+    ]);
+    const homeRes = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie } });
+    const authorizationId = homeRes.body.match(/data-authorization-id="([^"]+)"/)?.[1]; assert.ok(authorizationId);
+
+    await mobilePage.goto(`${origin}/${config.adminPath}/authorizations/${authorizationId}`);
+    await expect(mobilePage.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
+    await expect(mobilePage.getByText('完整号码：+442079460777')).toBeVisible();
+    await assertNoOverflow(mobilePage, '移动视口进行中详情页');
+
+    // 撤销授权后刷新，敏感字段不可见，撤销链接不可见
+    await mobilePage.getByRole('link', { name: '撤销授权' }).click();
+    await expect(mobilePage.locator('h1', { hasText: '确认撤销授权' })).toBeVisible();
+    await mobilePage.getByRole('button', { name: '确认撤销授权' }).click();
+
+    await mobilePage.goto(`${origin}/${config.adminPath}/authorizations/${authorizationId}`);
+    await expect(mobilePage.getByText('授权状态：已结束')).toBeVisible();
+    await expect(mobilePage.getByText('结束原因：管理员撤销')).toBeVisible();
+    await expect(mobilePage.getByText('+442079460777')).toBeHidden();
+    await expect(mobilePage.getByRole('link', { name: '撤销授权' })).toBeHidden();
+    await assertNoOverflow(mobilePage, '移动视口已撤销详情页');
+
+    await desktopContext.close();
+    await mobileContext.close();
+  } finally {
+    await app.close();
+  }
+});
