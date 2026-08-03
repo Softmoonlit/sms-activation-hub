@@ -160,11 +160,14 @@ export class Database {
         ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;
 
       ALTER TABLE activation_authorizations
+        ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+
+      ALTER TABLE activation_authorizations
         ADD COLUMN IF NOT EXISTS recipient_session_hash TEXT;
 
       ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_status_check;
       UPDATE activation_authorizations
-        SET recipient_session_hash = NULL
+        SET token_hash = NULL, recipient_session_hash = NULL
         WHERE status IN ('revoked', 'expired')
            OR (status = 'ended' AND ended_reason = 'admin_revoked');
       ALTER TABLE activation_authorizations ADD CONSTRAINT activation_authorizations_status_check
@@ -346,7 +349,7 @@ export class Database {
         WHERE status = 'cancelled' AND replacement_pending;
 
       DROP INDEX IF EXISTS supplier_activations_timeout_reconciliation_idx;
-      CREATE INDEX supplier_activations_timeout_reconciliation_idx
+      CREATE INDEX IF NOT EXISTS supplier_activations_timeout_reconciliation_idx
         ON supplier_activations (expires_at)
         WHERE status IN ('manual_reconciliation', 'timed_out') AND timed_out_at IS NOT NULL
           AND refund_reconciliation_status = 'pending';
@@ -355,9 +358,10 @@ export class Database {
         ON supplier_activations (cancel_available_at)
         WHERE status = 'waiting_sms' AND authorization_expiry_cancellation_pending;
 
+      DROP INDEX IF EXISTS supplier_activations_authorization_revocation_cancellation_idx;
       CREATE INDEX IF NOT EXISTS supplier_activations_authorization_revocation_cancellation_idx
         ON supplier_activations (cancel_available_at)
-        WHERE status = 'waiting_sms' AND authorization_revocation_cancellation_pending;
+        WHERE status IN ('waiting_sms', 'manual_reconciliation') AND authorization_revocation_cancellation_pending;
 
       CREATE TABLE IF NOT EXISTS supplier_activation_refunds (
         supplier_activation_id UUID PRIMARY KEY REFERENCES supplier_activations(id) ON DELETE RESTRICT,
@@ -460,7 +464,7 @@ export class Database {
       CREATE TABLE IF NOT EXISTS number_acquisition_candidates (
         request_id UUID NOT NULL REFERENCES number_acquisition_requests(id) ON DELETE CASCADE,
         provider_activation_id TEXT NOT NULL,
-        phone_number TEXT NOT NULL,
+        phone_number TEXT,
         activation_cost NUMERIC NOT NULL CHECK (activation_cost >= 0),
         currency TEXT NOT NULL,
         service_code TEXT,
@@ -469,6 +473,9 @@ export class Database {
         provider_status TEXT NOT NULL,
         PRIMARY KEY (request_id, provider_activation_id)
       );
+
+      ALTER TABLE number_acquisition_candidates
+        ALTER COLUMN phone_number DROP NOT NULL;
 
       DROP TRIGGER IF EXISTS number_acquisition_status_event ON number_acquisition_requests;
       CREATE TRIGGER number_acquisition_status_event
@@ -683,7 +690,8 @@ export class Database {
         return ['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(row.status)
           && ((accessDeadline === null || accessDeadline > now)
             || (row.status === 'result_available' && row.result_view_until !== null && row.result_view_until > now)
-            || (row.status === 'in_progress' && activeActivation));
+            || (row.status === 'in_progress' && activeActivation)
+            || (row.status === 'in_progress' && row.acquisition_status !== null));
       })(),
       ...(row.activation_status ? { currentActivationStatus: row.activation_status } : {}),
       hasPendingException: row.has_pending_exception || row.acquisition_status === 'reconciling' || row.acquisition_status === 'manual',
@@ -714,6 +722,13 @@ export class Database {
                  AND activation.status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'completion_confirming')
              )
            )
+           AND NOT (
+             status = 'in_progress' AND EXISTS (
+               SELECT 1 FROM number_acquisition_requests request
+               WHERE request.authorization_id = activation_authorizations.id
+                 AND request.status IN ('requesting', 'reconciling', 'manual')
+             )
+           )
            AND (token_hash IS NOT NULL OR recipient_session_hash IS NOT NULL)
          FOR UPDATE`,
         [now],
@@ -740,6 +755,13 @@ export class Database {
                WHERE activation.authorization_id = activation_authorizations.id
                  AND activation.status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'completion_confirming')
              )
+           )
+           AND NOT (
+             status = 'in_progress' AND EXISTS (
+               SELECT 1 FROM number_acquisition_requests request
+               WHERE request.authorization_id = activation_authorizations.id
+                 AND request.status IN ('requesting', 'reconciling', 'manual')
+             )
            )`,
         [ids, now],
       );
@@ -765,6 +787,13 @@ export class Database {
              SELECT 1 FROM supplier_activations activation
              WHERE activation.authorization_id = activation_authorizations.id
                AND activation.status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'completion_confirming')
+           )
+         )
+         AND NOT (
+           status = 'in_progress' AND EXISTS (
+             SELECT 1 FROM number_acquisition_requests request
+             WHERE request.authorization_id = activation_authorizations.id
+               AND request.status IN ('requesting', 'reconciling', 'manual')
            )
          )`,
       [id, now],

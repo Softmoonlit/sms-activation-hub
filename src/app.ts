@@ -58,6 +58,13 @@ const activationStatusLabels: Record<string, string> = {
   completion_confirming: '完成确认中', completed: '已完成', timed_out: '已超时',
 };
 
+const authorizationEndReasonLabels: Record<string, string> = {
+  admin_revoked: '管理员撤销',
+  result_view_expired: '结果查看期结束',
+  quota_exhausted: '获取额度用尽',
+  claim_window_ended: '领取后期限结束',
+};
+
 function activationStatusLabel(status: string): string {
   return activationStatusLabels[status] ? `${activationStatusLabels[status]}（${status}）` : status;
 }
@@ -212,13 +219,14 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
   const currentActivation = detail.activation ? `<section class="card"><h2>当前供应商激活</h2><ul class="summary"><li><strong>地区：</strong>${escapeHtml(detail.activation.countryName)}</li><li><strong>激活状态：</strong>${escapeHtml(activationStatusLabel(detail.activation.status))}</li><li><strong>号码有效至：</strong>${numberRemaining}</li>${detail.activation.phoneNumber ? `<li><strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}</li>` : ''}${detail.activation.verificationCode ? `<li><strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}</li>` : ''}</ul>${detail.activation.unrecognizedSmsText ? `<h3>无法识别验证码的短信正文</h3><p class="token">${escapeHtml(detail.activation.unrecognizedSmsText)}</p>` : ''}</section>` : '';
   const revoke = detail.canRevoke ? `<p><a href="/${path}/authorizations/${detail.id}/revoke">撤销授权</a></p>` : '';
   const authExpiryIso = detail.expiresAt?.toISOString();
-  const authRemaining = detail.revokedAt
-    ? '已撤销'
+  const authRemaining = detail.endedReason === 'admin_revoked'
+    ? '已结束'
     : authExpiryIso
       ? `<span data-countdown="${authExpiryIso}" data-format="hours-minutes">${escapeHtml(authExpiryIso)}</span>`
       : '领取前永久有效';
   const identifier = detail.recipientIdentifier ?? `链接末 8 位：${detail.tokenSuffix ?? '未知'}`;
-  const lifecycle = `<p>创建时间：${escapeHtml(formatDateTime(detail.createdAt))}</p>${detail.candidates.length > 0 ? `<p>获取额度：${detail.acquisitionCount}/3</p><p>授权到期时间：${authRemaining}</p>` : ''}`;
+  const endReason = detail.endedReason ? authorizationEndReasonLabels[detail.endedReason] ?? detail.endedReason : undefined;
+  const lifecycle = `<p>创建时间：${escapeHtml(formatDateTime(detail.createdAt))}</p>${detail.claimedAt ? `<p>领取时间：${escapeHtml(formatDateTime(detail.claimedAt))}</p>` : ''}${detail.endedAt ? `<p>结束时间：${escapeHtml(formatDateTime(detail.endedAt))}</p>` : ''}${endReason ? `<p>结束原因：${escapeHtml(endReason)}</p>` : ''}${detail.candidates.length > 0 ? `<p>获取额度：${detail.acquisitionCount}/3</p><p>授权到期时间：${authRemaining}</p>` : ''}`;
   const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(identifier)}</h2><p>授权状态：${detail.status}</p>${lifecycle}${revoke}</section>${candidates}${activationSection}${costSection}${currentActivation}</section>${COUNTDOWN_SCRIPT}`;
   return adminPage('激活授权详情', '激活授权详情', path, csrfToken, `/${path}`, '返回首页', content);
 }
@@ -232,7 +240,7 @@ function authorizationRevocationConfirmationPage(path: string, csrfToken: string
   const identifier = detail.recipientIdentifier ?? `链接末 8 位：${detail.tokenSuffix ?? '未知'}`;
   const identityLabel = detail.recipientIdentifier ? '接收者标识' : '链接末 8 位';
   const acquisitionCount = detail.candidates.length > 0 ? `<li><strong>已获取次数：</strong>${detail.acquisitionCount}</li>` : '';
-  const content = `<section class="dashboard"><section class="card"><h2>确认撤销授权</h2><ul class="summary"><li><strong>${identityLabel}：</strong>${escapeHtml(identifier)}</li><li><strong>授权状态：</strong>${detail.status}</li>${activation}${acquisitionCount}<li><strong>撤销后：</strong>${escapeHtml(detail.revocationConsequence ?? '该激活授权已经不可撤销。')}</li></ul><form method="post" action="/${path}/authorizations/${detail.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认撤销授权</button></form></section></section>`;
+  const content = `<section class="dashboard"><section class="card"><h2>确认撤销授权</h2><p class="error">撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。</p><ul class="summary"><li><strong>${identityLabel}：</strong>${escapeHtml(identifier)}</li><li><strong>授权状态：</strong>${detail.status}</li>${activation}${acquisitionCount}<li><strong>撤销后：</strong>${escapeHtml(detail.revocationConsequence ?? '该激活授权已经不可撤销。')}</li></ul><form method="post" action="/${path}/authorizations/${detail.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认撤销授权</button></form></section></section>`;
   return adminPage('确认撤销授权', '确认撤销授权', path, csrfToken, `/${path}/authorizations/${detail.id}`, '返回详情', content);
 }
 

@@ -33,7 +33,7 @@ export interface HeroSmsQuote {
 
 export interface HeroSmsNumber {
   activationId: string;
-  phoneNumber: string;
+  phoneNumber?: string;
   activationCost?: number;
   currency?: string;
   activationTime?: Date;

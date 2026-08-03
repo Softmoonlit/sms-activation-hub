@@ -521,11 +521,20 @@ if (!databaseUrl) {
 
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.equal(confirmation.statusCode, 200);
+      assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
       const revoked = await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {});
       assert.equal(revoked.statusCode, 303);
-      const stored = await database.pool.query<{ token_hash: string | null; status: string }>('SELECT token_hash, status FROM activation_authorizations WHERE id = $1', [id]);
-      assert.equal(stored.rows[0]?.token_hash, null);
-      assert.equal(stored.rows[0]?.status, 'ended');
+      const repeated = await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {});
+      assert.equal(repeated.statusCode, 409);
+      const stored = await database.pool.query<{
+        token_hash: string | null; recipient_session_hash: string | null; status: string; ended_reason: string | null;
+        candidate_count: string;
+      }>(
+        `SELECT auth.token_hash, auth.recipient_session_hash, auth.status, auth.ended_reason,
+                (SELECT count(*)::text FROM authorization_candidate_countries candidate WHERE candidate.authorization_id = auth.id) AS candidate_count
+         FROM activation_authorizations auth WHERE auth.id = $1`, [id],
+      );
+      assert.deepEqual(stored.rows[0], { token_hash: null, recipient_session_hash: null, status: 'ended', ended_reason: 'admin_revoked', candidate_count: '0' });
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
     } finally {
       await cleanupBatchAuthorizations(database);
@@ -2836,8 +2845,13 @@ if (!databaseUrl) {
       assert.equal(cancelCalls, 1);
       assert.equal(getNumberCalls, 2, '跨截止确认的号码不得再次获取');
     } finally {
-      await cleanupBatchAuthorizations(allowed.database);
       await allowed.app.close();
+      const cleanupDatabase = new Database(databaseUrl!);
+      try {
+        await cleanupBatchAuthorizations(cleanupDatabase);
+      } finally {
+        await cleanupDatabase.close();
+      }
     }
   });
 
@@ -3032,7 +3046,7 @@ if (!databaseUrl) {
       }),
       cancelActivation: async (id) => { assert.equal(id, activationId); cancelCalls += 1; return 'cancelled'; },
     });
-    const { app } = await openApplication(heroSms, () => now);
+    const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
       const recipientIdentifier = `撤销确认-${randomUUID()}`;
@@ -3045,6 +3059,7 @@ if (!databaseUrl) {
       const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.equal(confirmation.statusCode, 200);
+      assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
       assert.match(confirmation.body, new RegExp(recipientIdentifier));
       assert.match(confirmation.body, /<strong>授权状态：<\/strong>进行中/);
       assert.match(confirmation.body, /<strong>当前激活状态：<\/strong>waiting_sms/);
@@ -3057,8 +3072,23 @@ if (!databaseUrl) {
       assert.equal(cancelCalls, 1);
       const recipient = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(recipient.statusCode, 404);
+      const state = await database.pool.query<{
+        status: string; ended_reason: string | null; token_hash: string | null; recipient_session_hash: string | null;
+        phone_number: string | null; sms_code: string | null; sms_text: string | null;
+      }>(
+        `SELECT auth.status, auth.ended_reason, auth.token_hash, auth.recipient_session_hash,
+                activation.phone_number, activation.sms_code, activation.sms_text
+         FROM activation_authorizations auth
+         JOIN supplier_activations activation ON activation.authorization_id = auth.id
+         WHERE auth.id = $1`, [id],
+      );
+      assert.deepEqual(state.rows[0], {
+        status: 'ended', ended_reason: 'admin_revoked', token_hash: null, recipient_session_hash: null,
+        phone_number: null, sms_code: null, sms_text: null,
+      });
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /已撤销/);
+      assert.match(detail.body, /授权状态：已结束/);
+      assert.match(detail.body, /结束原因：管理员撤销/);
       assert.match(detail.body, /cancelled/);
       assert.match(detail.body, /已确认退款：0\.80 USD/);
       assert.match(detail.body, /净成本：0\.00 USD/);
@@ -3089,6 +3119,7 @@ if (!databaseUrl) {
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
+      assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
       assert.match(confirmation.body, /将在可取消时请求取消当前供应商激活/);
       assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
       assert.equal(cancelCalls, 0);
@@ -3171,6 +3202,7 @@ if (!databaseUrl) {
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
+      assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
       assert.match(confirmation.body, /只终止接收者访问，不请求供应商取消/);
       assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
       assert.equal(cancelCalls, 0);
@@ -3203,6 +3235,7 @@ if (!databaseUrl) {
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
+      assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
       assert.match(confirmation.body, /先完成供应商对账，确认号码后取消/);
       assert.match(confirmation.body, /<strong>当前地区：<\/strong>美国/);
       assert.match(confirmation.body, /<strong>当前激活状态：<\/strong>(?:获取结果确认中|结果待人工对账)/);
@@ -3217,6 +3250,61 @@ if (!databaseUrl) {
       assert.equal(cancelCalls, 1);
       assert.equal((await restarted.app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
     } finally { await restarted.app.close(); }
+  });
+
+  test('撤销已进入人工对账的供应商激活仍继续取消并确认退款', async () => {
+    let now = new Date('2026-09-04T00:03:00.000Z');
+    const activationId = `revoked-manual-${randomUUID()}`;
+    let cancelCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+        activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => { cancelCalls += 1; return 'cancelled'; },
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `人工对账撤销-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+
+      const authorization = await database.pool.query<{ id: string }>(
+        'SELECT id FROM activation_authorizations WHERE recipient_identifier = $1', [recipientIdentifier],
+      );
+      const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
+      await database.pool.query(
+        `UPDATE supplier_activations
+         SET status = 'manual_reconciliation', timed_out_at = $2, cancel_available_at = $2,
+             refund_reconciliation_status = 'pending'
+         WHERE provider_activation_id = $1`,
+        [activationId, now],
+      );
+
+      const revoked = await post(app, session, `/${config.adminPath}/authorizations/${authorizationId}/revoke`, {});
+      assert.equal(revoked.statusCode, 303);
+      assert.equal(cancelCalls, 1, '人工对账状态也必须进入管理员撤销专用取消任务');
+      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
+
+      const state = await database.pool.query<{
+        authorization_status: string; ended_reason: string | null; activation_status: string;
+        refund_reconciliation_status: string; phone_number: string | null; refund_count: string;
+      }>(
+        `SELECT auth.status AS authorization_status, auth.ended_reason, activation.status AS activation_status,
+                activation.refund_reconciliation_status, activation.phone_number,
+                (SELECT count(*)::text FROM supplier_activation_refunds refund WHERE refund.supplier_activation_id = activation.id) AS refund_count
+         FROM activation_authorizations auth
+         JOIN supplier_activations activation ON activation.authorization_id = auth.id
+         WHERE auth.id = $1`, [authorizationId],
+      );
+      assert.deepEqual(state.rows[0], {
+        authorization_status: 'ended', ended_reason: 'admin_revoked', activation_status: 'cancelled',
+        refund_reconciliation_status: 'resolved', phone_number: null, refund_count: '1',
+      });
+    } finally { await app.close(); }
   });
 
   test('撤销取消响应报告短信送达时，接收者仍被断开且不产生后继号码', async () => {
@@ -3248,6 +3336,58 @@ if (!databaseUrl) {
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } })).statusCode, 404);
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
       assert.match(detail.body, /completion_confirming|completed/);
+    } finally { await app.close(); }
+  });
+
+  test('撤销确认取消后收到更早短信不保留退款事实', async () => {
+    let now = new Date('2026-09-05T01:00:00.000Z');
+    const activationId = `revoked-cancelled-before-sms-${randomUUID()}`;
+    let cancellationCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => { cancellationCalls += 1; return 'cancelled'; },
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const recipientIdentifier = `撤销短信退款竞态-${randomUUID()}`;
+      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const authorizationId = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\/([0-9a-f-]{36})\/revoke`))?.[1]; assert.ok(authorizationId);
+
+      now = new Date('2026-09-05T01:02:00.000Z');
+      assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${authorizationId}/revoke`, {})).statusCode, 303);
+      assert.equal(cancellationCalls, 1);
+
+      const webhook = await app.inject({
+        method: 'POST', url: `/${config.heroSmsWebhookPath}`, remoteAddress: '127.0.0.1',
+        payload: {
+          activationId, service: 'openai', country: 1,
+          receivedAt: '2026-09-05T01:01:00.000Z', text: '验证码 482913', code: '482913',
+        },
+      });
+      assert.equal(webhook.statusCode, 200);
+      const state = await database.pool.query<{
+        authorization_status: string; activation_status: string; refund_count: string;
+        phone_number: string | null; sms_code: string | null; sms_text: string | null;
+      }>(
+        `SELECT auth.status AS authorization_status, activation.status AS activation_status,
+                (SELECT count(*)::text FROM supplier_activation_refunds refund WHERE refund.supplier_activation_id = activation.id) AS refund_count,
+                activation.phone_number, activation.sms_code, activation.sms_text
+         FROM activation_authorizations auth
+         JOIN supplier_activations activation ON activation.authorization_id = auth.id
+         WHERE auth.id = $1`, [authorizationId],
+      );
+      assert.deepEqual(state.rows[0], {
+        authorization_status: 'ended', activation_status: 'completion_confirming', refund_count: '0',
+        phone_number: null, sms_code: null, sms_text: null,
+      });
+      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
     } finally { await app.close(); }
   });
 

@@ -172,8 +172,8 @@ if (!databaseUrl) {
       const legacy = await database.pool.query<{ token_hash: string | null; recipient_session_hash: string | null; status: string }>(
         'SELECT token_hash, recipient_session_hash, status FROM activation_authorizations WHERE id = $1', [legacyAuthorizationId],
       );
-      assert.deepEqual(legacy.rows[0], { token_hash: 'legacy-token-hash', recipient_session_hash: null, status: 'revoked' });
-      assert.equal((await database.authorizationByTokenHash('legacy-token-hash'))?.status, 'revoked');
+      assert.deepEqual(legacy.rows[0], { token_hash: null, recipient_session_hash: null, status: 'revoked' });
+      assert.equal(await database.authorizationByTokenHash('legacy-token-hash'), undefined);
 
       const permanentId = randomUUID();
       await database.pool.query(
