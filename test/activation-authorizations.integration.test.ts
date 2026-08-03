@@ -93,6 +93,13 @@ async function createBatch(app: FastifyInstance, session: { cookie: string; csrf
   return post(app, session, `/${config.adminPath}/authorizations/batch`, { quantity, preflightFingerprint });
 }
 
+function authorizationIdFromHome(body: string, token: string): string {
+  // 与 listArticles 共用同一卡片结构解析，避免两处正则各自漂移
+  const article = listArticles(body).find((item) => item.suffix === token.slice(-8));
+  assert.ok(article, `后台列表应包含链接末 8 位 ${token.slice(-8)}`);
+  return article.id;
+}
+
 async function cleanupBatchAuthorizations(database: Database): Promise<void> {
   await database.transaction(async (client) => {
     const ids = await client.query<{ id: string }>(
@@ -107,6 +114,30 @@ async function cleanupBatchAuthorizations(database: Database): Promise<void> {
     await client.query('DELETE FROM number_acquisition_requests WHERE authorization_id = ANY($1::uuid[])', [authorizationIds]);
     await client.query('DELETE FROM authorization_candidate_countries WHERE authorization_id = ANY($1::uuid[])', [authorizationIds]);
     await client.query('DELETE FROM activation_authorizations WHERE id = ANY($1::uuid[])', [authorizationIds]);
+  });
+}
+
+interface ListArticle { id: string; suffix: string; status: string; }
+function listArticles(body: string): ListArticle[] {
+  const articles: ListArticle[] = [];
+  for (const match of body.matchAll(
+    /<article class="authorization" data-authorization-id="([0-9a-f-]{36})"><span class="authorization-suffix">([\s\S]*?)<\/span><span class="authorization-status">([\s\S]*?)<\/span><a class="authorization-detail"[^>]*>→<\/a><\/article>/g,
+  )) {
+    articles.push({ id: match[1]!, suffix: match[2]!, status: match[3]! });
+  }
+  return articles;
+}
+
+async function resetAuthorizationTables(database: Database): Promise<void> {
+  // 集成测试共享同一个隔离数据库，列表断言需要从干净状态开始。
+  await database.transaction(async (client) => {
+    await client.query('DELETE FROM lifecycle_events');
+    await client.query('DELETE FROM supplier_activation_refunds');
+    await client.query('DELETE FROM supplier_activations');
+    await client.query('DELETE FROM number_acquisition_candidates');
+    await client.query('DELETE FROM number_acquisition_requests');
+    await client.query('DELETE FROM authorization_candidate_countries');
+    await client.query('DELETE FROM activation_authorizations');
   });
 }
 
@@ -511,8 +542,7 @@ if (!databaseUrl) {
       assert.ok(token);
       const suffix = token.slice(-8);
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const id = home.body.match(new RegExp(`链接末 8 位：${suffix}.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1];
-      assert.ok(id);
+      const id = authorizationIdFromHome(home.body, token);
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
       assert.match(detail.body, new RegExp(`链接末 8 位：${suffix}`));
       assert.match(detail.body, /待领取/);
@@ -635,7 +665,7 @@ if (!databaseUrl) {
       assert.doesNotMatch(recipientPage.body, /更换号码/);
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const authorizationId = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(authorizationId);
+      const authorizationId = authorizationIdFromHome(home.body, token);
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
       for (const activationId of activationIds) {
         assert.equal((detail.body.match(new RegExp(activationId, 'g')) ?? []).length, 1);
@@ -867,7 +897,7 @@ if (!databaseUrl) {
       await quotesStarted;
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const authorizationId = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(authorizationId);
+      const authorizationId = authorizationIdFromHome(home.body, token);
       assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${authorizationId}/revoke`, {})).statusCode, 303);
 
       releaseQuotes?.();
@@ -2254,7 +2284,8 @@ if (!databaseUrl) {
       assert.match(page.body, /\+1 415 555 0123/);
       const session = await login(activeRestart);
       const home = await activeRestart.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      assert.match(home.body, new RegExp(`${recipientIdentifier}</strong> · 进行中`));
+      const authorizationId = authorizationIdFromHome(home.body, token);
+      assert.match(home.body, new RegExp(`data-authorization-id="${authorizationId}"[^>]*>[\\s\\S]*?<span class="authorization-status">进行中</span>`));
     } finally { await activeRestart.close(); }
 
     now = new Date('2026-08-14T06:24:00.000Z');
@@ -3056,7 +3087,7 @@ if (!databaseUrl) {
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
       now = new Date('2026-09-01T00:02:00.000Z');
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const id = authorizationIdFromHome(home.body, token);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.equal(confirmation.statusCode, 200);
       assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
@@ -3117,7 +3148,7 @@ if (!databaseUrl) {
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const id = authorizationIdFromHome(home.body, token);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
       assert.match(confirmation.body, /将在可取消时请求取消当前供应商激活/);
@@ -3159,7 +3190,7 @@ if (!databaseUrl) {
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const id = authorizationIdFromHome(home.body, token);
       assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
       assert.equal(cancellationCalls, 0);
     } finally { await app.close(); }
@@ -3200,7 +3231,7 @@ if (!databaseUrl) {
         payload: { activationId, service: 'openai', country: 1, receivedAt: now.toISOString(), text: '验证码 482913', code: '482913' },
       })).statusCode, 200);
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const id = authorizationIdFromHome(home.body, token);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
       assert.match(confirmation.body, /只终止接收者访问，不请求供应商取消/);
@@ -3233,7 +3264,7 @@ if (!databaseUrl) {
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       assert.equal((await app.inject({ method: 'POST', url: `/a/${token}/numbers` })).statusCode, 202);
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const id = authorizationIdFromHome(home.body, token);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
       assert.match(confirmation.body, /先完成供应商对账，确认号码后取消/);
@@ -3329,7 +3360,7 @@ if (!databaseUrl) {
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const id = authorizationIdFromHome(home.body, token);
       assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
       assert.equal(cancellationCalls, 1);
       assert.equal(acquiredNumbers, 1);
@@ -3358,7 +3389,7 @@ if (!databaseUrl) {
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const authorizationId = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\/([0-9a-f-]{36})\/revoke`))?.[1]; assert.ok(authorizationId);
+      const authorizationId = authorizationIdFromHome(home.body, token);
 
       now = new Date('2026-09-05T01:02:00.000Z');
       assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${authorizationId}/revoke`, {})).statusCode, 303);
@@ -3400,7 +3431,7 @@ if (!databaseUrl) {
       const created = await createAuthorization(app, session, { recipientIdentifier });
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const id = home.body.match(new RegExp(`${recipientIdentifier}</strong>.*?authorizations\\/([0-9a-f-]{36})\\/revoke`))?.[1]; assert.ok(id);
+      const id = authorizationIdFromHome(home.body, token);
       const revoked = await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {});
       assert.equal(revoked.statusCode, 303);
       const unavailable = await app.inject({ method: 'GET', url: `/a/${token}` });
@@ -3456,9 +3487,9 @@ if (!databaseUrl) {
       );
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      assert.match(home.body, /已到期/);
-      assert.match(home.body, /等待短信/);
-      assert.match(home.body, /待处理异常/);
+      assert.match(home.body, new RegExp(`data-authorization-id="${authorizationId}"[^>]*>[\\s\\S]*?<span class="authorization-status">已结束</span>`));
+      assert.doesNotMatch(home.body, new RegExp(recipientIdentifier));
+      assert.doesNotMatch(home.body, /已到期|等待短信|待处理异常|退款|费用|供应商激活|当前地区/);
       assert.doesNotMatch(home.body, /\+14155550123|482913|短信正文/);
       const eventsBeforeDetail = await database.pool.query<{ count: string }>(
         'SELECT count(*)::text AS count FROM lifecycle_events WHERE authorization_id = $1', [authorizationId],
@@ -3484,6 +3515,321 @@ if (!databaseUrl) {
         'SELECT count(*)::text AS count FROM lifecycle_events WHERE authorization_id = $1', [authorizationId],
       );
       assert.equal(eventsAfterDetail.rows[0]?.count, eventsBeforeDetail.rows[0]?.count, '读取详情不得写入审计事件');
+    } finally { await app.close(); }
+  });
+
+  test('库存列表空库显示空状态且无分页控件', async () => {
+    const { app, database } = await openApplication();
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(home.statusCode, 200);
+      assert.match(home.body, /尚未创建激活授权。/);
+      assert.doesNotMatch(home.body, /<div class="authorization-list">/);
+      assert.doesNotMatch(home.body, /授权列表分页/);
+    } finally { await app.close(); }
+  });
+
+  test('库存列表每页固定 20 条，覆盖 20、21、40、41 条分页边界', async () => {
+    for (const quantity of [20, 21, 40, 41]) {
+      const now = new Date('2026-08-01T00:00:00.000Z');
+      const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+      await resetAuthorizationTables(database);
+      try {
+        const session = await login(app);
+        const created = await createBatch(app, session, String(quantity));
+        assert.equal(created.statusCode, 201);
+        const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+        assert.equal(links.length, quantity);
+        const expectedSuffixes = new Set(links.map((link) => link.slice(-8)));
+        const totalPages = Math.ceil(quantity / 20);
+        const lastPageSize = quantity % 20 === 0 ? 20 : quantity % 20;
+
+        const first = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+        assert.equal(first.statusCode, 200);
+        const firstArticles = listArticles(first.body);
+        assert.equal(firstArticles.length, Math.min(20, quantity), `首页应展示 ${Math.min(20, quantity)} 条`);
+        assert.match(first.body, new RegExp(`第 1 / ${totalPages} 页`));
+        assert.match(first.body, /class="pagination-previous disabled" aria-disabled="true"/);
+        if (totalPages > 1) {
+          assert.match(first.body, new RegExp(`class="pagination-next" href="/${config.adminPath}\\?page=2"`));
+        } else {
+          assert.match(first.body, /class="pagination-next disabled" aria-disabled="true"/);
+        }
+        const repeated = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+        assert.deepEqual(listArticles(repeated.body).map((article) => article.suffix), firstArticles.map((article) => article.suffix), '分页列表顺序应稳定');
+
+        const seen = new Set<string>();
+        for (const article of firstArticles) {
+          assert.match(article.suffix, /^[A-Za-z0-9_-]{8}$/);
+          assert.equal(article.status, '待领取');
+          assert.ok(expectedSuffixes.has(article.suffix));
+          assert.ok(!seen.has(article.suffix), `后缀 ${article.suffix} 在分页中重复`);
+          seen.add(article.suffix);
+        }
+
+        if (totalPages > 1) {
+          for (let page = 2; page <= totalPages; page += 1) {
+            const response = await app.inject({ method: 'GET', url: `/${config.adminPath}?page=${page}`, headers: { cookie: session.cookie } });
+            assert.equal(response.statusCode, 200);
+            const articles = listArticles(response.body);
+            assert.equal(articles.length, page === totalPages ? lastPageSize : 20, `第 ${page} 页应展示 ${page === totalPages ? lastPageSize : 20} 条`);
+            assert.match(response.body, new RegExp(`第 ${page} / ${totalPages} 页`));
+            // 第 2 页的上一页回到无参数的默认列表，更靠后的页保留页码
+            assert.match(response.body, page === 2
+              ? /class="pagination-previous" href="\/control7">/
+              : /class="pagination-previous" href="\/control7\?page=\d+">/);
+            if (page === totalPages) {
+              assert.match(response.body, /class="pagination-next disabled" aria-disabled="true"/);
+            } else {
+              assert.match(response.body, /class="pagination-next" href="\/control7\?page=\d+"/);
+            }
+            for (const article of articles) {
+              assert.ok(expectedSuffixes.has(article.suffix), `页面不应出现未知后缀 ${article.suffix}`);
+              assert.ok(!seen.has(article.suffix), `后缀 ${article.suffix} 在分页中重复`);
+              seen.add(article.suffix);
+            }
+          }
+          // 越界页码钳制到最后一页
+          const clamped = await app.inject({ method: 'GET', url: `/${config.adminPath}?page=999`, headers: { cookie: session.cookie } });
+          assert.equal(clamped.statusCode, 200);
+          assert.equal(listArticles(clamped.body).length, lastPageSize);
+          assert.match(clamped.body, new RegExp(`第 ${totalPages} / ${totalPages} 页`));
+        }
+        assert.equal(seen.size, quantity, '所有记录都应恰好出现一次');
+      } finally { await app.close(); }
+    }
+  });
+
+  test('库存列表四个顶层状态筛选并兼容展示旧状态', async () => {
+    const { app, database } = await openApplication();
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '7');
+      assert.equal(created.statusCode, 201);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 7);
+      const transitions: Array<[string, string]> = [
+        ['in_progress', links[0]!], ['result_available', links[1]!], ['sms_delivered', links[2]!],
+        ['quota_exhausted', links[3]!], ['revoked', links[4]!], ['expired', links[5]!],
+      ];
+      for (const [status, link] of transitions) {
+        const updated = await database.pool.query('UPDATE activation_authorizations SET status = $2 WHERE token_suffix = $1', [link.slice(-8), status]);
+        assert.equal(updated.rowCount, 1);
+      }
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(home.statusCode, 200);
+      assert.equal(listArticles(home.body).length, 7);
+      // 列表卡片不暴露接收者标识、供应商状态、费用、退款、时间或异常正文
+      assert.doesNotMatch(home.body, /供应商激活|累计激活费用|已确认退款|净成本|短信正文|待处理异常|等待短信|\+14155550123|482913/);
+
+      const assertFilter = async (status: string, expectedSuffixes: string[], expectedStatusLabel: string): Promise<void> => {
+        const response = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=${status}`, headers: { cookie: session.cookie } });
+        assert.equal(response.statusCode, 200);
+        const articles = listArticles(response.body);
+        assert.deepEqual(new Set(articles.map((article) => article.suffix)), new Set(expectedSuffixes), `状态 ${status} 应命中 ${expectedSuffixes.length} 条`);
+        assert.ok(articles.every((article) => article.status === expectedStatusLabel), `状态 ${status} 应显示 ${expectedStatusLabel}`);
+        assert.match(response.body, new RegExp(`<option value="${status}" selected>`));
+      };
+      await assertFilter('unclaimed', [links[6]!.slice(-8)], '待领取');
+      await assertFilter('in_progress', [links[0]!.slice(-8)], '进行中');
+      await assertFilter('result_available', [links[1]!.slice(-8), links[2]!.slice(-8)], '结果可查看');
+      await assertFilter('ended', [links[3]!.slice(-8), links[4]!.slice(-8), links[5]!.slice(-8)], '已结束');
+    } finally { await app.close(); }
+  });
+
+  test('库存列表按末 8 位大小写敏感精确搜索，接收者标识不能命中', async () => {
+    const { app, database } = await openApplication();
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '3');
+      assert.equal(created.statusCode, 201);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 3);
+      // 改写后缀以精确控制大小写差异（Base64URL 实际字符，不做模糊匹配）
+      const suffixes = ['AAAA1111', 'aaaa1111', 'BBBB2222'];
+      for (const [index, link] of links.entries()) {
+        const updated = await database.pool.query('UPDATE activation_authorizations SET token_suffix = $2 WHERE token_suffix = $1', [link.slice(-8), suffixes[index]!]);
+        assert.equal(updated.rowCount, 1);
+      }
+
+      const search = async (suffix: string): Promise<InjectionResponse> =>
+        app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${suffix}`, headers: { cookie: session.cookie } });
+
+      const upper = await search('AAAA1111');
+      assert.equal(upper.statusCode, 200);
+      assert.deepEqual(listArticles(upper.body).map((article) => article.suffix), ['AAAA1111']);
+
+      // 大小写敏感：小写变体命中不同记录，混合大小写命中不了任何记录
+      const lower = await search('aaaa1111');
+      assert.deepEqual(listArticles(lower.body).map((article) => article.suffix), ['aaaa1111']);
+      const mixedCase = await search('AAAa1111');
+      assert.equal(listArticles(mixedCase.body).length, 0);
+      assert.match(mixedCase.body, /没有符合条件的激活授权。/);
+
+      const other = await search('BBBB2222');
+      assert.deepEqual(listArticles(other.body).map((article) => article.suffix), ['BBBB2222']);
+
+      // 接收者标识不能命中末 8 位搜索
+      const identifier = 'ABCD1234-用户';
+      const individual = await createAuthorization(app, session, { recipientIdentifier: identifier });
+      assert.equal(individual.statusCode, 201);
+      const byIdentifier = await search('ABCD1234');
+      assert.equal(listArticles(byIdentifier.body).length, 0);
+      assert.match(byIdentifier.body, /没有符合条件的激活授权。/);
+
+      // 搜索与状态筛选组合保留
+      const combined = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=unclaimed&suffix=AAAA1111`, headers: { cookie: session.cookie } });
+      assert.deepEqual(listArticles(combined.body).map((article) => article.suffix), ['AAAA1111']);
+    } finally { await app.close(); }
+  });
+
+  test('库存列表按最近活动倒序与稳定次级排序，只读详情不重排', async () => {
+    const now = new Date('2026-08-01T00:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '3');
+      assert.equal(created.statusCode, 201);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 3);
+      const [oldest, middle, newest] = links.map((link) => link.slice(-8));
+      const base = new Date('2026-08-01T00:00:00.000Z');
+      await database.pool.query('UPDATE activation_authorizations SET last_activity_at = $2 WHERE token_suffix = $1', [newest!, new Date(base.getTime() + 30 * 60 * 1000)]);
+      await database.pool.query('UPDATE activation_authorizations SET last_activity_at = $2 WHERE token_suffix = $1', [middle!, new Date(base.getTime() + 20 * 60 * 1000)]);
+      // oldest 保持 last_activity_at = created_at，验证缺失活动时间回落到创建时间
+
+      const first = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(first.statusCode, 200);
+      assert.deepEqual(listArticles(first.body).map((article) => article.suffix), [newest, middle, oldest]);
+
+      // 读取只读详情不得重排列表，也不得推进活动时间
+      const oldestArticle = listArticles(first.body).find((article) => article.suffix === oldest); assert.ok(oldestArticle);
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${oldestArticle.id}`, headers: { cookie: session.cookie } });
+      assert.equal(detail.statusCode, 200);
+      const second = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.deepEqual(listArticles(second.body).map((article) => article.suffix), [newest, middle, oldest]);
+      const stored = await database.pool.query<{ last_activity_at: Date | null }>('SELECT last_activity_at FROM activation_authorizations WHERE token_suffix = $1', [oldest]);
+      assert.equal(stored.rows[0]?.last_activity_at?.toISOString(), base.toISOString(), '只读详情不得推进活动时间');
+
+      // 相同最近活动时间的记录按稳定次级键排序，两次查询顺序一致
+      const secondBatch = await createBatch(app, session, '3');
+      assert.equal(secondBatch.statusCode, 201);
+      const secondLinks = [...secondBatch.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(secondLinks.length, 3);
+      const tie = new Date('2026-08-01T02:00:00.000Z');
+      for (const link of secondLinks) {
+        await database.pool.query('UPDATE activation_authorizations SET last_activity_at = $2 WHERE token_suffix = $1', [link.slice(-8), tie]);
+      }
+      const third = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const thirdSuffixes = listArticles(third.body).map((article) => article.suffix);
+      assert.equal(thirdSuffixes.length, 6);
+      assert.deepEqual(new Set(thirdSuffixes.slice(0, 3)), new Set(secondLinks.map((link) => link.slice(-8))));
+      assert.deepEqual(thirdSuffixes.slice(3), [newest, middle, oldest]);
+      const fourth = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.deepEqual(listArticles(fourth.body).map((article) => article.suffix), thirdSuffixes);
+    } finally { await app.close(); }
+  });
+
+  test('关键业务事实推进库存活动时间，轮询与无新事实重试不推进', async () => {
+    let now = new Date('2026-08-09T00:00:00.000Z');
+    const heroSms = scriptedHeroSms({
+      getNumber: async (_serviceCode, countryId) => ({
+        activationId: `fact-advance-${countryId}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session, { recipientIdentifier: `排序事实-${randomUUID()}` });
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const idResult = await database.pool.query<{ id: string }>('SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)]);
+      const authorizationId = idResult.rows[0]?.id; assert.ok(authorizationId);
+      const activityAt = async (): Promise<string> => {
+        const result = await database.pool.query<{ last_activity_at: Date | null }>('SELECT last_activity_at FROM activation_authorizations WHERE id = $1', [authorizationId]);
+        const value = result.rows[0]?.last_activity_at; assert.ok(value);
+        return value.toISOString();
+      };
+      assert.equal(await activityAt(), '2026-08-09T00:00:00.000Z', '创建是初始业务事实');
+
+      // 领取并成功取得供应商激活（真实业务事实）推进活动时间
+      now = new Date('2026-08-09T00:01:00.000Z');
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      assert.equal(await activityAt(), '2026-08-09T00:01:00.000Z', '领取与号码取得应推进活动时间');
+
+      // 有效短信送达（真实业务事实）推进活动时间
+      now = new Date('2026-08-09T00:02:00.000Z');
+      const webhook = await app.inject({
+        method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+        payload: { activationId: 'fact-advance-1', service: 'openai', country: 1, receivedAt: now.toISOString(), code: '482913', text: 'Your code is 482913' },
+      });
+      assert.equal(webhook.statusCode, 200);
+      // 送达后的完成确认是后台异步任务（setImmediate），等待其落定后再断言，避免竞态
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(await activityAt(), '2026-08-09T00:02:00.000Z', '短信送达应推进活动时间');
+
+      // 无新事实的换号重试与只读访问不得推进活动时间
+      now = new Date('2026-08-09T00:02:30.000Z');
+      const replacement = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replacement.statusCode, 409);
+      const readDetail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
+      assert.equal(readDetail.statusCode, 200);
+      const readList = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(readList.statusCode, 200);
+      assert.equal(await activityAt(), '2026-08-09T00:02:00.000Z', '轮询与无新事实重试不得推进活动时间');
+
+      // 管理员撤销（真实业务事实）推进活动时间
+      now = new Date('2026-08-09T00:05:00.000Z');
+      const revoked = await post(app, session, `/${config.adminPath}/authorizations/${authorizationId}/revoke`, {});
+      assert.equal(revoked.statusCode, 303);
+      assert.equal(await activityAt(), '2026-08-09T00:05:00.000Z', '撤销应推进活动时间');
+    } finally { await app.close(); }
+  });
+
+  test('旧撤销历史缺少后缀时展示未知标记，不伪造后缀也不恢复访问能力', async () => {
+    const now = new Date('2026-08-01T00:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '1');
+      assert.equal(created.statusCode, 201);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const suffix = token.slice(-8);
+      // 模拟旧模型撤销历史：没有保存后缀，也没有任何访问凭据
+      const updated = await database.pool.query(
+        "UPDATE activation_authorizations SET token_suffix = NULL, token_hash = NULL, status = 'revoked', revoked_at = $2, ended_at = $2, ended_reason = 'admin_revoked' WHERE token_suffix = $1",
+        [suffix, now],
+      );
+      assert.equal(updated.rowCount, 1);
+      const idResult = await database.pool.query<{ id: string }>('SELECT id FROM activation_authorizations WHERE token_hash IS NULL AND status = \'revoked\' LIMIT 1');
+      const authorizationId = idResult.rows[0]?.id; assert.ok(authorizationId);
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(home.statusCode, 200);
+      const articles = listArticles(home.body);
+      assert.equal(articles.length, 1);
+      assert.equal(articles[0]?.suffix, '链接末 8 位未知', '不得伪造缺失的后缀');
+      assert.equal(articles[0]?.status, '已结束');
+      assert.ok([...home.body.matchAll(/href="([^"]+)"/g)].every((match) => !match[1]!.includes('/a/')), '列表不得提供公开链接入口');
+
+      // 详情页仍可打开，同样不伪造后缀
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
+      assert.equal(detail.statusCode, 200);
+      assert.match(detail.body, /链接末 8 位：未知/);
     } finally { await app.close(); }
   });
 }

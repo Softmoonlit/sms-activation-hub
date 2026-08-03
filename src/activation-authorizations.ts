@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import type { PoolClient } from 'pg';
 
-import { AUTHORIZATION_STATUS_LABELS, AuthorizationTokenSuffixCollisionError, Database, type AuthorizationStatus } from './database.js';
+import { AUTHORIZATION_STATUS_LABELS, AuthorizationTokenSuffixCollisionError, Database, type AuthorizationListDisplayStatus, type AuthorizationListPage, type AuthorizationListQuery, type AuthorizationStatus } from './database.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsQuote } from './herosms.js';
 
 const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -40,23 +40,15 @@ export interface AuthorizationPreflight {
 
 export interface AuthorizationSummary {
   id: string;
-  recipientIdentifier?: string;
   tokenSuffix?: string;
-  internalNote?: string;
-  status: '待领取' | '进行中' | '结果可查看' | '已结束' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
-  createdAt: Date;
-  expiresAt?: Date;
-  lastActivityAt: Date;
-  canRevoke: boolean;
-  currentActivationStatus?: string;
-  hasPendingException: boolean;
+  status: '待领取' | '进行中' | '结果可查看' | '已结束';
 }
 
 export interface AuthorizationDetail {
   id: string;
   recipientIdentifier?: string;
   tokenSuffix?: string;
-  status: AuthorizationSummary['status'];
+  status: AuthorizationListDisplayStatus;
   createdAt: Date;
   claimedAt?: Date;
   expiresAt?: Date;
@@ -473,8 +465,8 @@ export class ActivationAuthorizations {
     }
   }
 
-  async list(): Promise<AuthorizationSummary[]> {
-    return this.database.listActivationAuthorizations(this.now());
+  async list(query: AuthorizationListQuery = {}): Promise<AuthorizationListPage> {
+    return this.database.listActivationAuthorizations(query, this.now());
   }
 
   async revoke(id: string): Promise<boolean> {
@@ -1020,6 +1012,10 @@ export class ActivationAuthorizations {
       if (!authorizationId) return;
       await client.query('SELECT id FROM activation_authorizations WHERE id = $1 FOR UPDATE', [authorizationId]);
       await client.query(update, outcome === 'completed' ? [activationId, this.now()] : [activationId]);
+      // 完成确认和异常终局是真实业务事实；release 只是释放任务锁，不推进活动时间。
+      if (outcome !== 'release') {
+        await this.touchLastActivity(client, authorizationId, this.now());
+      }
     });
   }
 
@@ -1107,26 +1103,34 @@ export class ActivationAuthorizations {
   async reconcileTimedOutActivations(authorizationId?: string): Promise<void> {
     const now = this.now();
     // 号码有效窗口到期后先进入供应商对账；只有确认窗口内未送达，才进入“已超时”明确终态。
+    // 异常状态形成（进入人工对账）是真实业务事实，同时推进父授权活动时间。
     await this.database.pool.query(
-      `UPDATE supplier_activations
-       SET status = 'manual_reconciliation', timed_out_at = COALESCE(timed_out_at, $1),
-           refund_reconciliation_status = 'pending', timeout_reconciliation_claimed_at = NULL,
-           timeout_reconciliation_claim_token = NULL, replacement_pending = false, end_use_pending = false,
-           authorization_expiry_cancellation_pending = false,
-           authorization_revocation_cancellation_pending = false,
-           authorization_revocation_cancellation_retry_after = NULL,
-           sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
-       WHERE id IN (
-         SELECT id FROM supplier_activations
-         WHERE status IN ('waiting_sms', 'cancellation_confirming') AND expires_at <= $1
-           AND ($2::uuid IS NULL OR authorization_id = $2)
-           AND NOT EXISTS (
-             SELECT 1 FROM activation_authorizations auth
-             WHERE auth.id = supplier_activations.authorization_id
-               AND auth.status = 'ended' AND auth.ended_reason = 'admin_revoked'
-           )
-         ORDER BY expires_at FOR UPDATE SKIP LOCKED
-       )`,
+      `WITH moved AS (
+         UPDATE supplier_activations
+         SET status = 'manual_reconciliation', timed_out_at = COALESCE(timed_out_at, $1),
+             refund_reconciliation_status = 'pending', timeout_reconciliation_claimed_at = NULL,
+             timeout_reconciliation_claim_token = NULL, replacement_pending = false, end_use_pending = false,
+             authorization_expiry_cancellation_pending = false,
+             authorization_revocation_cancellation_pending = false,
+             authorization_revocation_cancellation_retry_after = NULL,
+             sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
+         WHERE id IN (
+           SELECT id FROM supplier_activations
+           WHERE status IN ('waiting_sms', 'cancellation_confirming') AND expires_at <= $1
+             AND ($2::uuid IS NULL OR authorization_id = $2)
+             AND NOT EXISTS (
+               SELECT 1 FROM activation_authorizations auth
+               WHERE auth.id = supplier_activations.authorization_id
+                 AND auth.status = 'ended' AND auth.ended_reason = 'admin_revoked'
+             )
+           ORDER BY expires_at FOR UPDATE SKIP LOCKED
+         )
+         RETURNING authorization_id
+       )
+       UPDATE activation_authorizations auth
+       SET last_activity_at = $1
+       FROM moved
+       WHERE auth.id = moved.authorization_id`,
       [now, authorizationId ?? null],
     );
 
@@ -1247,6 +1251,8 @@ export class ActivationAuthorizations {
          WHERE id = $1`,
         [activationId],
       );
+      // 供应商超时确认是推动父授权排序的真实业务事实。
+      await this.touchLastActivity(client, confirmedAuthorizationId, this.now());
       await this.endForExhaustedQuota(client, confirmedAuthorizationId, this.now());
     });
   }
@@ -1302,6 +1308,14 @@ export class ActivationAuthorizations {
            WHERE id = $1 AND status = 'in_progress'`,
           [confirmedAuthorizationId, viewUntil, now],
         );
+      } else {
+        // 授权已处于结果可查看时，超时恢复送达的短信同样是新事实。
+        await client.query(
+          `UPDATE activation_authorizations
+           SET last_activity_at = $2
+           WHERE id = $1 AND status = 'result_available'`,
+          [confirmedAuthorizationId, now],
+        );
       }
     });
   }
@@ -1328,8 +1342,8 @@ export class ActivationAuthorizations {
 
   private async resolveTimeoutRefund(activationId: string, claimToken: string, refundConfirmed: boolean): Promise<void> {
     await this.database.transaction(async (client) => {
-      const result = await client.query<{ activation_cost: string; currency: string }>(
-        `SELECT activation_cost::text, currency FROM supplier_activations
+      const result = await client.query<{ authorization_id: string; activation_cost: string; currency: string }>(
+        `SELECT authorization_id, activation_cost::text, currency FROM supplier_activations
          WHERE id = $1 AND status = 'timed_out' AND timeout_reconciliation_claim_token = $2 FOR UPDATE`,
         [activationId, claimToken],
       );
@@ -1341,6 +1355,8 @@ export class ActivationAuthorizations {
            VALUES ($1, $2, $3, $4) ON CONFLICT (supplier_activation_id) DO NOTHING`,
           [activationId, activation.activation_cost, activation.currency, this.now()],
         );
+        // 退款确认是真实业务事实，推动父授权排序。
+        await this.touchLastActivity(client, activation.authorization_id, this.now());
       }
       await client.query(
         `UPDATE supplier_activations
@@ -1350,6 +1366,14 @@ export class ActivationAuthorizations {
         [activationId, claimToken],
       );
     });
+  }
+
+  /** 列表排序的唯一事实推进入口：只有真实业务事实才更新父授权最近活动时间。 */
+  private async touchLastActivity(client: PoolClient, authorizationId: string, at: Date): Promise<void> {
+    await client.query(
+      'UPDATE activation_authorizations SET last_activity_at = $2 WHERE id = $1',
+      [authorizationId, at],
+    );
   }
 
   private async expireAuthorization(client: PoolClient, authorizationId: string, now: Date): Promise<void> {
@@ -1622,6 +1646,8 @@ export class ActivationAuthorizations {
          VALUES ($1, $2, $3, $4) ON CONFLICT (supplier_activation_id) DO NOTHING`,
         [activation.id, activation.activation_cost, activation.currency, confirmedAt],
       );
+      // 供应商取消确认和退款事实推动父授权排序。
+      await this.touchLastActivity(client, activation.authorization_id, confirmedAt);
       return { authorizationId: activation.authorization_id, replacementAllowed, ended: endsUse };
     });
   }
@@ -1992,7 +2018,7 @@ export class ActivationAuthorizations {
           // 兼容旧的逐条创建路径：其候选快照和创建期限仍由旧流程维护。
           sessionToken = randomBytes(32).toString('base64url');
           await client.query(
-            "UPDATE activation_authorizations SET status = 'in_progress', claimed_at = COALESCE(claimed_at, $2), recipient_session_hash = $3 WHERE id = $1 AND status = 'unclaimed'",
+            "UPDATE activation_authorizations SET status = 'in_progress', claimed_at = COALESCE(claimed_at, $2), recipient_session_hash = $3, last_activity_at = $2 WHERE id = $1 AND status = 'unclaimed'",
             [authorization.id, now, tokenHash(sessionToken)],
           );
           newlyClaimed = true;
@@ -2086,12 +2112,17 @@ export class ActivationAuthorizations {
     return this.withAcquisitionLock(async (client) => {
       await client.query('BEGIN');
       try {
-        const updated = await client.query(
+        const updated = await client.query<{ authorization_id: string }>(
           `UPDATE number_acquisition_requests SET status = 'confirmed_absent', updated_at = $2
-           WHERE id = $1 AND status IN ('requesting', 'reconciling', 'manual')`,
+           WHERE id = $1 AND status IN ('requesting', 'reconciling', 'manual')
+           RETURNING authorization_id`,
           [id, this.now()],
         );
-        if (updated.rowCount) await client.query('DELETE FROM number_acquisition_candidates WHERE request_id = $1', [id]);
+        if (updated.rowCount) {
+          await client.query('DELETE FROM number_acquisition_candidates WHERE request_id = $1', [id]);
+          // 管理员确认未产生激活是真实业务事实，推动父授权排序。
+          await this.touchLastActivity(client, updated.rows[0]!.authorization_id, this.now());
+        }
         await client.query('COMMIT');
         return updated.rowCount === 1;
       } catch (error) {
@@ -2149,6 +2180,8 @@ export class ActivationAuthorizations {
         );
         await client.query("UPDATE number_acquisition_requests SET status = 'resolved', updated_at = $2 WHERE id = $1", [id, this.now()]);
         await client.query('DELETE FROM number_acquisition_candidates WHERE request_id = $1', [id]);
+        // 对账确认已有供应商激活是真实业务事实，推动父授权排序。
+        await this.touchLastActivity(client, request.authorization_id, this.now());
       });
       return true;
     }
@@ -2297,6 +2330,8 @@ export class ActivationAuthorizations {
         new Date(normalizedTimes.acquiredAt.getTime() + 2 * 60 * 1000), normalizedTimes.expiresAt,
         deliverable ? normalizedTimes.acquiredAt : null, !deliverable && !terminalAccess, terminalAccess],
     );
+    // 成功取得供应商激活（含同步获取与异步对账唯一归属）是推动列表排序的真实业务事实。
+    await this.touchLastActivity(client, authorizationId, confirmedAt);
     return deliverable;
   }
 }

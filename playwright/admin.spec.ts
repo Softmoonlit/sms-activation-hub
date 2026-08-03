@@ -148,7 +148,8 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
   try {
     const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
     const recipientId = `detail-test-${randomUUID()}`;
-    await createAuthorization(app, cookie, csrf, recipientId);
+    const token = await createAuthorization(app, cookie, csrf, recipientId);
+    const suffix = token.slice(-8);
 
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
@@ -157,12 +158,14 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
       { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
     ]);
 
-    // 首页找到新建的授权
+    // 首页按链接末 8 位找到新建的授权，列表不显示接收者标识
     await page.goto(`${origin}/${config.adminPath}`);
-    await expect(page.getByText(recipientId)).toBeVisible();
+    await expect(page.getByText(recipientId)).toHaveCount(0);
+    const card = page.locator('article.authorization').filter({ hasText: suffix });
+    await expect(card).toBeVisible();
 
     // 查看详情
-    await page.locator('article.authorization').filter({ hasText: recipientId }).getByRole('link', { name: '查看详情' }).click();
+    await card.getByRole('link', { name: '查看详情' }).click();
     await expect(page.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
     await expect(page.getByText('授权状态：')).toBeVisible();
     await expect(page.getByText('获取额度：')).toBeVisible();
@@ -487,3 +490,136 @@ async function assertNoOverflow(page: Page, context: string): Promise<void> {
   });
   assert.deepEqual(overflow, [], `${context} 中存在元素水平溢出：${overflow.join(', ')}`);
 }
+
+/** 辅助函数：批量创建授权链接，返回全部 token */
+async function createBatch(app: App, cookie: string, csrf: string, quantity: string): Promise<string[]> {
+  const preview = await app.inject({
+    method: 'POST', url: `/${config.adminPath}/authorizations/batch/preview`,
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', origin },
+    payload: new URLSearchParams({ csrf, quantity }).toString(),
+  });
+  const fingerprint = preview.body.match(/name="preflightFingerprint" value="([A-Za-z0-9_-]+)"/)?.[1]; assert.ok(fingerprint);
+  const created = await app.inject({
+    method: 'POST', url: `/${config.adminPath}/authorizations/batch`,
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', origin },
+    payload: new URLSearchParams({ csrf, quantity, preflightFingerprint: fingerprint }).toString(),
+  });
+  assert.equal(created.statusCode, 201);
+  const links = [...created.body.matchAll(/\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+  assert.equal(links.length, Number(quantity));
+  return links;
+}
+
+/** 辅助函数：清空授权相关表，让列表断言从干净状态开始 */
+async function resetAuthorizationTables(database: Database): Promise<void> {
+  await database.transaction(async (client) => {
+    await client.query('DELETE FROM lifecycle_events');
+    await client.query('DELETE FROM supplier_activation_refunds');
+    await client.query('DELETE FROM supplier_activations');
+    await client.query('DELETE FROM number_acquisition_candidates');
+    await client.query('DELETE FROM number_acquisition_requests');
+    await client.query('DELETE FROM authorization_candidate_countries');
+    await client.query('DELETE FROM activation_authorizations');
+  });
+}
+
+test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选、精确搜索与详情箭头', async ({ browser }) => {
+  const database = new Database(databaseUrl!);
+  const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
+  await app.listen({ host: '127.0.0.1', port: 32124 });
+  try {
+    const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
+    await resetAuthorizationTables(database);
+    const links = await createBatch(app, cookie, csrf, '25');
+    const searchSuffix = links[0]!.slice(-8);
+
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const page = await context.newPage();
+    await context.addCookies([
+      { name: 'admin_session', value: sessionValue, domain: '127.0.0.1', path: '/' },
+      { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
+    ]);
+
+    // 首页每页恰好 20 条，卡片只含后缀、状态与箭头
+    await page.goto(`${origin}/${config.adminPath}`);
+    await expect(page.locator('article.authorization')).toHaveCount(20);
+    await expect(page.locator('article.authorization .authorization-suffix').first()).toBeVisible();
+    await expect(page.locator('article.authorization .authorization-status').first()).toHaveText('待领取');
+    await expect(page.locator('article.authorization .authorization-detail').first()).toBeVisible();
+    await expect(page.getByText('第 1 / 2 页')).toBeVisible();
+    await assertNoOverflow(page, '库存列表第一页');
+
+    // 点击第一页某条卡片上的详情箭头进入对应详情
+    const firstCard = page.locator('article.authorization').first();
+    const firstCardSuffix = await firstCard.locator('.authorization-suffix').textContent();
+    assert.ok(firstCardSuffix);
+    await firstCard.getByRole('link', { name: '查看详情' }).click();
+    await expect(page.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
+    await page.goBack();
+
+    // 状态筛选保留条件，翻页后筛选条件保留在 URL 中
+    await page.locator('select[name="status"]').selectOption('unclaimed');
+    await page.getByRole('button', { name: '筛选' }).click();
+    // 空搜索框也会提交 suffix= 参数，但空值不会参与筛选
+    await expect(page).toHaveURL(new RegExp(`status=unclaimed`));
+    await expect(page.locator('article.authorization')).toHaveCount(20);
+    await page.getByRole('link', { name: '下一页' }).click();
+    await expect(page).toHaveURL(`${origin}/${config.adminPath}?page=2&status=unclaimed`);
+    await expect(page.locator('article.authorization')).toHaveCount(5);
+    await expect(page.getByText('第 2 / 2 页')).toBeVisible();
+    await page.getByRole('link', { name: '上一页' }).click();
+    await expect(page).toHaveURL(`${origin}/${config.adminPath}?status=unclaimed`);
+
+    // 末 8 位精确搜索（大小写敏感）与状态筛选组合
+    await page.locator('input[name="suffix"]').fill(searchSuffix);
+    await page.getByRole('button', { name: '筛选' }).click();
+    await expect(page).toHaveURL(`${origin}/${config.adminPath}?status=unclaimed&suffix=${searchSuffix}`);
+    await expect(page.locator('article.authorization')).toHaveCount(1);
+    await expect(page.locator('.authorization-suffix')).toHaveText(searchSuffix);
+
+    // 状态筛选无匹配时显示空状态
+    await page.locator('select[name="status"]').selectOption('ended');
+    await page.getByRole('button', { name: '筛选' }).click();
+    await expect(page.getByText('没有符合条件的激活授权。')).toBeVisible();
+    await expect(page.locator('article.authorization')).toHaveCount(0);
+
+    await context.close();
+  } finally {
+    await app.close();
+  }
+});
+
+test('移动视口库存列表 20 条紧凑卡片不重叠、箭头固定尺寸且无横向溢出', async ({ browser }) => {
+  const database = new Database(databaseUrl!);
+  const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
+  await app.listen({ host: '127.0.0.1', port: 32124 });
+  try {
+    const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
+    await resetAuthorizationTables(database);
+    await createBatch(app, cookie, csrf, '20');
+
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const page = await context.newPage();
+    await context.addCookies([
+      { name: 'admin_session', value: sessionValue, domain: '127.0.0.1', path: '/' },
+      { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
+    ]);
+    await page.goto(`${origin}/${config.adminPath}`);
+
+    await expect(page.locator('article.authorization')).toHaveCount(20);
+    await assertNoOverflow(page, '移动视口库存列表');
+
+    // 详情箭头固定 40x40，相邻卡片不重叠
+    const arrowBox = await page.locator('.authorization-detail').first().boundingBox();
+    assert.ok(arrowBox, '详情箭头应有布局框');
+    assert.ok(Math.abs(arrowBox.width - 40) < 1 && Math.abs(arrowBox.height - 40) < 1, `箭头应为 40x40，实际 ${arrowBox.width}x${arrowBox.height}`);
+    const tops = await page.locator('article.authorization').evaluateAll((articles) => articles.map((article) => article.getBoundingClientRect().top));
+    for (let index = 1; index < tops.length; index += 1) {
+      assert.ok(tops[index]! > tops[index - 1]!, '相邻卡片不得重叠');
+    }
+
+    await context.close();
+  } finally {
+    await app.close();
+  }
+});

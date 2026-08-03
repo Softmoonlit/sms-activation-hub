@@ -11,6 +11,33 @@ export type AuthorizationStatus =
   | 'expired';
 
 export type AuthorizationListDisplayStatus = '待领取' | '进行中' | '结果可查看' | '已结束' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
+export type AuthorizationListTopLevelStatus = 'unclaimed' | 'in_progress' | 'result_available' | 'ended';
+
+export const AUTHORIZATION_LIST_PAGE_SIZE = 20;
+
+export interface AuthorizationListQuery {
+  page?: number;
+  status?: AuthorizationListTopLevelStatus;
+  tokenSuffix?: string;
+}
+
+export interface AuthorizationListRecord {
+  id: string;
+  tokenSuffix?: string;
+  status: '待领取' | '进行中' | '结果可查看' | '已结束';
+}
+
+export interface AuthorizationListPage {
+  items: AuthorizationListRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
+  status?: AuthorizationListTopLevelStatus;
+  tokenSuffix?: string;
+}
 
 export interface AuthorizationListItem {
   id: string;
@@ -30,6 +57,26 @@ export const AUTHORIZATION_STATUS_LABELS: Record<AuthorizationStatus, Authorizat
   unclaimed: '待领取', in_progress: '进行中', result_available: '结果可查看', ended: '已结束',
   sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期',
 };
+
+export const AUTHORIZATION_LIST_STATUS_LABELS: Record<AuthorizationListTopLevelStatus, AuthorizationListRecord['status']> = {
+  unclaimed: '待领取', in_progress: '进行中', result_available: '结果可查看', ended: '已结束',
+};
+
+/** 各顶层状态对应的底层状态集合：列表筛选与顶层归一展示共用同一份定义，旧状态不会从列表中消失。 */
+export const AUTHORIZATION_LIST_STATUS_BUCKETS: Record<AuthorizationListTopLevelStatus, readonly AuthorizationStatus[]> = {
+  unclaimed: ['unclaimed'],
+  in_progress: ['in_progress'],
+  result_available: ['result_available', 'sms_delivered'],
+  ended: ['ended', 'quota_exhausted', 'revoked', 'expired'],
+};
+
+/** 底层状态到列表顶层状态的唯一归一映射。 */
+export function topLevelStatusOf(status: AuthorizationStatus): AuthorizationListTopLevelStatus {
+  for (const [topLevel, statuses] of Object.entries(AUTHORIZATION_LIST_STATUS_BUCKETS) as Array<[AuthorizationListTopLevelStatus, readonly AuthorizationStatus[]]>) {
+    if (statuses.includes(status)) return topLevel;
+  }
+  return 'ended';
+}
 
 export interface DefaultCandidateLocation {
   position: number;
@@ -222,6 +269,12 @@ export class Database {
       UPDATE activation_authorizations
         SET last_activity_at = COALESCE(last_activity_at, created_at)
         WHERE last_activity_at IS NULL;
+
+      CREATE INDEX IF NOT EXISTS activation_authorizations_inventory_activity_idx
+        ON activation_authorizations (last_activity_at DESC, created_at DESC, id DESC);
+
+      CREATE INDEX IF NOT EXISTS activation_authorizations_inventory_status_activity_idx
+        ON activation_authorizations (status, last_activity_at DESC, created_at DESC, id DESC);
 
       CREATE TABLE IF NOT EXISTS authorization_candidate_countries (
         authorization_id UUID NOT NULL REFERENCES activation_authorizations(id) ON DELETE RESTRICT,
@@ -647,55 +700,60 @@ export class Database {
     });
   }
 
-  async listActivationAuthorizations(now: Date): Promise<AuthorizationListItem[]> {
+  async listActivationAuthorizations(input: AuthorizationListQuery, now: Date): Promise<AuthorizationListPage> {
     await this.expireDueAuthorizations(now);
-    const result = await this.pool.query<{
-      id: string; recipient_identifier: string | null; token_suffix: string | null; internal_note: string | null;
-      status: AuthorizationStatus; created_at: Date; expires_at: Date | null; number_acquisition_expires_at: Date | null; result_view_until: Date | null; last_activity_at: Date;
-      activation_status: string | null; acquisition_status: string | null; has_pending_exception: boolean;
-    }>(
-      `SELECT auth.id, auth.recipient_identifier, auth.token_suffix, auth.internal_note, auth.status, auth.created_at, auth.expires_at,
-              auth.number_acquisition_expires_at, auth.result_view_until,
-              COALESCE(auth.last_activity_at, auth.created_at) AS last_activity_at,
-              activation.status AS activation_status, acquisition.status AS acquisition_status,
-              EXISTS (
-                SELECT 1 FROM supplier_activations item
-                WHERE item.authorization_id = auth.id
-                  AND (item.status = 'manual_reconciliation' OR item.refund_reconciliation_status = 'pending')
-              ) AS has_pending_exception
-       FROM activation_authorizations auth
-       LEFT JOIN LATERAL (
-         SELECT status FROM supplier_activations WHERE authorization_id = auth.id ORDER BY acquired_at DESC LIMIT 1
-       ) activation ON true
-       LEFT JOIN LATERAL (
-         SELECT status FROM number_acquisition_requests
-         WHERE authorization_id = auth.id AND status IN ('requesting', 'reconciling', 'manual')
-         ORDER BY requested_at DESC LIMIT 1
-       ) acquisition ON true
-       ORDER BY auth.created_at DESC, auth.id DESC
-       LIMIT 20`,
+
+    const requestedPage = Number.isSafeInteger(input.page) && (input.page ?? 0) >= 1 ? input.page! : 1;
+    const status = input.status;
+    const tokenSuffix = input.tokenSuffix?.trim() || undefined;
+    const where: string[] = [];
+    const values: unknown[] = [];
+    const addValue = (value: unknown): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+
+    if (status) where.push(`auth.status = ANY(${addValue(AUTHORIZATION_LIST_STATUS_BUCKETS[status])})`);
+    if (tokenSuffix) where.push(`auth.token_suffix = ${addValue(tokenSuffix)}`);
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+    const countResult = await this.pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM activation_authorizations auth ${whereClause}`,
+      values,
     );
-    return result.rows.map((row) => ({
+    const total = Number(countResult.rows[0]?.count ?? 0);
+    const totalPages = total === 0 ? 0 : Math.ceil(total / AUTHORIZATION_LIST_PAGE_SIZE);
+    const page = totalPages === 0 ? 1 : Math.min(requestedPage, totalPages);
+    const offset = (page - 1) * AUTHORIZATION_LIST_PAGE_SIZE;
+    const offsetValue = addValue(offset);
+    const limitValue = addValue(AUTHORIZATION_LIST_PAGE_SIZE);
+    const result = await this.pool.query<{
+      id: string; token_suffix: string | null; status: AuthorizationStatus;
+    }>(
+      `SELECT auth.id, auth.token_suffix, auth.status
+       FROM activation_authorizations auth
+       ${whereClause}
+       ORDER BY COALESCE(auth.last_activity_at, auth.created_at) DESC, auth.created_at DESC, auth.id DESC
+       LIMIT ${limitValue} OFFSET ${offsetValue}`,
+      values,
+    );
+
+    const items = result.rows.map((row) => ({
       id: row.id,
-      ...(row.recipient_identifier !== null ? { recipientIdentifier: row.recipient_identifier } : {}),
       ...(row.token_suffix !== null ? { tokenSuffix: row.token_suffix } : {}),
-      ...(row.internal_note ? { internalNote: row.internal_note } : {}),
-      status: AUTHORIZATION_STATUS_LABELS[row.status],
-      createdAt: row.created_at,
-      ...(row.expires_at !== null ? { expiresAt: row.expires_at } : {}),
-      lastActivityAt: row.last_activity_at,
-      canRevoke: (() => {
-        const accessDeadline = row.number_acquisition_expires_at ?? row.expires_at;
-        const activeActivation = ['acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming'].includes(row.activation_status ?? '');
-        return ['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(row.status)
-          && ((accessDeadline === null || accessDeadline > now)
-            || (row.status === 'result_available' && row.result_view_until !== null && row.result_view_until > now)
-            || (row.status === 'in_progress' && activeActivation)
-            || (row.status === 'in_progress' && row.acquisition_status !== null));
-      })(),
-      ...(row.activation_status ? { currentActivationStatus: row.activation_status } : {}),
-      hasPendingException: row.has_pending_exception || row.acquisition_status === 'reconciling' || row.acquisition_status === 'manual',
+      status: AUTHORIZATION_LIST_STATUS_LABELS[topLevelStatusOf(row.status)],
     }));
+    return {
+      items,
+      page,
+      pageSize: AUTHORIZATION_LIST_PAGE_SIZE,
+      total,
+      totalPages,
+      hasPreviousPage: page > 1,
+      hasNextPage: totalPages > 0 && page < totalPages,
+      ...(status ? { status } : {}),
+      ...(tokenSuffix ? { tokenSuffix } : {}),
+    };
   }
 
   async authorizationByTokenHash(hash: string): Promise<{ id: string; status: AuthorizationStatus; expiresAt: Date | null } | undefined> {
