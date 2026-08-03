@@ -720,6 +720,8 @@ export class Database {
       );
       if (!due.rowCount) return;
       const ids = due.rows.map((row) => row.id);
+      // UPDATE 的 WHERE 重新校验活跃激活防护：SELECT FOR UPDATE 的防护基于语句快照求值，
+      // 若并发领取事务的激活 INSERT 尚未提交，行可能误入选；复核可避免清掉刚交付号码的凭据。
       await client.query(
         `UPDATE activation_authorizations
          SET status = CASE
@@ -729,7 +731,16 @@ export class Database {
              ended_at = COALESCE(ended_at, $2),
              ended_reason = COALESCE(ended_reason, 'claim_window_ended'),
              token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
-         WHERE id = ANY($1::uuid[])`,
+         WHERE id = ANY($1::uuid[])
+           AND status NOT IN ('result_available', 'sms_delivered')
+           AND NOT (status = 'ended' AND end_prompt_until > $2)
+           AND NOT (
+             status = 'in_progress' AND EXISTS (
+               SELECT 1 FROM supplier_activations activation
+               WHERE activation.authorization_id = activation_authorizations.id
+                 AND activation.status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'completion_confirming')
+             )
+           )`,
         [ids, now],
       );
     });

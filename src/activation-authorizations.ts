@@ -11,6 +11,7 @@ const RESULT_VIEW_LIFETIME_MS = 5 * 60 * 1000;
 const END_PROMPT_LIFETIME_MS = 2 * 60 * 1000;
 const RESULT_VIEW_ENDED_REASON = 'result_view_expired';
 const QUOTA_EXHAUSTED_ENDED_REASON = 'quota_exhausted';
+const MAX_NUMBERS_PER_AUTHORIZATION = 3;
 
 export interface CreatedAuthorization {
   id: string;
@@ -798,11 +799,13 @@ export class ActivationAuthorizations {
         resultViewUntil: authorization.result_view_until,
         resultViewRemainingMs: Math.max(0, authorization.result_view_until.getTime() - now.getTime()),
       } : {}),
-      remainingNumberCount: 3 - Number(authorization.used_count),
+      remainingNumberCount: MAX_NUMBERS_PER_AUTHORIZATION - Number(authorization.used_count),
       ...(authorization.acquisition_status ? { acquisitionState: authorization.acquisition_status === 'manual' ? 'manual' as const : 'confirming' as const } : {}),
-      ...(expiresAt && expiresAt > now && authorization.activation_status === 'waiting_sms'
-        ? { currentNumberAction: Number(authorization.used_count) < 3 ? 'replace' as const : 'end' as const } : {}),
-      ...(expiresAt && expiresAt > now && authorization.activation_status === 'waiting_sms'
+      // 领取截止后不得更换号码或创建后继号码：窗口内的当前号码只能结束使用。
+      // waiting_sms 必然已领取，领取时写入的截止时间保证 expiresAt 已定义，防御分支只为类型安全。
+      ...(authorization.activation_status === 'waiting_sms'
+        ? { currentNumberAction: (expiresAt === undefined || expiresAt <= now || Number(authorization.used_count) >= MAX_NUMBERS_PER_AUTHORIZATION) ? 'end' as const : 'replace' as const } : {}),
+      ...(authorization.activation_status === 'waiting_sms'
         && authorization.cancel_available_at && authorization.cancel_available_at <= now
         ? { currentNumberActionAvailable: true } : {}),
       ...(authorization.activation_status === 'cancellation_confirming'
@@ -1312,8 +1315,27 @@ export class ActivationAuthorizations {
   }
 
   private async expireAuthorization(client: PoolClient, authorizationId: string, now: Date): Promise<void> {
+    // 与数据库层 expireAuthorization 保持同一结束语义：存在活跃激活（窗口内当前号码）时
+    // 不结束也不清理凭据，进入只允许当前号码收尾的阶段，避免后续送达的短信结果被丢弃。
     await client.query(
-      "UPDATE activation_authorizations SET status = 'expired', token_hash = NULL, recipient_session_hash = NULL WHERE id = $1 AND COALESCE(number_acquisition_expires_at, expires_at) <= $2",
+      `UPDATE activation_authorizations
+       SET status = CASE
+             WHEN status IN ('unclaimed', 'in_progress', 'sms_delivered', 'quota_exhausted', 'revoked', 'expired') THEN 'expired'
+             ELSE 'ended'
+           END,
+           ended_at = COALESCE(ended_at, $2),
+           ended_reason = COALESCE(ended_reason, 'claim_window_ended'),
+           token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
+       WHERE id = $1 AND COALESCE(number_acquisition_expires_at, expires_at) <= $2
+         AND status NOT IN ('result_available', 'sms_delivered')
+         AND NOT (status = 'ended' AND end_prompt_until > $2)
+         AND NOT (
+           status = 'in_progress' AND EXISTS (
+             SELECT 1 FROM supplier_activations activation
+             WHERE activation.authorization_id = activation_authorizations.id
+               AND activation.status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'completion_confirming')
+           )
+         )`,
       [authorizationId, now],
     );
   }
@@ -1334,16 +1356,25 @@ export class ActivationAuthorizations {
       const authorization = authorizationResult.rows[0];
       const now = this.now();
       const acquisitionExpiresAt = authorizationAcquisitionDeadline(authorization);
-      if (!authorization || !acquisitionExpiresAt || acquisitionExpiresAt <= now) {
-        if (authorization && acquisitionExpiresAt !== null && acquisitionExpiresAt <= now) await this.expireAuthorization(client, authorization.id, now);
-        return { kind: 'not-found' };
+      if (!authorization || !acquisitionExpiresAt) return { kind: 'not-found' };
+      const sessionBound = authorization.status === 'in_progress'
+        && sessionToken !== undefined
+        && authorization.recipient_session_hash === tokenHash(sessionToken);
+      if (acquisitionExpiresAt <= now) {
+        // 领取截止后不能更换号码或创建后继号码；只有绑定浏览器的窗口内当前号码可以结束使用。
+        // 请求未绑定浏览器时同样拒绝，但不清理凭据，保留窗口内当前号码的收尾能力。
+        if (!sessionBound) {
+          await this.expireAuthorization(client, authorization.id, now);
+          return { kind: 'not-found' };
+        }
+      } else if (!sessionBound) {
+        return { kind: 'unavailable' };
       }
-      if (authorization.status !== 'in_progress' || !sessionToken || authorization.recipient_session_hash !== tokenHash(sessionToken)) return { kind: 'unavailable' };
       const used = await client.query<{ count: string }>(
         'SELECT count(*)::text AS count FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NOT NULL',
         [authorization.id],
       );
-      const endingUse = Number(used.rows[0]?.count) >= 3;
+      const endingUse = acquisitionExpiresAt <= now || Number(used.rows[0]?.count) >= MAX_NUMBERS_PER_AUTHORIZATION;
       const currentResult = await client.query<{ provider_activation_id: string; cancel_available_at: Date }>(
         `SELECT provider_activation_id, cancel_available_at FROM supplier_activations
          WHERE authorization_id = $1 AND status = 'waiting_sms' FOR UPDATE`,
