@@ -46,7 +46,11 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
   let now = new Date('2026-08-01T00:00:00.000Z');
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => now });
-  await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
+  await database.replaceDefaultCandidateLocations([
+    { countryId: 1, countryName: '美国' },
+    { countryId: 2, countryName: '英国' },
+    { countryId: 3, countryName: '法国' },
+  ]);
   await app.listen({ host: '127.0.0.1', port: 32123 });
   try {
     const loginPage = await app.inject({ method: 'GET', url: `/${config.adminPath}` });
@@ -56,10 +60,10 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     const adminSession = loggedIn.cookies.find((cookie) => cookie.name === 'admin_session')?.value; assert.ok(adminSession);
     const adminCsrf = loggedIn.cookies.find((cookie) => cookie.name === 'admin_csrf')?.value; assert.ok(adminCsrf);
     const cookie = `admin_session=${adminSession}; admin_csrf=${adminCsrf}`;
-    const recipientIdentifier = randomUUID();
-    const preview = await app.inject({ method: 'POST', url: `/${config.adminPath}/authorizations/preview`, headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', origin }, payload: new URLSearchParams({ csrf: adminCsrf, recipientIdentifier }).toString() });
+    const preview = await app.inject({ method: 'POST', url: `/${config.adminPath}/authorizations/batch/preview`, headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', origin }, payload: new URLSearchParams({ csrf: adminCsrf, quantity: '1' }).toString() });
     const fingerprint = preview.body.match(/name="preflightFingerprint" value="([A-Za-z0-9_-]+)"/)?.[1]; assert.ok(fingerprint);
-    const created = await app.inject({ method: 'POST', url: `/${config.adminPath}/authorizations`, headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', origin }, payload: new URLSearchParams({ csrf: adminCsrf, recipientIdentifier, preflightFingerprint: fingerprint }).toString() });
+    const created = await app.inject({ method: 'POST', url: `/${config.adminPath}/authorizations/batch`, headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', origin }, payload: new URLSearchParams({ csrf: adminCsrf, quantity: '1', preflightFingerprint: fingerprint }).toString() });
+    assert.equal(created.statusCode, 201);
     const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['clipboard-read', 'clipboard-write'] });

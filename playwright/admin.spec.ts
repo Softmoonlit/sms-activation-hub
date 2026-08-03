@@ -57,21 +57,10 @@ async function adminLogin(app: App): Promise<{ cookie: string; csrf: string; ses
   return { cookie: `admin_session=${sessionValue}; admin_csrf=${csrfValue}`, csrf: csrfValue, sessionValue, csrfValue };
 }
 
-/** 辅助函数：创建授权，返回 token */
-async function createAuthorization(app: App, cookie: string, csrf: string, recipientIdentifier: string): Promise<string> {
-  const preview = await app.inject({
-    method: 'POST', url: `/${config.adminPath}/authorizations/preview`,
-    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', origin },
-    payload: new URLSearchParams({ csrf, recipientIdentifier }).toString(),
-  });
-  const fingerprint = preview.body.match(/name="preflightFingerprint" value="([A-Za-z0-9_-]+)"/)?.[1]; assert.ok(fingerprint);
-  const created = await app.inject({
-    method: 'POST', url: `/${config.adminPath}/authorizations`,
-    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded', origin },
-    payload: new URLSearchParams({ csrf, recipientIdentifier, preflightFingerprint: fingerprint }).toString(),
-  });
-  const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-  return token;
+/** 辅助函数：批量创建一条授权链接并返回 token */
+async function createAuthorization(app: App, cookie: string, csrf: string): Promise<string> {
+  const links = await createBatch(app, cookie, csrf, '1');
+  return links[0]!;
 }
 
 test('桌面视口完成管理员登录、设置默认候选地区、预检确认和授权已创建页', async ({ browser }) => {
@@ -143,12 +132,15 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
 test('桌面视口管理员可以查看授权详情页和撤销确认页', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
-  await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
+  await database.replaceDefaultCandidateLocations([
+    { countryId: 1, countryName: '美国' },
+    { countryId: 2, countryName: '英国' },
+    { countryId: 3, countryName: '法国' },
+  ]);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
-    const recipientId = `detail-test-${randomUUID()}`;
-    const token = await createAuthorization(app, cookie, csrf, recipientId);
+    const token = await createAuthorization(app, cookie, csrf);
     const suffix = token.slice(-8);
 
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -158,25 +150,25 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
       { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
     ]);
 
-    // 首页按链接末 8 位找到新建的授权，列表不显示接收者标识
+    // 首页按链接末 8 位找到新建的授权
     await page.goto(`${origin}/${config.adminPath}`);
-    await expect(page.getByText(recipientId)).toHaveCount(0);
     const card = page.locator('article.authorization').filter({ hasText: suffix });
     await expect(card).toBeVisible();
 
     // 查看详情
     await card.getByRole('link', { name: '查看详情' }).click();
     await expect(page.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
-    await expect(page.getByText('授权状态：')).toBeVisible();
-    await expect(page.getByText('获取额度：')).toBeVisible();
-    await expect(page.getByText('候选地区')).toBeVisible();
-    await expect(page.getByRole('heading', { name: '供应商激活', level: 2 })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '成本', level: 2 })).toBeVisible();
+    await expect(page.getByText('授权状态：待领取')).toBeVisible();
+    await expect(page.getByText('创建时间：')).toBeVisible();
+    await expect(page.getByRole('link', { name: '撤销授权' })).toBeVisible();
+    // 待领取授权不含候选位置与获取额度
+    await expect(page.getByText('候选地区')).toHaveCount(0);
+    await expect(page.getByText('获取额度：')).toHaveCount(0);
 
     // 进入撤销确认页
     await page.getByRole('link', { name: '撤销授权' }).click();
     await expect(page.locator('h1', { hasText: '确认撤销授权' })).toBeVisible();
-    await expect(page.getByText('接收者标识：')).toBeVisible();
+    await expect(page.getByText(`链接末 8 位：${suffix}`)).toBeVisible();
     await expect(page.getByText('授权状态：')).toBeVisible();
     await expect(page.getByText('撤销后：')).toBeVisible();
     // 撤销确认框包含危险按钮
@@ -191,11 +183,15 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
 test('仅打开链接（聊天软件预览）不领取号码，跨浏览器绑定被拒绝', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
-  await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
+  await database.replaceDefaultCandidateLocations([
+    { countryId: 1, countryName: '美国' },
+    { countryId: 2, countryName: '英国' },
+    { countryId: 3, countryName: '法国' },
+  ]);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
-    const token = await createAuthorization(app, cookie, csrf, `preview-test-${randomUUID()}`);
+    const token = await createAuthorization(app, cookie, csrf);
 
     // 第一次：仅 GET 打开链接（模拟预览），不点击获取
     const previewContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -225,32 +221,52 @@ test('仅打开链接（聊天软件预览）不领取号码，跨浏览器绑�
   }
 });
 
-test('授权到期（24小时）后访问返回 404', async ({ browser }) => {
+test('待领取链接永久有效，领取 24 小时截止后访问返回 404', async ({ browser }) => {
   let now = new Date('2026-08-01T00:00:00.000Z');
+  let activationId = '';
   const database = new Database(databaseUrl!);
-  const app = await createApp(config, database, { heroSms, now: () => now });
-  await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
+  const app = await createApp(config, database, {
+    heroSms: {
+      ...heroSms,
+      getNumber: async (_serviceCode, countryId) => {
+        activationId = `expiry-pw-${randomUUID()}`;
+        return { activationId, phoneNumber: '+442079460777', activationCost: 0.6, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) };
+      },
+      // 供应商确认窗口内未送达并已取消，超时对账才能收敛为明确终态
+      activationStatus: async () => ({ delivered: false, providerStatus: 'cancelled' }),
+      activationHistory: async () => [{ activationId, phoneNumber: '+442079460777', activationCost: 0, currency: 'USD', activationTime: new Date('2026-08-30T00:00:00.000Z'), status: 'cancelled' }],
+    },
+    now: () => now,
+  });
+  await database.replaceDefaultCandidateLocations([
+    { countryId: 1, countryName: '美国' },
+    { countryId: 2, countryName: '英国' },
+    { countryId: 3, countryName: '法国' },
+  ]);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
-    const token = await createAuthorization(app, cookie, csrf, `expiry-test-${randomUUID()}`);
+    const token = await createAuthorization(app, cookie, csrf);
 
-    // 确认创建后链接可访问
+    // 待领取链接不受创建时间限制：创建很久之后仍可访问
+    now = new Date('2026-08-30T00:00:00.000Z');
     const checkBefore = await app.inject({ method: 'GET', url: `/a/${token}` });
-    assert.equal(checkBefore.statusCode, 200, '授权到期前应可访问');
+    assert.equal(checkBefore.statusCode, 200, '待领取链接应永久有效');
 
-    // 时间快进到 24 小时后，手动触发到期清理
-    now = new Date('2026-08-02T00:00:01.000Z');
-    await database.expireDueAuthorizations(now);
+    // 领取后启动 24 小时领取期限（截止 = 08-31 00:00），号码窗口至 08-30 00:20
+    const claim = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+    assert.equal(claim.statusCode, 303, '领取应成功');
+    const recipientCookie = `recipient_session=${claim.cookies.find((c) => c.name === 'recipient_session')?.value ?? ''}`;
 
-    // 确认 inject 层面已返回 404
-    const checkAfter = await app.inject({ method: 'GET', url: `/a/${token}` });
-    assert.equal(checkAfter.statusCode, 404, '授权到期后应返回 404');
+    // 领取 24 小时后：号码窗口早已结束，超时收尾后以领取后期限结束访问
+    now = new Date('2026-08-31T00:20:00.000Z');
+    const checkAfter = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+    assert.equal(checkAfter.statusCode, 404, '领取 24 小时后应返回 404');
 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const page = await context.newPage();
     const response = await page.goto(`${origin}/a/${token}`);
-    assert.equal(response?.status(), 404, '授权到期后浏览器访问应返回 404');
+    assert.equal(response?.status(), 404, '领取 24 小时后浏览器访问应返回 404');
     await context.close();
   } finally {
     await app.close();
@@ -275,11 +291,15 @@ test('随机地址返回 404', async ({ browser }) => {
 test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部状态信息', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
-  await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
+  await database.replaceDefaultCandidateLocations([
+    { countryId: 1, countryName: '美国' },
+    { countryId: 2, countryName: '英国' },
+    { countryId: 3, countryName: '法国' },
+  ]);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
-    const token = await createAuthorization(app, cookie, csrf, `security-test-${randomUUID()}`);
+    const token = await createAuthorization(app, cookie, csrf);
 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const page = await context.newPage();
@@ -322,11 +342,15 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
   let now = new Date('2026-08-01T00:00:00.000Z');
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => now });
-  await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
+  await database.replaceDefaultCandidateLocations([
+    { countryId: 1, countryName: '美国' },
+    { countryId: 2, countryName: '英国' },
+    { countryId: 3, countryName: '法国' },
+  ]);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
-    const token = await createAuthorization(app, cookie, csrf, `layout-test-${randomUUID()}`);
+    const token = await createAuthorization(app, cookie, csrf);
 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const page = await context.newPage();
@@ -413,11 +437,15 @@ test('管理员单会话：新登录使旧会话失效', async ({ browser }) => 
 test('浏览器网络和应用日志不包含 token、Cookie、号码、验证码或短信正文', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
-  await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
+  await database.replaceDefaultCandidateLocations([
+    { countryId: 1, countryName: '美国' },
+    { countryId: 2, countryName: '英国' },
+    { countryId: 3, countryName: '法国' },
+  ]);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
-    const token = await createAuthorization(app, cookie, csrf, `log-test-${randomUUID()}`);
+    const token = await createAuthorization(app, cookie, csrf);
 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const page = await context.newPage();

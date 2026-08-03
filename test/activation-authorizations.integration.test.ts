@@ -72,18 +72,18 @@ async function login(app: FastifyInstance): Promise<{ cookie: string; csrf: stri
 async function openApplication(heroSms = scriptedHeroSms(), now?: () => Date, extraDependencies: Omit<AppDependencies, 'heroSms' | 'now'> = {}) {
   const database = new Database(databaseUrl!);
   const app = await createApp({ ...config, sessionSecret: `${config.sessionSecret}-${randomUUID()}` }, database, { heroSms, now, ...extraDependencies });
-  await database.replaceDefaultCandidateCountryIds([1, 2, 3]);
+  await database.replaceDefaultCandidateLocations([
+    { countryId: 1, countryName: '美国' },
+    { countryId: 2, countryName: '英国' },
+    { countryId: 3, countryName: '法国' },
+  ]);
   return { app, database };
 }
 async function post(app: FastifyInstance, session: { cookie: string; csrf: string }, url: string, fields: Record<string, string>) {
   return app.inject({ method: 'POST', url, headers: { cookie: session.cookie, 'content-type': 'application/x-www-form-urlencoded', origin }, payload: new URLSearchParams({ csrf: session.csrf, ...fields }).toString() });
 }
-async function createAuthorization(app: FastifyInstance, session: { cookie: string; csrf: string }, fields: { recipientIdentifier: string; internalNote?: string }) {
-  const preview = await post(app, session, `/${config.adminPath}/authorizations/preview`, fields);
-  assert.equal(preview.statusCode, 200);
-  const preflightFingerprint = preview.body.match(/name="preflightFingerprint" value="([A-Za-z0-9_-]+)"/)?.[1];
-  assert.ok(preflightFingerprint);
-  return post(app, session, `/${config.adminPath}/authorizations`, { ...fields, preflightFingerprint });
+async function createAuthorization(app: FastifyInstance, session: { cookie: string; csrf: string }, _fields?: { recipientIdentifier?: string; internalNote?: string }) {
+  return createBatch(app, session, '1');
 }
 
 async function createBatch(app: FastifyInstance, session: { cookie: string; csrf: string }, quantity: string): Promise<InjectionResponse> {
@@ -103,7 +103,7 @@ function authorizationIdFromHome(body: string, token: string): string {
 async function cleanupBatchAuthorizations(database: Database): Promise<void> {
   await database.transaction(async (client) => {
     const ids = await client.query<{ id: string }>(
-      "SELECT id FROM activation_authorizations WHERE recipient_identifier IS NULL",
+      "SELECT id FROM activation_authorizations",
     );
     if (!ids.rowCount) return;
     const authorizationIds = ids.rows.map((row) => row.id);
@@ -174,14 +174,14 @@ if (!databaseUrl) {
       assert.equal(providerCalls, 0);
 
       const stored = await database.pool.query<{
-        token_hash: string | null; token_suffix: string | null; recipient_identifier: string | null;
-        claimed_at: Date | null; expires_at: Date | null; recipient_session_hash: string | null;
+        token_hash: string | null; token_suffix: string | null;
+        claimed_at: Date | null; recipient_session_hash: string | null;
       }>(
-        'SELECT token_hash, token_suffix, recipient_identifier, claimed_at, expires_at, recipient_session_hash FROM activation_authorizations WHERE token_suffix = ANY($1::text[])',
+        'SELECT token_hash, token_suffix, claimed_at, recipient_session_hash FROM activation_authorizations WHERE token_suffix = ANY($1::text[])',
         [links.map((link) => link.slice(-8))],
       );
       assert.equal(stored.rows.length, 10);
-      assert.ok(stored.rows.every((row) => row.token_hash && row.token_suffix && row.recipient_identifier === null && row.claimed_at === null && row.expires_at === null && row.recipient_session_hash === null));
+      assert.ok(stored.rows.every((row) => row.token_hash && row.token_suffix && row.claimed_at === null && row.recipient_session_hash === null));
       const candidates = await database.pool.query('SELECT 1 FROM authorization_candidate_countries WHERE authorization_id IN (SELECT id FROM activation_authorizations WHERE token_suffix = ANY($1::text[]))', [links.map((link) => link.slice(-8))]);
       assert.equal(candidates.rowCount, 0);
 
@@ -321,31 +321,30 @@ if (!databaseUrl) {
 
       const authorization = await database.pool.query<{
         status: string; claimed_at: Date | null; number_acquisition_expires_at: Date | null;
-        expires_at: Date | null; recipient_session_hash: string | null;
+        recipient_session_hash: string | null;
       }>(
-        'SELECT status, claimed_at, number_acquisition_expires_at, expires_at, recipient_session_hash FROM activation_authorizations WHERE token_suffix = $1',
+        'SELECT status, claimed_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE token_suffix = $1',
         [token.slice(-8)],
       );
       assert.equal(authorization.rows.length, 1);
       assert.equal(authorization.rows[0]?.status, 'in_progress');
       assert.equal(authorization.rows[0]?.claimed_at?.toISOString(), now.toISOString());
       assert.equal(authorization.rows[0]?.number_acquisition_expires_at?.toISOString(), new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString());
-      assert.equal(authorization.rows[0]?.expires_at, null);
       assert.ok(authorization.rows[0]?.recipient_session_hash);
 
       const candidates = await database.pool.query<{
-        position: number; country_id: number; country_name: string; quoted_price: string | null; quoted_stock: number | null; used_at: Date | null;
+        position: number; country_id: number; country_name: string; used_at: Date | null;
       }>(
-        `SELECT position, country_id, country_name, quoted_price::text, quoted_stock, used_at
+        `SELECT position, country_id, country_name, used_at
          FROM authorization_candidate_countries
          WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
          ORDER BY position`,
         [token.slice(-8)],
       );
       assert.deepEqual(candidates.rows, [
-        { position: 1, country_id: 1, country_name: '美国', quoted_price: null, quoted_stock: null, used_at: null },
-        { position: 2, country_id: 2, country_name: '英国', quoted_price: null, quoted_stock: null, used_at: null },
-        { position: 3, country_id: 1, country_name: '美国', quoted_price: null, quoted_stock: null, used_at: null },
+        { position: 1, country_id: 1, country_name: '美国', used_at: null },
+        { position: 2, country_id: 2, country_name: '英国', used_at: null },
+        { position: 3, country_id: 1, country_name: '美国', used_at: null },
       ]);
 
       await database.replaceDefaultCandidateLocations([
@@ -378,11 +377,11 @@ if (!databaseUrl) {
       now = new Date('2026-08-02T00:00:00.000Z');
       const expired = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: `recipient_session=${recipientCookie}` } });
       assert.equal(expired.statusCode, 404);
-      const expiredAuthorization = await database.pool.query<{ status: string; token_hash: string | null; recipient_session_hash: string | null }>(
-        'SELECT status, token_hash, recipient_session_hash FROM activation_authorizations WHERE token_suffix = $1',
+      const expiredAuthorization = await database.pool.query<{ status: string; ended_reason: string | null; token_hash: string | null; recipient_session_hash: string | null }>(
+        'SELECT status, ended_reason, token_hash, recipient_session_hash FROM activation_authorizations WHERE token_suffix = $1',
         [token.slice(-8)],
       );
-      assert.deepEqual(expiredAuthorization.rows[0], { status: 'expired', token_hash: null, recipient_session_hash: null });
+      assert.deepEqual(expiredAuthorization.rows[0], { status: 'ended', ended_reason: 'acquisition_expired', token_hash: null, recipient_session_hash: null });
     } finally {
       await cleanupBatchAuthorizations(database);
       await app.close();
@@ -404,6 +403,8 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
+      // 旧配置只有两个候选位置，视为不完整配置
+      await database.pool.query('DELETE FROM default_candidate_countries WHERE position = 3');
       const session = await login(app);
       const created = await createBatch(app, session, '1');
       const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1];
@@ -572,30 +573,32 @@ if (!databaseUrl) {
     }
   });
 
-  test('管理员预检后创建 24 小时待领取授权，完整链接只在创建响应显示且 GET 不领取', async () => {
+  test('批量创建 24 小时领取授权，完整链接只在创建响应显示且 GET 不领取', async () => {
     const fixedNow = new Date('2026-08-01T00:00:00.000Z');
     const { app, database } = await openApplication(scriptedHeroSms(), () => fixedNow);
     try {
       const session = await login(app);
-      const recipientIdentifier = ` Alice-${randomUUID()} `;
-      const preview = await post(app, session, `/${config.adminPath}/authorizations/preview`, { recipientIdentifier, internalNote: '仅管理员可见' });
+      const preview = await post(app, session, `/${config.adminPath}/authorizations/batch/preview`, { quantity: '1' });
       assert.equal(preview.statusCode, 200);
-      assert.match(preview.body, /美国：价格 0\.8，库存 3/);
-      assert.match(preview.body, /英国：价格 1\.2，库存 2/);
-      assert.match(preview.body, /法国：价格 1\.5，库存 1/);
+      assert.match(preview.body, /将创建 1 条永久待领取授权链接。/);
 
       const preflightFingerprint = preview.body.match(/name="preflightFingerprint" value="([A-Za-z0-9_-]+)"/)?.[1];
       assert.ok(preflightFingerprint);
-      const created = await post(app, session, `/${config.adminPath}/authorizations`, { recipientIdentifier, internalNote: '仅管理员可见', preflightFingerprint });
+      const created = await post(app, session, `/${config.adminPath}/authorizations/batch`, { quantity: '1', preflightFingerprint });
       assert.equal(created.statusCode, 201);
       const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1];
       assert.ok(token, '创建响应应显示至少 256 位随机 token');
-      assert.match(created.body, /2026-08-02T00:00:00\.000Z/);
+      assert.doesNotMatch(created.body, /到期时间/);
 
-      const stored = await database.pool.query<{ token_hash: string; recipient_identifier: string }>('SELECT token_hash, recipient_identifier FROM activation_authorizations WHERE recipient_identifier = $1', [recipientIdentifier.trim()]);
+      const stored = await database.pool.query<{ token_hash: string; token_suffix: string; created_at: Date }>(
+        'SELECT token_hash, token_suffix, created_at FROM activation_authorizations WHERE token_suffix = $1',
+        [token.slice(-8)],
+      );
       assert.equal(stored.rows.length, 1);
       assert.notEqual(stored.rows[0]?.token_hash, token);
       assert.equal(stored.rows[0]?.token_hash.length, 64);
+      assert.equal(stored.rows[0]?.token_suffix, token.slice(-8));
+      assert.equal(stored.rows[0]?.created_at.toISOString(), fixedNow.toISOString());
 
       const firstGet = await app.inject({ method: 'GET', url: `/a/${token}` });
       const secondGet = await app.inject({ method: 'GET', url: `/a/${token}` });
@@ -614,9 +617,13 @@ if (!databaseUrl) {
   test('管理员可以用三个相同候选地区创建激活授权', async () => {
     const { app, database } = await openApplication();
     try {
-      await database.replaceDefaultCandidateCountryIds([1, 1, 1]);
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 1, countryName: '美国' },
+        { countryId: 1, countryName: '美国' },
+      ]);
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
 
       assert.equal(created.statusCode, 201);
       assert.match(created.body, /\/a\/[A-Za-z0-9_-]{43}/);
@@ -640,10 +647,13 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateCountryIds([1, 1, 1]);
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 1, countryName: '美国' },
+        { countryId: 1, countryName: '美国' },
+      ]);
       const session = await login(app);
-      const recipientIdentifier = `重复地区-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       assert.equal(created.statusCode, 201);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
@@ -674,24 +684,32 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('创建会阻止无库存、余额不足和同一标准化接收者的重复未结束授权', async () => {
-    const recipientIdentifier = `Case-${randomUUID()}`;
-    const first = await openApplication();
+  test('批量创建不调用 HeroSMS，供应商故障也不阻止补充链接库存', async () => {
+    let providerCalls = 0;
+    const heroSms = scriptedHeroSms({
+      balance: async () => { providerCalls += 1; throw new Error('余额查询失败'); },
+      services: async () => { providerCalls += 1; throw new Error('服务查询失败'); },
+      countries: async () => { providerCalls += 1; throw new Error('地区查询失败'); },
+      quotes: async () => { providerCalls += 1; throw new Error('报价查询失败'); },
+    });
+    const opened = await openApplication(heroSms);
     try {
-      const session = await login(first.app);
-      assert.equal((await createAuthorization(first.app, session, { recipientIdentifier })).statusCode, 201);
-      const duplicate = await post(first.app, session, `/${config.adminPath}/authorizations/preview`, { recipientIdentifier: `  ${recipientIdentifier.toUpperCase()}  ` });
-      assert.equal(duplicate.statusCode, 422);
-      assert.match(duplicate.body, /已有一条未结束激活授权/);
-    } finally { await first.app.close(); }
+      const session = await login(opened.app);
+      const created = await createBatch(opened.app, session, '2');
+      assert.equal(created.statusCode, 201);
+      assert.equal(providerCalls, 0, '批量创建不应调用 HeroSMS');
+      const links = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g) ?? [];
+      assert.equal(links.length, 2);
+    } finally { await opened.app.close(); }
 
-    for (const [heroSms, message] of [[scriptedHeroSms({ stock: 0 }), /无库存/], [scriptedHeroSms({ balance: 1 }), /余额不足/]] as const) {
+    for (const heroSms of [scriptedHeroSms({ stock: 0 }), scriptedHeroSms({ balance: 1 })]) {
       const opened = await openApplication(heroSms);
       try {
         const session = await login(opened.app);
-        const response = await post(opened.app, session, `/${config.adminPath}/authorizations/preview`, { recipientIdentifier: randomUUID() });
-        assert.equal(response.statusCode, 422);
-        assert.match(response.body, message);
+        // 无库存或余额不足只影响领取后的号码获取，不阻止补充待领取链接库存
+        const response = await createBatch(opened.app, session, '1');
+        assert.equal(response.statusCode, 201);
+        assert.match(response.body, /\/a\/[A-Za-z0-9_-]{43}/);
       } finally { await opened.app.close(); }
     }
   });
@@ -718,12 +736,12 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => fixedNow);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
       const initial = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(initial.body, /OpenAI/);
-      assert.match(initial.body, /data-countdown=.*正在获取号码/);
+      assert.match(initial.body, /获取号码/);
       assert.doesNotMatch(initial.body, /美国|英国|法国|HeroSMS|价格|库存/);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(claimed.statusCode, 303);
@@ -780,7 +798,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
@@ -838,7 +856,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(opened.app);
-      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(opened.app, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const first = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -889,8 +907,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms);
     try {
       const session = await login(app);
-      const recipientIdentifier = `并发撤销-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       blockQuotes = true;
       const claim = app.inject({ method: 'POST', url: `/a/${token}/numbers` });
@@ -929,8 +946,8 @@ if (!databaseUrl) {
     const opened = await openApplication(heroSms, () => now);
     try {
       const session = await login(opened.app);
-      const first = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
-      const second = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const first = await createAuthorization(opened.app, session);
+      const second = await createAuthorization(opened.app, session);
       const firstToken = first.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(firstToken);
       const secondToken = second.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(secondToken);
       const firstClaim = opened.app.inject({ method: 'POST', url: `/a/${firstToken}/numbers` });
@@ -943,11 +960,16 @@ if (!databaseUrl) {
       assert.equal((await secondClaim).statusCode, 303);
       assert.equal(maximumActiveCalls, 1);
 
-      const third = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const third = await createAuthorization(opened.app, session);
       const thirdToken = third.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(thirdToken);
+      // 待领取链接永久有效：跨过创建时间仍可领取，领取前不开始 24 小时计时
       now = new Date('2026-08-02T00:00:00.001Z');
+      assert.equal((await opened.app.inject({ method: 'POST', url: `/a/${thirdToken}/numbers` })).statusCode, 303);
+      assert.equal(calls, 3);
+      // 领取后 24 小时截止：截止后不得调用 HeroSMS
+      now = new Date('2026-08-03T00:00:00.002Z');
       assert.equal((await opened.app.inject({ method: 'POST', url: `/a/${thirdToken}/numbers` })).statusCode, 404);
-      assert.equal(calls, 2, '截止后不得调用 HeroSMS');
+      assert.equal(calls, 3, '截止后不得调用 HeroSMS');
     } finally { await opened.app.close(); }
   });
 
@@ -973,8 +995,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => fixedNow);
     try {
       const session = await login(app);
-      const recipientIdentifier = `no-stock-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       inventoryAvailable = false;
       const response = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
@@ -986,8 +1007,8 @@ if (!databaseUrl) {
       const candidates = await database.pool.query<{ used_at: Date | null }>(
         `SELECT candidate.used_at FROM authorization_candidate_countries candidate
          JOIN activation_authorizations auth ON auth.id = candidate.authorization_id
-         WHERE auth.recipient_identifier = $1 ORDER BY candidate.position`,
-        [recipientIdentifier],
+         WHERE auth.token_suffix = $1 ORDER BY candidate.position`,
+        [token.slice(-8)],
       );
       assert.deepEqual(candidates.rows.map((candidate) => candidate.used_at), [null, null, null]);
     } finally { await app.close(); }
@@ -1023,8 +1044,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => fixedNow);
     try {
       const session = await login(app);
-      const recipientIdentifier = `stock-recovery-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
       inventory = 'empty';
@@ -1041,8 +1061,8 @@ if (!databaseUrl) {
       const candidates = await database.pool.query<{ used_at: Date | null }>(
         `SELECT candidate.used_at FROM authorization_candidate_countries candidate
          JOIN activation_authorizations auth ON auth.id = candidate.authorization_id
-         WHERE auth.recipient_identifier = $1 ORDER BY candidate.position`,
-        [recipientIdentifier],
+         WHERE auth.token_suffix = $1 ORDER BY candidate.position`,
+        [token.slice(-8)],
       );
       assert.deepEqual(candidates.rows.map((candidate) => candidate.used_at !== null), [true, false, false]);
     } finally { await app.close(); }
@@ -1069,8 +1089,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => fixedNow);
     try {
       const session = await login(app);
-      const recipientIdentifier = `quote-missing-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
       configurationReady = false;
@@ -1081,9 +1100,9 @@ if (!databaseUrl) {
       assert.equal(getNumberCalls, 0);
       const unused = await database.pool.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM authorization_candidate_countries
-         WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE recipient_identifier = $1)
+         WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
            AND used_at IS NOT NULL`,
-        [recipientIdentifier],
+        [token.slice(-8)],
       );
       assert.equal(unused.rows[0]?.count, '0');
 
@@ -1111,8 +1130,7 @@ if (!databaseUrl) {
       const session = await login(app);
       for (const kind of definiteKinds) {
         failureKind = kind;
-        const recipientIdentifier = `${kind}-${randomUUID()}`;
-        const created = await createAuthorization(app, session, { recipientIdentifier });
+        const created = await createAuthorization(app, session);
         const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
         const failed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
         assert.equal(failed.statusCode, 503);
@@ -1120,9 +1138,9 @@ if (!databaseUrl) {
         const recipientCookie = `recipient_session=${cookieValue(failed, 'recipient_session')}`;
         const unused = await database.pool.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM authorization_candidate_countries
-           WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE recipient_identifier = $1)
+           WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
              AND used_at IS NOT NULL`,
-          [recipientIdentifier],
+          [token.slice(-8)],
         );
         assert.equal(unused.rows[0]?.count, '0');
 
@@ -1148,7 +1166,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => fixedNow);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(claimed.statusCode, 303);
@@ -1180,8 +1198,8 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => fixedNow);
     try {
       const session = await login(app);
-      const first = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
-      const second = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const first = await createAuthorization(app, session);
+      const second = await createAuthorization(app, session);
       const firstToken = first.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(firstToken);
       const secondToken = second.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(secondToken);
       const uncertain = await app.inject({ method: 'POST', url: `/a/${firstToken}/numbers` });
@@ -1233,7 +1251,7 @@ if (!databaseUrl) {
     let recipientCookie: string;
     try {
       const session = await login(opened.app);
-      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(opened.app, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const uncertain = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(uncertain.statusCode, 202);
@@ -1275,9 +1293,13 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateCountryIds([1, 1, 1]);
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 1, countryName: '美国' },
+        { countryId: 1, countryName: '美国' },
+      ]);
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -1333,9 +1355,13 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateCountryIds([1, 1, 1]);
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 1, countryName: '美国' },
+        { countryId: 1, countryName: '美国' },
+      ]);
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -1381,7 +1407,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1434,7 +1460,7 @@ if (!databaseUrl) {
       const session = await login(app);
       for (const item of cases) {
         now = new Date('2026-08-09T00:00:00.000Z');
-        const created = await createAuthorization(app, session, { recipientIdentifier: `result-boundary-${item.label}-${randomUUID()}` });
+        const created = await createAuthorization(app, session);
         const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
         const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
         const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1482,7 +1508,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1521,7 +1547,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1563,7 +1589,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1612,7 +1638,7 @@ if (!databaseUrl) {
     const opened = await openApplication(heroSms, () => now);
     try {
       const session = await login(opened.app);
-      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(opened.app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1672,7 +1698,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(opened.app);
-      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(opened.app, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const claimed = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1713,7 +1739,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(opened.app);
-      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(opened.app, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const claimed = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1747,7 +1773,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -1789,7 +1815,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -1837,7 +1863,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -1880,7 +1906,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -1956,7 +1982,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -1988,7 +2014,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -2042,7 +2068,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(opened.app);
-      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(opened.app, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const first = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -2089,7 +2115,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(opened.app);
-      const created = await createAuthorization(opened.app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(opened.app, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const first = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -2129,7 +2155,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -2198,7 +2224,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(initial);
-      const created = await createAuthorization(initial, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(initial, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const claimed = await initial.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -2231,9 +2257,8 @@ if (!databaseUrl) {
     } finally { await reconciled.close(); }
   });
 
-  test('第三次激活超时后授权额度已用尽，同一接收者可以创建新授权', async () => {
+  test('第三次激活超时后授权额度已用尽，可以继续创建新的待领取链接', async () => {
     let now = new Date('2026-08-14T06:00:00.000Z');
-    const recipientIdentifier = randomUUID();
     const activationIds = [0, 1, 2].map(() => randomUUID());
     let acquisitionIndex = 0;
     const heroSms = scriptedHeroSms({
@@ -2260,7 +2285,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(initial);
-      const created = await createAuthorization(initial, session, { recipientIdentifier });
+      const created = await createAuthorization(initial, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const first = await initial.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
@@ -2301,8 +2326,8 @@ if (!databaseUrl) {
 
       // 模拟修复部署前已经确认第三次超时、但授权仍错误停在“进行中”的数据。
       await database.pool.query(
-        "UPDATE activation_authorizations SET status = 'in_progress' WHERE recipient_identifier = $1",
-        [recipientIdentifier],
+        "UPDATE activation_authorizations SET status = 'in_progress' WHERE token_suffix = $1",
+        [token.slice(-8)],
       );
     } finally { await timedOut.close(); }
 
@@ -2311,7 +2336,7 @@ if (!databaseUrl) {
       const session = await login(migrated);
       const home = await migrated.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       assert.match(home.body, /已结束/);
-      const recreated = await createAuthorization(migrated, session, { recipientIdentifier });
+      const recreated = await createAuthorization(migrated, session);
       assert.equal(recreated.statusCode, 201);
     } finally { await migrated.close(); }
   });
@@ -2333,7 +2358,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(initial);
-      const created = await createAuthorization(initial, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(initial, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const claimed = await initial.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -2370,7 +2395,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(initial);
-      const created = await createAuthorization(initial, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(initial, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const claimed = await initial.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -2404,7 +2429,7 @@ if (!databaseUrl) {
     let recipientCookie = '';
     try {
       const session = await login(initial);
-      const created = await createAuthorization(initial, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(initial, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const claimed = await initial.inject({ method: 'POST', url: `/a/${token}/numbers` });
       recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -2446,11 +2471,10 @@ if (!databaseUrl) {
       }),
       cancelActivation: async () => { cancelCalls += 1; return 'cancelled'; },
     });
-    const recipientIdentifier = randomUUID();
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       now = new Date('2026-08-20T23:50:00.000Z');
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
@@ -2498,12 +2522,12 @@ if (!databaseUrl) {
     let detailPath = '';
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       detailPath = (await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } })).body.match(/href="(\/control7\/authorizations\/[0-9a-f-]{36})"/)?.[1] ?? '';
       assert.ok(detailPath);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      now = new Date('2026-08-22T23:59:59.999Z');
       const response = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      // 领取发生在 08-22 00:00，领取截止 = 08-23 00:00；供应商取得时间恰为截止时刻，不交付
       assert.equal(response.statusCode, 404);
       assert.equal(getNumberCalls, 1);
       assert.equal(cancelCalls, 0, '供应商尚未允许取消时应保留持久取消任务');
@@ -2525,7 +2549,7 @@ if (!databaseUrl) {
     } finally { await allowed.app.close(); }
   });
 
-  test('截止前结果不确定的获取在截止后对账时保留供应商收尾且不交付', async () => {
+  test('截止前结果不确定的获取在截止后对账时不交付，并在允许取消后自动取消', async () => {
     let now = new Date('2026-08-26T00:00:00.000Z');
     const activationId = `expiry-reconciled-${randomUUID()}`;
     let getNumberCalls = 0;
@@ -2538,17 +2562,18 @@ if (!databaseUrl) {
       },
       activeActivations: async () => [{
         activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', serviceCode: 'openai', countryId: 1,
-        activationTime: new Date('2026-08-26T23:59:59.999Z'), status: 'STATUS_WAIT_CODE',
+        activationTime: new Date('2026-08-27T00:00:00.000Z'), status: 'STATUS_WAIT_CODE',
       }],
       cancelActivation: async () => { cancelCalls += 1; return 'cancelled'; },
     });
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      now = new Date('2026-08-26T23:59:59.999Z');
-      assert.equal((await app.inject({ method: 'POST', url: `/a/${token}/numbers` })).statusCode, 404);
+      // 领取发生在 08-26 00:00，领取截止 = 08-27 00:00；供应商取得时间恰为截止时刻，不交付
+      const response = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(response.statusCode, 404);
       assert.equal(getNumberCalls, 1);
       assert.equal(cancelCalls, 0);
     } finally { await app.close(); }
@@ -2557,7 +2582,15 @@ if (!databaseUrl) {
     const restarted = await openApplication(heroSms, () => now);
     try {
       assert.equal(getNumberCalls, 1, '迟到号码收尾后不得创建后继激活');
+      assert.equal(cancelCalls, 0, '供应商尚未允许取消时应保留持久取消任务');
     } finally { await restarted.app.close(); }
+
+    now = new Date('2026-08-27T00:02:00.000Z');
+    const allowed = await openApplication(heroSms, () => now);
+    try {
+      assert.equal(cancelCalls, 1, '允许取消后自动取消不交付的激活');
+      assert.equal(getNumberCalls, 1);
+    } finally { await allowed.app.close(); }
   });
 
   test('全局获取队列等待跨过截止秒时，供应商取得时间在截止前的请求仍可交付', async () => {
@@ -2568,54 +2601,99 @@ if (!databaseUrl) {
     const heroSms = scriptedHeroSms({
       getNumber: async () => {
         getNumberCalls += 1;
-        await firstBlocked;
+        // 前两次是领取时取得首个号码（窗口即时开始）；第三次是第一个链接换号，必须阻塞以观察排队请求跨过截止。
+        if (getNumberCalls >= 3) await firstBlocked;
+        const activationTime = getNumberCalls >= 3 ? new Date('2026-08-28T23:59:59.999Z') : now;
         return {
           activationId: `expiry-queued-${randomUUID()}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
-          activationTime: new Date('2026-08-28T23:59:59.999Z'), activationEndTime: new Date('2026-08-29T00:19:59.999Z'),
+          activationTime, activationEndTime: new Date(activationTime.getTime() + 1_200_000),
         };
       },
+      cancelActivation: async () => 'cancelled',
     });
-    const { app } = await openApplication(heroSms, () => now);
+    const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const first = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
-      const second = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const first = await createAuthorization(app, session);
+      const second = await createAuthorization(app, session);
       const firstToken = first.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(firstToken);
       const secondToken = second.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(secondToken);
 
-      now = new Date('2026-08-28T23:59:59.999Z');
-      const firstRequest = app.inject({ method: 'POST', url: `/a/${firstToken}/numbers` });
+      // 08-28 00:00 两个链接各自领取并取得号码，领取截止 = 08-29 00:00
+      const firstClaim = await app.inject({ method: 'POST', url: `/a/${firstToken}/numbers` });
+      const secondClaim = await app.inject({ method: 'POST', url: `/a/${secondToken}/numbers` });
+      assert.equal(firstClaim.statusCode, 303);
+      assert.equal(secondClaim.statusCode, 303);
+      assert.equal(getNumberCalls, 2);
+      const firstCookie = `recipient_session=${cookieValue(firstClaim, 'recipient_session')}`;
+      const secondCookie = `recipient_session=${cookieValue(secondClaim, 'recipient_session')}`;
+
+      // 08-28 00:02 两个链接同时换号：第一个锁住，第二个进入 PostgreSQL 全局队列
+      now = new Date('2026-08-28T00:02:00.000Z');
+      const firstRequest = app.inject({ method: 'POST', url: `/a/${firstToken}/replacement/confirm`, headers: { cookie: firstCookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'replacement=confirm' });
       await new Promise((resolve) => setTimeout(resolve, 25));
-      const queuedRequest = app.inject({ method: 'POST', url: `/a/${secondToken}/numbers` });
+      const queuedRequest = app.inject({ method: 'POST', url: `/a/${secondToken}/replacement/confirm`, headers: { cookie: secondCookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'replacement=confirm' });
       await new Promise((resolve) => setTimeout(resolve, 25));
-      assert.equal(getNumberCalls, 1, '第二个请求应在 PostgreSQL 全局队列中等待');
+      assert.equal(getNumberCalls, 3, '第二个请求应在 PostgreSQL 全局队列中等待');
+      // 并行负载下第二个请求的取消确认可能延迟；轮询其激活变为已取消，
+      // 确认取消确认完成后才推进时钟，避免取消确认阶段跨过截止。
+      // 不能轮询 pg_locks：咨询锁是实例级的，其他并行测试的排队请求会造成误判。
+      const cancelConfirmedStartedAt = Date.now();
+      for (;;) {
+        const activation = await database.pool.query<{ status: string }>(
+          `SELECT activation.status FROM supplier_activations activation
+           JOIN activation_authorizations auth ON auth.id = activation.authorization_id
+           WHERE auth.token_suffix = $1`,
+          [secondToken.slice(-8)],
+        );
+        if (activation.rows[0]?.status === 'cancelled') break;
+        if (Date.now() - cancelConfirmedStartedAt > 5_000) throw new Error('第二个请求未完成取消确认');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
 
       now = new Date('2026-08-29T00:00:00.000Z');
       releaseFirst();
       assert.equal((await firstRequest).statusCode, 303, '供应商取得时间在截止前的号码仍可交付');
       assert.equal((await queuedRequest).statusCode, 404, '排队资格不能越过授权期限');
-      assert.equal(getNumberCalls, 1, '截止后不得为队列中的请求调用 HeroSMS');
+      assert.equal(getNumberCalls, 3, '截止后不得为队列中的请求调用 HeroSMS');
     } finally { await app.close(); }
   });
 
   test('明确无库存响应跨过授权截止秒后，不再调用下一个候选地区', async () => {
     let now = new Date('2026-08-24T00:00:00.000Z');
+    let getNumberCalls = 0;
     const attemptedCountries: number[] = [];
     const heroSms = scriptedHeroSms({
       getNumber: async (_serviceCode, countryId) => {
+        getNumberCalls += 1;
         attemptedCountries.push(countryId);
+        if (getNumberCalls === 1) {
+          return {
+            activationId: `no-stock-cross-${randomUUID()}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+            activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+          };
+        }
         now = new Date('2026-08-25T00:00:00.000Z');
         throw new HeroSmsResponseError('no-numbers');
       },
+      cancelActivation: async () => 'cancelled',
     });
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      now = new Date('2026-08-24T23:59:59.999Z');
-      assert.equal((await app.inject({ method: 'POST', url: `/a/${token}/numbers` })).statusCode, 404);
+      const claim = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claim.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claim, 'recipient_session')}`;
       assert.deepEqual(attemptedCountries, [1]);
+      // 领取截止 = 08-25 00:00；位置 1 已被领取消费，换号从位置 2 开始，
+      // 位置 2 返回明确无库存并把时间推进到截止，不再调用下一个候选地区。
+      now = new Date('2026-08-24T00:02:00.000Z');
+      const replaced = await app.inject({ method: 'POST', url: `/a/${token}/replacement/confirm`, headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'replacement=confirm' });
+      assert.equal(replaced.statusCode, 404);
+      assert.deepEqual(attemptedCountries, [1, 2]);
+      assert.equal(getNumberCalls, 2, '跨过领取截止后绝不能获取第三个候选地区');
     } finally { await app.close(); }
   });
 
@@ -2627,6 +2705,8 @@ if (!databaseUrl) {
     const heroSms = scriptedHeroSms({
       getNumber: async () => {
         getNumberCalls += 1;
+        // 领取发生在 08-01 00:00，领取截止 = 08-02 00:00；供应商在截止前 1 毫秒取得号码，窗口跨过截止
+        now = new Date('2026-08-01T23:59:59.999Z');
         return { activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) };
       },
       cancelActivation: async () => { cancelCalls += 1; return 'cancelled'; },
@@ -2634,9 +2714,9 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      now = new Date('2026-08-01T23:50:00.000Z');
+      // 立即领取，领取截止 = 08-02 00:00
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(claimed.statusCode, 303);
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -2663,15 +2743,15 @@ if (!databaseUrl) {
         'SELECT status, ended_reason, token_hash, recipient_session_hash FROM activation_authorizations WHERE token_suffix = $1',
         [token.slice(-8)],
       );
-      assert.equal(state.rows[0]?.status, 'expired');
-      assert.equal(state.rows[0]?.ended_reason, 'claim_window_ended');
+      assert.equal(state.rows[0]?.status, 'ended');
+      assert.equal(state.rows[0]?.ended_reason, 'acquisition_expired');
       assert.equal(state.rows[0]?.token_hash, null);
       assert.equal(state.rows[0]?.recipient_session_hash, null);
     } finally { await app.close(); }
   });
 
   test('第三个号码跨过领取截止后结束使用，仍以获取额度用尽结束并提供两分钟提示且不获取第四个号码', async () => {
-    let now = new Date('2026-08-01T06:00:00.000Z');
+    let now = new Date('2026-08-01T00:00:00.000Z');
     const activationIds = [0, 1, 2].map(() => randomUUID());
     let getNumberCalls = 0;
     let cancelCalls = 0;
@@ -2679,6 +2759,8 @@ if (!databaseUrl) {
       getNumber: async () => {
         const index = getNumberCalls;
         getNumberCalls += 1;
+        // 第三个号码在领取截止（08-02 00:00）前 1 毫秒取得，窗口跨过截止
+        if (index === 2) now = new Date('2026-08-01T23:59:59.999Z');
         return {
           activationId: activationIds[index]!, phoneNumber: `+1415555012${index + 3}`,
           activationCost: 0.8, currency: 'USD', activationTime: now,
@@ -2690,14 +2772,14 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      now = new Date('2026-08-01T23:50:00.000Z');
+      // 立即领取，领取截止 = 08-02 00:00
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
-      now = new Date('2026-08-01T23:52:00.000Z');
+      now = new Date('2026-08-01T00:02:00.000Z');
       assert.equal((await app.inject({ method: 'POST', url: `/a/${token}/replacement/confirm`, headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'replacement=confirm' })).statusCode, 303);
-      now = new Date('2026-08-01T23:54:00.000Z');
+      now = new Date('2026-08-01T00:04:00.000Z');
       assert.equal((await app.inject({ method: 'POST', url: `/a/${token}/replacement/confirm`, headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'replacement=confirm' })).statusCode, 303);
       assert.equal(getNumberCalls, 3);
 
@@ -2893,21 +2975,24 @@ if (!databaseUrl) {
     const heroSms = scriptedHeroSms({
       getNumber: async () => {
         getNumberCalls += 1;
+        // 领取发生在 08-01 00:00，领取截止 = 08-02 00:00；供应商在截止前 1 毫秒取得号码，窗口跨过截止
+        now = new Date('2026-08-01T23:59:59.999Z');
         return { activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) };
       },
       activationStatus: async () => ({ delivered: false, providerStatus: 'cancelled' }),
-      activationHistory: async () => [{ activationId, phoneNumber: '+14155550123', activationCost: 0, currency: 'USD', activationTime: now, status: 'cancelled' }],
+      activationHistory: async () => [{ activationId, phoneNumber: '+14155550123', activationCost: 0, currency: 'USD', activationTime: new Date('2026-08-01T23:59:59.999Z'), status: 'cancelled' }],
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      now = new Date('2026-08-01T23:50:00.000Z');
+      // 立即领取，领取截止 = 08-02 00:00
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
 
-      now = new Date('2026-08-02T00:10:00.000Z');
+      // 号码窗口（至 08-02 00:19:59.999）跨过领取截止后结束，超时收尾并以领取后期限结束
+      now = new Date('2026-08-02T00:20:00.000Z');
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } })).statusCode, 404);
       assert.equal(getNumberCalls, 1, '超时收尾不得创建后继号码');
       const state = await database.pool.query<{
@@ -2920,8 +3005,8 @@ if (!databaseUrl) {
          WHERE activation.provider_activation_id = $1`,
         [activationId],
       );
-      assert.equal(state.rows[0]?.status, 'expired');
-      assert.equal(state.rows[0]?.ended_reason, 'claim_window_ended');
+      assert.equal(state.rows[0]?.status, 'ended');
+      assert.equal(state.rows[0]?.ended_reason, 'acquisition_expired');
       assert.equal(state.rows[0]?.token_hash, null);
       assert.equal(state.rows[0]?.recipient_session_hash, null);
       assert.equal(state.rows[0]?.activation_status, 'timed_out');
@@ -2934,18 +3019,22 @@ if (!databaseUrl) {
     const activationId = `stale-numbers-${randomUUID()}`;
     let cancelCalls = 0;
     const heroSms = scriptedHeroSms({
-      getNumber: async () => ({
-        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
-        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
-      }),
+      getNumber: async () => {
+        // 领取发生在 08-01 00:00，领取截止 = 08-02 00:00；供应商在截止前 1 毫秒取得号码，窗口跨过截止
+        now = new Date('2026-08-01T23:59:59.999Z');
+        return {
+          activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
       cancelActivation: async () => { cancelCalls += 1; return 'cancelled'; },
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      now = new Date('2026-08-01T23:50:00.000Z');
+      // 立即领取，领取截止 = 08-02 00:00
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
 
@@ -2964,7 +3053,7 @@ if (!databaseUrl) {
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /结束使用/);
       assert.doesNotMatch(page.body, /更换号码|获取下一个号码/);
-      assert.match(page.body, /data-countdown="2026-08-02T00:10:00.000Z"/);
+      assert.match(page.body, /data-countdown="2026-08-02T00:19:59.999Z"/);
 
       // 跨截止的当前号码窗口内到达的短信仍进入完整五分钟结果窗口。
       now = new Date('2026-08-02T00:07:00.000Z');
@@ -3000,7 +3089,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       now = new Date('2026-08-01T23:59:59.999Z');
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
@@ -3022,6 +3111,8 @@ if (!databaseUrl) {
     const heroSms = scriptedHeroSms({
       getNumber: async () => {
         getNumberCalls += 1;
+        // 领取发生在 08-01 00:00，领取截止 = 08-02 00:00；首个号码在截止前 10 分钟取得，窗口跨过截止
+        now = new Date('2026-08-01T23:50:00.000Z');
         return {
           activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
           activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
@@ -3036,9 +3127,9 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: randomUUID() });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      now = new Date('2026-08-01T23:50:00.000Z');
+      // 立即领取，领取截止 = 08-02 00:00
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
 
@@ -3058,8 +3149,8 @@ if (!databaseUrl) {
          WHERE activation.provider_activation_id = $1`,
         [activationId],
       );
-      assert.equal(state.rows[0]?.status, 'expired');
-      assert.equal(state.rows[0]?.ended_reason, 'claim_window_ended');
+      assert.equal(state.rows[0]?.status, 'ended');
+      assert.equal(state.rows[0]?.ended_reason, 'acquisition_expired');
       assert.equal(state.rows[0]?.activation_status, 'cancelled');
       assert.equal(state.rows[0]?.replacement_pending, false);
       assert.equal(state.rows[0]?.end_use_pending, false);
@@ -3080,8 +3171,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const recipientIdentifier = `撤销确认-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -3091,7 +3181,7 @@ if (!databaseUrl) {
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.equal(confirmation.statusCode, 200);
       assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
-      assert.match(confirmation.body, new RegExp(recipientIdentifier));
+      assert.match(confirmation.body, new RegExp(`链接末 8 位：${token.slice(-8)}`));
       assert.match(confirmation.body, /<strong>授权状态：<\/strong>进行中/);
       assert.match(confirmation.body, /<strong>当前激活状态：<\/strong>waiting_sms/);
       assert.match(confirmation.body, /<strong>当前地区：<\/strong>美国/);
@@ -3142,8 +3232,7 @@ if (!databaseUrl) {
     let token = '';
     try {
       const session = await login(app);
-      const recipientIdentifier = `延迟撤销-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -3185,8 +3274,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const recipientIdentifier = `过早取消-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
@@ -3221,8 +3309,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const recipientIdentifier = `短信撤销-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -3259,8 +3346,7 @@ if (!databaseUrl) {
     let token = '';
     try {
       const session = await login(app);
-      const recipientIdentifier = `对账撤销-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       assert.equal((await app.inject({ method: 'POST', url: `/a/${token}/numbers` })).statusCode, 202);
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
@@ -3297,14 +3383,13 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const recipientIdentifier = `人工对账撤销-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(claimed.statusCode, 303);
 
       const authorization = await database.pool.query<{ id: string }>(
-        'SELECT id FROM activation_authorizations WHERE recipient_identifier = $1', [recipientIdentifier],
+        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
       );
       const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
       await database.pool.query(
@@ -3354,8 +3439,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const recipientIdentifier = `取消短信竞态-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
@@ -3384,8 +3468,7 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(heroSms, () => now);
     try {
       const session = await login(app);
-      const recipientIdentifier = `撤销短信退款竞态-${randomUUID()}`;
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
@@ -3427,8 +3510,7 @@ if (!databaseUrl) {
     const { app } = await openApplication(scriptedHeroSms(), () => now);
     try {
       const session = await login(app);
-      const recipientIdentifier = randomUUID();
-      const created = await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const id = authorizationIdFromHome(home.body, token);
@@ -3453,14 +3535,23 @@ if (!databaseUrl) {
     const { app, database } = await openApplication(scriptedHeroSms(), () => now);
     try {
       const session = await login(app);
-      const recipientIdentifier = `成本历史-${randomUUID()}`;
-      await createAuthorization(app, session, { recipientIdentifier });
+      const created = await createAuthorization(app, session);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      const token = links[0]!;
       const authorization = await database.pool.query<{ id: string }>(
-        'SELECT id FROM activation_authorizations WHERE recipient_identifier = $1', [recipientIdentifier],
+        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
       );
       const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
-      await database.pool.query("UPDATE activation_authorizations SET status = 'expired', token_hash = NULL WHERE id = $1", [authorizationId]);
+      await database.pool.query("UPDATE activation_authorizations SET status = 'ended', ended_reason = 'acquisition_expired', token_hash = NULL WHERE id = $1", [authorizationId]);
       const activationIds = ['first', 'second', 'third'].map((suffix) => `${suffix}-${randomUUID()}`);
+      // 先插入候选地区，满足 supplier_activations 的外键约束
+      for (const [index] of activationIds.entries()) {
+        await database.pool.query(
+          `INSERT INTO authorization_candidate_countries (authorization_id, position, country_id, country_name, used_at)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [authorizationId, index + 1, index + 1, ['美国', '英国', '法国'][index], now],
+        );
+      }
       for (const [index, activationId] of activationIds.entries()) {
         await database.pool.query(
           `INSERT INTO supplier_activations
@@ -3469,9 +3560,6 @@ if (!databaseUrl) {
           [authorizationId, index + 1, index + 1, activationId, index === 2 ? 'waiting_sms' : 'cancelled', [0.8, 1.25, 2][index], new Date(now.getTime() + index), new Date('2026-09-06T00:20:00.000Z')],
         );
       }
-      await database.pool.query(
-        'UPDATE authorization_candidate_countries SET used_at = $2 WHERE authorization_id = $1', [authorizationId, now],
-      );
       await database.pool.query(
         "UPDATE supplier_activations SET refund_reconciliation_status = 'pending' WHERE provider_activation_id = $1", [activationIds[0]],
       );
@@ -3488,7 +3576,6 @@ if (!databaseUrl) {
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       assert.match(home.body, new RegExp(`data-authorization-id="${authorizationId}"[^>]*>[\\s\\S]*?<span class="authorization-status">已结束</span>`));
-      assert.doesNotMatch(home.body, new RegExp(recipientIdentifier));
       assert.doesNotMatch(home.body, /已到期|等待短信|待处理异常|退款|费用|供应商激活|当前地区/);
       assert.doesNotMatch(home.body, /\+14155550123|482913|短信正文/);
       const eventsBeforeDetail = await database.pool.query<{ count: string }>(
@@ -3497,7 +3584,8 @@ if (!databaseUrl) {
       assert.ok(Number(eventsBeforeDetail.rows[0]?.count) >= 4, '状态变更应留下非敏感生命周期事件');
 
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /授权状态：已到期/);
+      assert.match(detail.body, /授权状态：已结束/);
+      assert.match(detail.body, /结束原因：领取后期限结束/);
       assert.match(detail.body, /供应商激活/);
       assert.match(detail.body, /first-/);
       assert.match(detail.body, /获取时间 2026-09-06 08:00:00/);
@@ -3602,18 +3690,17 @@ if (!databaseUrl) {
     }
   });
 
-  test('库存列表四个顶层状态筛选并兼容展示旧状态', async () => {
+  test('库存列表四个顶层状态筛选并展示记录', async () => {
     const { app, database } = await openApplication();
     await resetAuthorizationTables(database);
     try {
       const session = await login(app);
-      const created = await createBatch(app, session, '7');
+      const created = await createBatch(app, session, '4');
       assert.equal(created.statusCode, 201);
       const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
-      assert.equal(links.length, 7);
+      assert.equal(links.length, 4);
       const transitions: Array<[string, string]> = [
-        ['in_progress', links[0]!], ['result_available', links[1]!], ['sms_delivered', links[2]!],
-        ['quota_exhausted', links[3]!], ['revoked', links[4]!], ['expired', links[5]!],
+        ['in_progress', links[0]!], ['result_available', links[1]!], ['ended', links[2]!],
       ];
       for (const [status, link] of transitions) {
         const updated = await database.pool.query('UPDATE activation_authorizations SET status = $2 WHERE token_suffix = $1', [link.slice(-8), status]);
@@ -3622,8 +3709,7 @@ if (!databaseUrl) {
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       assert.equal(home.statusCode, 200);
-      assert.equal(listArticles(home.body).length, 7);
-      // 列表卡片不暴露接收者标识、供应商状态、费用、退款、时间或异常正文
+      assert.equal(listArticles(home.body).length, 4);
       assert.doesNotMatch(home.body, /供应商激活|累计激活费用|已确认退款|净成本|短信正文|待处理异常|等待短信|\+14155550123|482913/);
 
       const assertFilter = async (status: string, expectedSuffixes: string[], expectedStatusLabel: string): Promise<void> => {
@@ -3634,10 +3720,10 @@ if (!databaseUrl) {
         assert.ok(articles.every((article) => article.status === expectedStatusLabel), `状态 ${status} 应显示 ${expectedStatusLabel}`);
         assert.match(response.body, new RegExp(`<option value="${status}" selected>`));
       };
-      await assertFilter('unclaimed', [links[6]!.slice(-8)], '待领取');
+      await assertFilter('unclaimed', [links[3]!.slice(-8)], '待领取');
       await assertFilter('in_progress', [links[0]!.slice(-8)], '进行中');
-      await assertFilter('result_available', [links[1]!.slice(-8), links[2]!.slice(-8)], '结果可查看');
-      await assertFilter('ended', [links[3]!.slice(-8), links[4]!.slice(-8), links[5]!.slice(-8)], '已结束');
+      await assertFilter('result_available', [links[1]!.slice(-8)], '结果可查看');
+      await assertFilter('ended', [links[2]!.slice(-8)], '已结束');
     } finally { await app.close(); }
   });
 
@@ -3674,9 +3760,8 @@ if (!databaseUrl) {
       const other = await search('BBBB2222');
       assert.deepEqual(listArticles(other.body).map((article) => article.suffix), ['BBBB2222']);
 
-      // 接收者标识不能命中末 8 位搜索
-      const identifier = 'ABCD1234-用户';
-      const individual = await createAuthorization(app, session, { recipientIdentifier: identifier });
+      // 其他文本标识不能命中末 8 位搜索
+      const individual = await createAuthorization(app, session);
       assert.equal(individual.statusCode, 201);
       const byIdentifier = await search('ABCD1234');
       assert.equal(listArticles(byIdentifier.body).length, 0);
@@ -3748,7 +3833,7 @@ if (!databaseUrl) {
     await resetAuthorizationTables(database);
     try {
       const session = await login(app);
-      const created = await createAuthorization(app, session, { recipientIdentifier: `排序事实-${randomUUID()}` });
+      const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       const idResult = await database.pool.query<{ id: string }>('SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)]);
       const authorizationId = idResult.rows[0]?.id; assert.ok(authorizationId);
@@ -3811,11 +3896,11 @@ if (!databaseUrl) {
       const suffix = token.slice(-8);
       // 模拟旧模型撤销历史：没有保存后缀，也没有任何访问凭据
       const updated = await database.pool.query(
-        "UPDATE activation_authorizations SET token_suffix = NULL, token_hash = NULL, status = 'revoked', revoked_at = $2, ended_at = $2, ended_reason = 'admin_revoked' WHERE token_suffix = $1",
+        "UPDATE activation_authorizations SET token_suffix = NULL, token_hash = NULL, status = 'ended', ended_at = $2, ended_reason = 'admin_revoked' WHERE token_suffix = $1",
         [suffix, now],
       );
       assert.equal(updated.rowCount, 1);
-      const idResult = await database.pool.query<{ id: string }>('SELECT id FROM activation_authorizations WHERE token_hash IS NULL AND status = \'revoked\' LIMIT 1');
+      const idResult = await database.pool.query<{ id: string }>('SELECT id FROM activation_authorizations WHERE token_hash IS NULL AND status = \'ended\' LIMIT 1');
       const authorizationId = idResult.rows[0]?.id; assert.ok(authorizationId);
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
@@ -3920,7 +4005,7 @@ if (!databaseUrl) {
       );
       for (let pos = 1; pos <= 3; pos++) {
         await database.pool.query(
-          "INSERT INTO authorization_candidate_countries (authorization_id, position, country_id, country_name, quoted_price, quoted_stock, used_at) VALUES ($1, $2, 1, '美国', 1.5, 10, $3)",
+          "INSERT INTO authorization_candidate_countries (authorization_id, position, country_id, country_name, used_at) VALUES ($1, $2, 1, '美国', $3)",
           [idB, pos, now],
         );
       }
@@ -3931,7 +4016,7 @@ if (!databaseUrl) {
       assert.match(detail5.body, /获取额度：3\/3/);
       assert.doesNotMatch(detail5.body, /撤销授权/);
 
-      // 6. 期限结束详情 (claim_window_ended)
+      // 6. 期限结束详情 (acquisition_expired)
       const createdC = await createBatch(app, session, '1');
       const tokenC = createdC.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(tokenC);
       const homeC = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
@@ -3940,12 +4025,12 @@ if (!databaseUrl) {
       assert.ok([200, 202, 303].includes(claimC.statusCode));
       const cookC = `recipient_session=${cookieValue(claimC, 'recipient_session')}`;
       await database.pool.query(
-        "UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'claim_window_ended' WHERE token_hash = $1",
+        "UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'acquisition_expired' WHERE token_hash = $1",
         [createHash('sha256').update(tokenC).digest('hex'), now],
       );
       const detail6 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${idC}`, headers: { cookie: session.cookie } });
       assert.equal(detail6.statusCode, 200);
-      assert.match(detail6.body, /授权状态：已到期|授权状态：已结束/);
+      assert.match(detail6.body, /授权状态：已结束/);
       assert.match(detail6.body, /结束原因：领取后期限结束/);
       assert.doesNotMatch(detail6.body, /撤销授权/);
     } finally { await app.close(); }

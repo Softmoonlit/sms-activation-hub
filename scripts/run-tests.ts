@@ -49,14 +49,17 @@ function databaseUrl(baseUrl: string, databaseName: string): string {
 
 type TestSuite = 'node' | 'playwright';
 
-function testCommand(suite: TestSuite): string[] {
-  return suite === 'playwright'
-    ? [require.resolve('@playwright/test/cli'), 'test']
-    : ['--import', 'tsx', '--test', '--test-concurrency=1', 'test/**/*.test.ts'];
+function testCommand(suite: TestSuite, extraArgs: string[]): string[] {
+  if (suite === 'playwright') {
+    return [require.resolve('@playwright/test/cli'), 'test', ...extraArgs.filter((a) => a !== '--playwright')];
+  }
+  const filtered = extraArgs.filter((a) => a !== '--playwright');
+  const hasFiles = filtered.some((arg) => !arg.startsWith('-'));
+  return ['--import', 'tsx', '--test', '--test-concurrency=1', ...(hasFiles ? filtered : ['test/**/*.test.ts', ...filtered])];
 }
 
-async function runTests(testDatabaseUrl: string, suite: TestSuite): Promise<number> {
-  const child = spawn(process.execPath, testCommand(suite), {
+async function runTests(testDatabaseUrl: string, suite: TestSuite, extraArgs: string[]): Promise<number> {
+  const child = spawn(process.execPath, testCommand(suite, extraArgs), {
     env: { ...process.env, TEST_DATABASE_URL: testDatabaseUrl },
     stdio: 'inherit',
   });
@@ -74,7 +77,7 @@ async function runTests(testDatabaseUrl: string, suite: TestSuite): Promise<numb
   });
 }
 
-export async function main(suite: TestSuite = 'node'): Promise<number> {
+export async function main(suite: TestSuite = 'node', extraArgs: string[] = []): Promise<number> {
   const adminUrl = resolveTestDatabaseAdminUrl(process.env);
   const maintenanceUrl = databaseUrl(adminUrl, 'postgres');
   const testDatabaseName = `sms_website_test_${Date.now()}_${randomBytes(4).toString('hex')}`;
@@ -85,7 +88,7 @@ export async function main(suite: TestSuite = 'node'): Promise<number> {
   try {
     await client.query(`CREATE DATABASE ${quoteIdentifier(testDatabaseName)}`);
     console.log(`已创建隔离测试数据库：${testDatabaseName}`);
-    return await runTests(testDatabaseUrl, suite);
+    return await runTests(testDatabaseUrl, suite, extraArgs);
   } finally {
     await client.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(testDatabaseName)} WITH (FORCE)`);
     await client.end();
@@ -95,7 +98,8 @@ export async function main(suite: TestSuite = 'node'): Promise<number> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const suite: TestSuite = process.argv.includes('--playwright') ? 'playwright' : 'node';
-  main(suite).then(
+  const extraArgs = process.argv.slice(2);
+  main(suite, extraArgs).then(
     (exitCode) => { process.exitCode = exitCode; },
     (error: unknown) => {
       console.error(error instanceof Error ? error.message : error);

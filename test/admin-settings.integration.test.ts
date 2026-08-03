@@ -208,18 +208,24 @@ if (!databaseUrl) {
     }
   });
 
-  test('旧的仅地区 ID 配置会提示重新保存并在保存后补齐地区名称', async () => {
+  test('旧配置不完整时设置页提示重新保存，保存后补齐三个候选地区', async () => {
     const { app, database } = await openApplication();
     try {
-      await database.replaceDefaultCandidateCountryIds([1, 2, 1]);
+      // 旧配置被收缩迁移裁剪为不足三个位置时（迁移删除缺失地区名称的行），配置视为不完整；
+      // 先显式构造完整配置再删除位置 3，不依赖其他测试留下的状态。
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '中国' },
+        { countryId: 2, countryName: '美国' },
+        { countryId: 3, countryName: '英国' },
+      ]);
+      await database.pool.query('DELETE FROM default_candidate_countries WHERE position = 3');
       const session = await login(app);
       const settings = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
       assert.equal(settings.statusCode, 200);
-      assert.match(settings.body, /当前默认候选地区配置不完整，请重新选择并保存三个候选地区/);
-      assert.match(settings.body, /class="cb-input" type="text" value=""/);
+      assert.match(settings.body, /当前默认候选地区配置不完整，请重新选择并保存三个候选地区。/);
       assert.match(settings.body, /name="candidate1" value="1"/);
       assert.match(settings.body, /name="candidate2" value="2"/);
-      assert.match(settings.body, /name="candidate3" value="1"/);
+      assert.match(settings.body, /name="candidate3" value=""/);
 
       const saved = await app.inject({
         method: 'POST',

@@ -6,7 +6,6 @@ import { AUTHORIZATION_STATUS_LABELS, AuthorizationTokenSuffixCollisionError, Da
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsQuote } from './herosms.js';
 
 const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
-const AUTHORIZATION_LIFETIME_MS = CLAIM_ACQUISITION_LIFETIME_MS;
 const RESULT_VIEW_LIFETIME_MS = 5 * 60 * 1000;
 const END_PROMPT_LIFETIME_MS = 2 * 60 * 1000;
 const RESULT_VIEW_ENDED_REASON = 'result_view_expired';
@@ -17,7 +16,6 @@ export interface CreatedAuthorization {
   id: string;
   token: string;
   tokenSuffix: string;
-  expiresAt?: Date;
 }
 
 export interface AuthorizationTokenGenerator {
@@ -30,14 +28,6 @@ export interface BatchAuthorizationPreflight {
   quantity: number;
 }
 
-export interface AuthorizationPreflight {
-  recipientIdentifier: string;
-  normalizedRecipientIdentifier: string;
-  internalNote?: string;
-  balance: number;
-  candidates: Array<{ countryId: number; countryName: string; price: number; stock: number }>;
-}
-
 export interface AuthorizationSummary {
   id: string;
   tokenSuffix?: string;
@@ -46,19 +36,16 @@ export interface AuthorizationSummary {
 
 export interface AuthorizationDetail {
   id: string;
-  recipientIdentifier?: string;
   tokenSuffix?: string;
   status: AuthorizationListDisplayStatus;
   createdAt: Date;
   claimedAt?: Date;
-  expiresAt?: Date;
   numberAcquisitionExpiresAt?: Date;
   resultViewUntil?: Date;
   endPromptUntil?: Date;
   endedAt?: Date;
   endedReason?: string;
   lastActivityAt?: Date;
-  revokedAt?: Date;
   acquisitionCount: number;
   canRevoke: boolean;
   revocationConsequence?: string;
@@ -76,7 +63,7 @@ export interface AuthorizationDetail {
     verificationCode?: string;
     unrecognizedSmsText?: string;
   };
-  candidates: Array<{ countryName: string; quotedPrice?: number; quotedStock?: number; used: boolean }>;
+  candidates: Array<{ countryName: string; used: boolean }>;
   activations: Array<{
     countryName: string;
     providerActivationId: string;
@@ -169,7 +156,6 @@ export type ClaimResult =
 export interface AcquisitionReconciliation {
   id: string;
   tokenSuffix?: string;
-  recipientIdentifier?: string;
   countryName: string;
   status: '获取结果确认中' | '结果待人工对账';
   requestedAt: Date;
@@ -177,32 +163,6 @@ export interface AcquisitionReconciliation {
 }
 
 export class AuthorizationValidationError extends Error {}
-export class DuplicateActiveAuthorizationError extends Error {
-  constructor() {
-    super('同一接收者标识已有一条未结束激活授权。');
-  }
-}
-
-function normalizeRecipientIdentifier(value: string): string {
-  return value.trim().toLocaleLowerCase('zh-CN');
-}
-
-function candidateSnapshots(
-  configuredCountryIds: number[],
-  countries: HeroSmsCountry[],
-  quotes: HeroSmsQuote[],
-): AuthorizationPreflight['candidates'] {
-  const countryById = new Map(countries.map((country) => [country.id, country]));
-  const quoteById = new Map(quotes.map((quote) => [quote.countryId, quote]));
-  return configuredCountryIds.map((countryId) => {
-    const country = countryById.get(countryId);
-    const quote = quoteById.get(countryId);
-    if (!country || !quote || quote.stock < 1) {
-      throw new AuthorizationValidationError('任一候选地区无库存或无法查询，不能创建激活授权。');
-    }
-    return { countryId, countryName: country.name, price: quote.price, stock: quote.stock };
-  });
-}
 
 function tokenHash(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -251,12 +211,10 @@ function optionalDate(value: Date | null): Date | undefined {
 
 type AuthorizationDeadlineRow = {
   number_acquisition_expires_at?: Date | null;
-  expires_at?: Date | null;
-  authorization_expires_at?: Date | null;
 };
 
 function authorizationAcquisitionDeadline(row: AuthorizationDeadlineRow | null | undefined): Date | null {
-  return row?.number_acquisition_expires_at ?? row?.expires_at ?? row?.authorization_expires_at ?? null;
+  return row?.number_acquisition_expires_at ?? null;
 }
 
 interface NormalizedProviderActivationTimes {
@@ -336,7 +294,7 @@ export class ActivationAuthorizations {
       `SELECT min(deadline) AS expires_at
        FROM (
          SELECT CASE
-           WHEN auth.status IN ('result_available', 'sms_delivered') THEN auth.result_view_until
+           WHEN auth.status = 'result_available' THEN auth.result_view_until
            WHEN auth.status = 'ended' AND auth.ended_reason = $1 THEN auth.end_prompt_until
            WHEN auth.status = 'in_progress' AND (
              EXISTS (
@@ -348,7 +306,7 @@ export class ActivationAuthorizations {
                WHERE request.authorization_id = auth.id AND request.status IN ('requesting', 'reconciling', 'manual')
              )
            ) THEN NULL
-           ELSE COALESCE(auth.number_acquisition_expires_at, auth.expires_at)
+           ELSE auth.number_acquisition_expires_at
          END AS deadline
          FROM activation_authorizations auth
          WHERE auth.token_hash IS NOT NULL OR auth.recipient_session_hash IS NOT NULL
@@ -356,7 +314,7 @@ export class ActivationAuthorizations {
        WHERE deadline IS NOT NULL`,
       [QUOTA_EXHAUSTED_ENDED_REASON],
     );
-    return result.rows[0]?.expires_at ?? undefined;
+    return result.rows[0]?.expires_at || undefined;
   }
 
   async nextPendingRevocationCancellation(): Promise<Date | undefined> {
@@ -367,44 +325,10 @@ export class ActivationAuthorizations {
        JOIN activation_authorizations auth ON auth.id = activation.authorization_id
        WHERE activation.status IN ('waiting_sms', 'manual_reconciliation')
          AND activation.authorization_revocation_cancellation_pending
-         AND (auth.status <> 'in_progress' OR COALESCE(auth.number_acquisition_expires_at, auth.expires_at) > $1 OR auth.ended_reason = 'admin_revoked')`,
+         AND (auth.status <> 'in_progress' OR auth.number_acquisition_expires_at > $1 OR auth.ended_reason = 'admin_revoked')`,
       [now],
     );
-    return result.rows[0]?.cancel_available_at ?? undefined;
-  }
-
-  async preflight(recipientIdentifierValue: string, internalNoteValue?: string): Promise<AuthorizationPreflight> {
-    await this.deleteExpiredSensitiveDeliveryData();
-    const recipientIdentifier = recipientIdentifierValue.trim();
-    const normalizedRecipientIdentifier = normalizeRecipientIdentifier(recipientIdentifierValue);
-    const internalNote = internalNoteValue?.trim() || undefined;
-    if (!recipientIdentifier || recipientIdentifier.length > 200 || (internalNote?.length ?? 0) > 2000) {
-      throw new AuthorizationValidationError('请填写有效的接收者标识，备注最多 2000 个字符。');
-    }
-
-    const configuredCountryIds = await this.database.defaultCandidateCountryIds();
-    if (configuredCountryIds.length !== 3) {
-      throw new AuthorizationValidationError('请先配置三个默认候选地区。');
-    }
-
-    const [balance, services, countries, quotes] = await Promise.all([
-      this.heroSms.balance(),
-      this.heroSms.services(),
-      this.heroSms.countries(),
-      this.heroSms.quotes(this.openAiServiceCode),
-    ]);
-    if (!services.some((service) => service.code === this.openAiServiceCode)) {
-      throw new AuthorizationValidationError('HeroSMS 无法提供 OpenAI 服务。');
-    }
-    const candidates = candidateSnapshots(configuredCountryIds, countries, quotes);
-    const highestPrice = Math.max(...candidates.map((candidate) => candidate.price));
-    if (balance < highestPrice) {
-      throw new AuthorizationValidationError('HeroSMS 余额不足以覆盖候选地区的当前最高价格。');
-    }
-    if (await this.database.hasUnendedAuthorization(normalizedRecipientIdentifier, this.now())) {
-      throw new DuplicateActiveAuthorizationError();
-    }
-    return { recipientIdentifier, normalizedRecipientIdentifier, internalNote, balance, candidates };
+    return result.rows[0]?.cancel_available_at || undefined;
   }
 
   async batchPreflight(quantityValue: unknown): Promise<BatchAuthorizationPreflight> {
@@ -441,30 +365,6 @@ export class ActivationAuthorizations {
     throw new Error('批量生成授权 token 失败');
   }
 
-  async create(preflight: AuthorizationPreflight): Promise<CreatedAuthorization> {
-    const token = generatedToken(this.tokenGenerator);
-    const createdAt = this.now();
-    const expiresAt = new Date(createdAt.getTime() + AUTHORIZATION_LIFETIME_MS);
-    try {
-      const id = await this.database.createActivationAuthorization({
-        recipientIdentifier: preflight.recipientIdentifier,
-        normalizedRecipientIdentifier: preflight.normalizedRecipientIdentifier,
-        internalNote: preflight.internalNote,
-        tokenHash: tokenHash(token),
-        tokenSuffix: token.slice(-8),
-        createdAt,
-        expiresAt,
-        candidates: preflight.candidates,
-      });
-      return { id, token, tokenSuffix: token.slice(-8), expiresAt };
-    } catch (error) {
-      if (error && typeof error === 'object' && 'constraint' in error && error.constraint === 'activation_authorizations_unended_recipient_idx') {
-        throw new DuplicateActiveAuthorizationError();
-      }
-      throw error;
-    }
-  }
-
   async list(query: AuthorizationListQuery = {}): Promise<AuthorizationListPage> {
     return this.database.listActivationAuthorizations(query, this.now());
   }
@@ -472,8 +372,8 @@ export class ActivationAuthorizations {
   async revoke(id: string): Promise<boolean> {
     const cancellation = await this.database.transaction(async (client) => {
       const result = await client.query<{
-        status: AuthorizationStatus; expires_at: Date | null; number_acquisition_expires_at: Date | null; result_view_until: Date | null;
-      }>('SELECT status, expires_at, number_acquisition_expires_at, result_view_until FROM activation_authorizations WHERE id = $1 FOR UPDATE', [id]);
+        status: AuthorizationStatus; number_acquisition_expires_at: Date | null; result_view_until: Date | null;
+      }>('SELECT status, number_acquisition_expires_at, result_view_until FROM activation_authorizations WHERE id = $1 FOR UPDATE', [id]);
       const authorization = result.rows[0];
       const now = this.now();
       const pendingAcquisition = authorization?.status === 'in_progress'
@@ -488,16 +388,16 @@ export class ActivationAuthorizations {
           [id],
         )
         : undefined;
-      const resultViewAccessible = ['result_available', 'sms_delivered'].includes(authorization?.status ?? '')
+      const resultViewAccessible = authorization?.status === 'result_available'
         && authorization.result_view_until !== null && authorization.result_view_until > now;
       const accessDeadline = authorization ? authorizationAcquisitionDeadline(authorization) : null;
       if (!authorization
         || (!isAuthorizationAccessible(accessDeadline, now) && !resultViewAccessible && !activeActivation?.rowCount && !pendingAcquisition?.rowCount)
-        || !['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(authorization.status)) return undefined;
+        || authorization.status === 'ended') return undefined;
       await client.query(
         `UPDATE activation_authorizations
          SET status = 'ended',
-             revoked_at = $2, ended_at = $2, ended_reason = 'admin_revoked', last_activity_at = $2,
+             ended_at = $2, ended_reason = 'admin_revoked', last_activity_at = $2,
              token_hash = NULL,
              recipient_session_hash = NULL
          WHERE id = $1`,
@@ -564,15 +464,15 @@ export class ActivationAuthorizations {
   async detail(id: string): Promise<AuthorizationDetail | undefined> {
     await this.deleteExpiredSensitiveDeliveryData();
     const result = await this.database.pool.query<{
-      id: string; recipient_identifier: string | null; token_suffix: string | null; authorization_status: AuthorizationStatus;
-      created_at: Date; claimed_at: Date | null; authorization_expires_at: Date | null; number_acquisition_expires_at: Date | null;
+      id: string; token_suffix: string | null; authorization_status: AuthorizationStatus;
+      created_at: Date; claimed_at: Date | null; number_acquisition_expires_at: Date | null;
       result_view_until: Date | null; end_prompt_until: Date | null; ended_at: Date | null; ended_reason: string | null; last_activity_at: Date | null;
-      revoked_at: Date | null; country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
+      country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
       sms_code: string | null; sms_text: string | null; phone_number: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
       acquisition_country_name: string | null; cancel_available_at: Date | null;
     }>(
-      `SELECT auth.id, auth.recipient_identifier, auth.token_suffix, auth.status AS authorization_status,
-              auth.created_at, auth.claimed_at, auth.expires_at AS authorization_expires_at,
+      `SELECT auth.id, auth.token_suffix, auth.status AS authorization_status,
+              auth.created_at, auth.claimed_at,
               auth.number_acquisition_expires_at,
               COALESCE(auth.result_view_until, (
                 SELECT max(item.sms_received_at) + INTERVAL '5 minutes'
@@ -580,7 +480,7 @@ export class ActivationAuthorizations {
                 WHERE item.authorization_id = auth.id AND item.sms_received_at IS NOT NULL
               )) AS result_view_until,
               auth.end_prompt_until,
-              auth.ended_at, auth.ended_reason, auth.last_activity_at, auth.revoked_at,
+              auth.ended_at, auth.ended_reason, auth.last_activity_at,
               candidate.country_name, activation.status AS activation_status, activation.expires_at AS number_expires_at,
               activation.phone_number, activation.sms_code, activation.sms_text,
               (SELECT count(*) FROM authorization_candidate_countries candidate WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NOT NULL)::text AS used_count,
@@ -606,8 +506,8 @@ export class ActivationAuthorizations {
     const row = result.rows[0];
     if (!row) return undefined;
     const [candidateResult, activationResult] = await Promise.all([
-      this.database.pool.query<{ country_name: string; quoted_price: string | null; quoted_stock: string | null; used_at: Date | null }>(
-        'SELECT country_name, quoted_price::text, quoted_stock::text, used_at FROM authorization_candidate_countries WHERE authorization_id = $1 ORDER BY position', [id],
+      this.database.pool.query<{ country_name: string; used_at: Date | null }>(
+        'SELECT country_name, used_at FROM authorization_candidate_countries WHERE authorization_id = $1 ORDER BY position', [id],
       ),
       this.database.pool.query<{
         country_name: string; provider_activation_id: string; status: NonNullable<AuthorizationDetail['activation']>['status']; activation_cost: string; currency: string;
@@ -638,42 +538,37 @@ export class ActivationAuthorizations {
     const costs = [...costsByCurrency.entries()].map(([currency, cost]) => ({ ...cost, currency, netCost: cost.activationCost - cost.confirmedRefund }));
     const ACTIVE_ACTIVATION_STATUSES = new Set(['acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming']);
     const canRevoke = (isAuthorizationAccessible(authorizationAcquisitionDeadline(row), this.now())
-      || (['result_available', 'sms_delivered'].includes(row.authorization_status) && row.result_view_until !== null && row.result_view_until > this.now())
+      || (row.authorization_status === 'result_available' && row.result_view_until !== null && row.result_view_until > this.now())
       || (row.authorization_status === 'in_progress' && row.activation_status !== null && ACTIVE_ACTIVATION_STATUSES.has(row.activation_status))
       || (row.authorization_status === 'in_progress' && row.acquisition_status !== null))
-      && ['unclaimed', 'in_progress', 'result_available', 'sms_delivered'].includes(row.authorization_status);
+      && row.authorization_status !== 'ended';
     const revocationConsequence = !canRevoke ? undefined
       : row.acquisition_status ? '先完成供应商对账，确认号码后取消。'
         : row.activation_status === 'waiting_sms'
           ? (row.cancel_available_at && row.cancel_available_at > this.now() ? '将在可取消时请求取消当前供应商激活。'
             : row.number_expires_at && row.number_expires_at <= this.now() ? '当前激活已结束，仅终止接收者访问。' : '立即请求取消当前供应商激活。')
-          : row.authorization_status === 'result_available' || row.authorization_status === 'sms_delivered' ? '只终止接收者访问，不请求供应商取消。'
+          : row.authorization_status === 'result_available' ? '只终止接收者访问，不请求供应商取消。'
             : '立即终止接收者访问。';
     const detailNow = this.now();
     const ordinaryDeliveryDataVisible = row.ended_reason !== RESULT_VIEW_ENDED_REASON
       && row.number_expires_at !== null && row.number_expires_at > detailNow;
     const deliveryDataVisible = ordinaryDeliveryDataVisible
-      || (['result_available', 'sms_delivered'].includes(row.authorization_status) && row.result_view_until !== null && row.result_view_until > detailNow);
+      || (row.authorization_status === 'result_available' && row.result_view_until !== null && row.result_view_until > detailNow);
     return {
       id: row.id,
-      ...(row.recipient_identifier !== null ? { recipientIdentifier: row.recipient_identifier } : {}),
       ...(row.token_suffix !== null ? { tokenSuffix: row.token_suffix } : {}),
       status: AUTHORIZATION_STATUS_LABELS[row.authorization_status],
       createdAt: row.created_at,
       ...(optionalDate(row.claimed_at) ? { claimedAt: row.claimed_at! } : {}),
-      ...(optionalDate(row.authorization_expires_at) ? { expiresAt: row.authorization_expires_at! } : {}),
       ...(optionalDate(row.number_acquisition_expires_at) ? { numberAcquisitionExpiresAt: row.number_acquisition_expires_at! } : {}),
       ...(optionalDate(row.result_view_until) ? { resultViewUntil: row.result_view_until! } : {}),
       ...(optionalDate(row.end_prompt_until) ? { endPromptUntil: row.end_prompt_until! } : {}),
       ...(optionalDate(row.ended_at) ? { endedAt: row.ended_at! } : {}),
       ...(row.ended_reason ? { endedReason: row.ended_reason } : {}),
       ...(optionalDate(row.last_activity_at) ? { lastActivityAt: row.last_activity_at! } : {}),
-      ...(row.revoked_at ? { revokedAt: row.revoked_at } : {}),
       acquisitionCount: Number(row.used_count), canRevoke,
       candidates: candidateResult.rows.map((candidate) => ({
         countryName: candidate.country_name,
-        ...(candidate.quoted_price !== null ? { quotedPrice: Number(candidate.quoted_price) } : {}),
-        ...(candidate.quoted_stock !== null ? { quotedStock: Number(candidate.quoted_stock) } : {}),
         used: candidate.used_at !== null,
       })),
       activations,
@@ -699,7 +594,7 @@ export class ActivationAuthorizations {
        SET status = 'ended', result_view_until = COALESCE(result_view_until, $3),
            ended_at = COALESCE(ended_at, $2), ended_reason = COALESCE(ended_reason, $4),
            token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
-       WHERE id = $1 AND status IN ('in_progress', 'result_available', 'sms_delivered')`,
+       WHERE id = $1 AND status IN ('in_progress', 'result_available')`,
       [authorizationId, now, viewUntil ?? now, RESULT_VIEW_ENDED_REASON],
     );
     await client.query(
@@ -715,9 +610,7 @@ export class ActivationAuthorizations {
     await this.database.transaction(async (client) => {
       const expired = await client.query<{ id: string }>(
         `SELECT id FROM activation_authorizations
-         WHERE status IN ('result_available', 'sms_delivered')
-           AND ((result_view_until IS NOT NULL AND result_view_until <= $1)
-             OR (status = 'sms_delivered' AND result_view_until IS NULL))
+         WHERE status = 'result_available' AND result_view_until IS NOT NULL AND result_view_until <= $1
            AND ($2::uuid IS NULL OR id = $2)
          FOR UPDATE`,
         [now, authorizationId ?? null],
@@ -739,12 +632,12 @@ export class ActivationAuthorizations {
     await this.deleteExpiredSensitiveDeliveryData();
     const result = await this.database.pool.query<{
       id: string; status: AuthorizationStatus; ended_reason: string | null;
-      expires_at: Date | null; number_acquisition_expires_at: Date | null; result_view_until: Date | null; end_prompt_until: Date | null; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
+      number_acquisition_expires_at: Date | null; result_view_until: Date | null; end_prompt_until: Date | null; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
       acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string;
       acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; end_use_pending: boolean | null; sms_code: string | null;
       last_activation_status: string | null; last_activation_timed_out_at: Date | null;
     }>(
-      `SELECT auth.id, auth.status, auth.ended_reason, auth.expires_at, auth.number_acquisition_expires_at,
+      `SELECT auth.id, auth.status, auth.ended_reason, auth.number_acquisition_expires_at,
               COALESCE(auth.result_view_until, (
                 SELECT max(item.sms_received_at) + INTERVAL '5 minutes'
                 FROM supplier_activations item
@@ -777,7 +670,7 @@ export class ActivationAuthorizations {
     const now = this.now();
     const accessDeadline = authorizationAcquisitionDeadline(authorization);
     if (accessDeadline !== null && accessDeadline <= now
-      && !(['result_available', 'sms_delivered'].includes(authorization.status)
+      && !(authorization.status === 'result_available'
         && authorization.result_view_until && authorization.result_view_until > now)
       && !(authorization.status === 'ended'
         && authorization.ended_reason === QUOTA_EXHAUSTED_ENDED_REASON
@@ -790,10 +683,9 @@ export class ActivationAuthorizations {
       return { state: 'not-found' };
     }
     const expiresAt = optionalDate(authorizationAcquisitionDeadline(authorization));
-    if (authorization.status === 'revoked' || authorization.status === 'expired') return { state: 'not-found' };
     if (authorization.status === 'unclaimed') return { state: 'available', ...(expiresAt ? { expiresAt } : {}) };
     if (!sessionToken || !authorization.recipient_session_hash || tokenHash(sessionToken) !== authorization.recipient_session_hash) {
-      return authorization.status === 'in_progress' || authorization.status === 'result_available' || authorization.status === 'sms_delivered'
+      return authorization.status === 'in_progress' || authorization.status === 'result_available'
         ? { state: 'browser-mismatch', ...(expiresAt ? { expiresAt } : {}) }
         : { state: 'unavailable', ...(expiresAt ? { expiresAt } : {}) };
     }
@@ -827,7 +719,7 @@ export class ActivationAuthorizations {
         ? { currentNumberActionInProgress: authorization.end_use_pending ? 'end' as const : 'replace' as const } : {}),
       ...(authorization.last_activation_status === 'manual_reconciliation' && authorization.last_activation_timed_out_at ? { activationTimeoutInProgress: true } : {}),
       ...(authorization.last_activation_status === 'timed_out' && Number(authorization.used_count) < 3 ? { nextNumberAvailable: true } : {}),
-      ...(authorization.status === 'result_available' || authorization.status === 'sms_delivered' ? { smsDelivered: true } : {}),
+      ...(authorization.status === 'result_available' ? { smsDelivered: true } : {}),
       ...(authorization.sms_code ? { verificationCode: authorization.sms_code } : {}),
     };
   }
@@ -929,7 +821,7 @@ export class ActivationAuthorizations {
         }
       } else if (event.code && ['completion_confirming', 'completed', 'sms_delivered'].includes(current.status)) {
         // 轮询可能先取得正文，后续才取得供应商提供的结构化验证码。
-        if (!['result_available', 'sms_delivered'].includes(authorization.status)) return 'accepted';
+        if (authorization.status !== 'result_available') return 'accepted';
         if (!authorization.result_view_until || authorization.result_view_until <= now) {
           await this.endResultView(client, current.authorization_id, now);
         } else {
@@ -943,7 +835,7 @@ export class ActivationAuthorizations {
           await client.query(
             `UPDATE activation_authorizations
              SET last_activity_at = $2
-             WHERE id = $1 AND status IN ('result_available', 'sms_delivered')`,
+             WHERE id = $1 AND status = 'result_available'`,
             [current.authorization_id, now],
           );
         }
@@ -1031,7 +923,7 @@ export class ActivationAuthorizations {
          WHERE (
            (activation.status = 'waiting_sms' AND activation.expires_at > $1)
            OR (activation.status IN ('completion_confirming', 'completed', 'sms_delivered')
-             AND auth.status IN ('result_available', 'sms_delivered') AND auth.result_view_until > $1)
+             AND auth.status = 'result_available' AND auth.result_view_until > $1)
            OR (activation.status = 'manual_reconciliation' AND activation.timed_out_at IS NULL
              AND auth.status = 'result_available' AND auth.result_view_until > $1)
          )
@@ -1062,9 +954,8 @@ export class ActivationAuthorizations {
     await this.database.transaction(async (client) => {
       const expired = await client.query<{ id: string }>(
         `SELECT id FROM activation_authorizations
-         WHERE status IN ('result_available', 'sms_delivered')
-           AND ((result_view_until IS NOT NULL AND result_view_until <= $1)
-             OR (status = 'sms_delivered' AND result_view_until IS NULL))
+         WHERE status IN ('result_available')
+           AND ((result_view_until IS NOT NULL AND result_view_until <= $1))
          FOR UPDATE`,
         [now],
       );
@@ -1092,7 +983,7 @@ export class ActivationAuthorizations {
            AND NOT EXISTS (
              SELECT 1 FROM activation_authorizations auth
              WHERE auth.id = activation.authorization_id
-               AND auth.status IN ('result_available', 'sms_delivered')
+               AND auth.status = 'result_available'
                AND auth.result_view_until > $1
            )`,
         [now],
@@ -1381,15 +1272,12 @@ export class ActivationAuthorizations {
     // 不结束也不清理凭据，进入只允许当前号码收尾的阶段，避免后续送达的短信结果被丢弃。
     await client.query(
       `UPDATE activation_authorizations
-       SET status = CASE
-             WHEN status IN ('unclaimed', 'in_progress', 'sms_delivered', 'quota_exhausted', 'revoked', 'expired') THEN 'expired'
-             ELSE 'ended'
-           END,
+       SET status = 'ended',
            ended_at = COALESCE(ended_at, $2),
-           ended_reason = COALESCE(ended_reason, 'claim_window_ended'),
+           ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
            token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
-       WHERE id = $1 AND COALESCE(number_acquisition_expires_at, expires_at) <= $2
-         AND status NOT IN ('result_available', 'sms_delivered')
+       WHERE id = $1 AND number_acquisition_expires_at <= $2
+         AND status NOT IN ('result_available', 'ended')
          AND NOT (status = 'ended' AND end_prompt_until > $2)
          AND NOT (
            status = 'in_progress' AND EXISTS (
@@ -1418,8 +1306,8 @@ export class ActivationAuthorizations {
     await this.expireResultView(target.rows[0].id);
     await this.reconcileTimedOutActivations(target.rows[0].id);
     const transition = await this.database.transaction(async (client): Promise<ReplacementTransition> => {
-      const authorizationResult = await client.query<{ id: string; status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
-        'SELECT id, status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
+      const authorizationResult = await client.query<{ id: string; status: string; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+        'SELECT id, status, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
         [tokenHash(token)],
       );
       const authorization = authorizationResult.rows[0];
@@ -1519,7 +1407,7 @@ export class ActivationAuthorizations {
            JOIN activation_authorizations auth ON auth.id = activation.authorization_id
            WHERE activation.status IN ('waiting_sms', 'manual_reconciliation') AND activation.authorization_revocation_cancellation_pending AND activation.cancel_available_at <= $1
              AND (activation.authorization_revocation_cancellation_retry_after IS NULL OR activation.authorization_revocation_cancellation_retry_after <= $1)
-             AND (auth.status <> 'in_progress' OR COALESCE(auth.number_acquisition_expires_at, auth.expires_at) > $1 OR auth.ended_reason = 'admin_revoked')
+             AND (auth.status <> 'in_progress' OR auth.number_acquisition_expires_at > $1 OR auth.ended_reason = 'admin_revoked')
            ORDER BY activation.cancel_available_at LIMIT 1 FOR UPDATE SKIP LOCKED
          ) RETURNING activation.provider_activation_id`,
         [this.now()],
@@ -1568,14 +1456,14 @@ export class ActivationAuthorizations {
       `UPDATE supplier_activations activation SET replacement_pending = false, end_use_pending = false
        FROM activation_authorizations auth
        WHERE activation.authorization_id = auth.id AND activation.status = 'cancelled' AND activation.replacement_pending
-         AND (auth.status <> 'in_progress' OR COALESCE(auth.number_acquisition_expires_at, auth.expires_at) <= $1)`,
+         AND (auth.status <> 'in_progress' OR auth.number_acquisition_expires_at <= $1)`,
       [now],
     );
     const pending = await this.database.pool.query<{ authorization_id: string }>(
       `SELECT activation.authorization_id FROM supplier_activations activation
        JOIN activation_authorizations auth ON auth.id = activation.authorization_id
        WHERE activation.status = 'cancelled' AND activation.replacement_pending
-         AND auth.status = 'in_progress' AND COALESCE(auth.number_acquisition_expires_at, auth.expires_at) > $1
+         AND auth.status = 'in_progress' AND auth.number_acquisition_expires_at > $1
        ORDER BY activation.acquired_at`,
       [now],
     );
@@ -1591,7 +1479,6 @@ export class ActivationAuthorizations {
            WHERE activation.provider_activation_id = $1 AND activation.status = 'cancellation_confirming'
              AND (
                activation.expires_at > $2
-               OR auth.status IN ('revoked', 'expired')
                OR auth.status = 'ended' AND auth.ended_reason = 'admin_revoked'
              )`,
         [providerActivationId, this.now()],
@@ -1601,19 +1488,18 @@ export class ActivationAuthorizations {
       await client.query('SELECT id FROM activation_authorizations WHERE id = $1 FOR UPDATE', [authorizationId]);
       const result = await client.query<{
         id: string; authorization_id: string; replacement_pending: boolean; end_use_pending: boolean; authorization_status: string;
-        authorization_expires_at: Date | null; number_acquisition_expires_at: Date | null;
+        number_acquisition_expires_at: Date | null;
         activation_cost: string; currency: string;
       }>(
         `SELECT activation.id, activation.authorization_id, activation.replacement_pending, activation.end_use_pending,
                 auth.status AS authorization_status,
-                auth.expires_at AS authorization_expires_at, auth.number_acquisition_expires_at,
+                auth.number_acquisition_expires_at,
                 activation.activation_cost::text, activation.currency
          FROM supplier_activations activation
          JOIN activation_authorizations auth ON auth.id = activation.authorization_id
          WHERE activation.provider_activation_id = $1 AND activation.status = 'cancellation_confirming'
            AND (
              activation.expires_at > $2
-             OR auth.status IN ('revoked', 'expired')
              OR auth.status = 'ended' AND auth.ended_reason = 'admin_revoked'
            )
          FOR UPDATE OF activation`,
@@ -1682,8 +1568,8 @@ export class ActivationAuthorizations {
     sessionHash: string | undefined,
     quotes: HeroSmsQuote[],
   ): Promise<PreparedNumberAcquisition> {
-    const authorizationResult = await client.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
-      'SELECT status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1 FOR UPDATE',
+    const authorizationResult = await client.query<{ status: string; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+      'SELECT status, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1 FOR UPDATE',
       [authorizationId],
     );
     const authorization = authorizationResult.rows[0];
@@ -1729,14 +1615,14 @@ export class ActivationAuthorizations {
     authorizationId: string,
     sessionHash: string | undefined,
   ): Promise<'available' | 'expired' | 'unavailable'> {
-    const result = await this.database.pool.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
-      'SELECT status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
+    const result = await this.database.pool.query<{ status: string; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+      'SELECT status, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
       [authorizationId],
     );
     const authorization = result.rows[0];
     const acquisitionExpiresAt = authorizationAcquisitionDeadline(authorization);
     if (!authorization || !acquisitionExpiresAt || acquisitionExpiresAt <= this.now()) return 'expired';
-    if (!['in_progress', 'sms_delivered', 'result_available'].includes(authorization.status)
+    if (!['in_progress', 'result_available'].includes(authorization.status)
       || (sessionHash !== undefined && authorization.recipient_session_hash !== sessionHash)) return 'unavailable';
     return 'available';
   }
@@ -1750,8 +1636,8 @@ export class ActivationAuthorizations {
       if (options.clearPendingReplacement) await this.clearPendingReplacement(authorizationId);
     };
 
-    const eligibility = await this.database.pool.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null }>(
-      'SELECT status, expires_at, number_acquisition_expires_at FROM activation_authorizations WHERE id = $1',
+    const eligibility = await this.database.pool.query<{ status: string; number_acquisition_expires_at: Date | null }>(
+      'SELECT status, number_acquisition_expires_at FROM activation_authorizations WHERE id = $1',
       [authorizationId],
     );
     const authorization = eligibility.rows[0];
@@ -1773,8 +1659,8 @@ export class ActivationAuthorizations {
         const pending = unresolved.rows[0];
         if (pending) return pending.authorization_id === authorizationId ? 'confirming' : 'paused';
 
-        const currentResult = await client.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null }>(
-          'SELECT status, expires_at, number_acquisition_expires_at FROM activation_authorizations WHERE id = $1',
+        const currentResult = await client.query<{ status: string; number_acquisition_expires_at: Date | null }>(
+          'SELECT status, number_acquisition_expires_at FROM activation_authorizations WHERE id = $1',
           [authorizationId],
         );
         const current = currentResult.rows[0];
@@ -1835,15 +1721,15 @@ export class ActivationAuthorizations {
              SELECT auth.id, $2, $3, $4, 'requesting', $5, $5
              FROM activation_authorizations auth
              WHERE auth.id = $1 AND auth.status = 'in_progress'
-               AND COALESCE(auth.number_acquisition_expires_at, auth.expires_at) > $5
+               AND auth.number_acquisition_expires_at > $5
                AND ($6::text IS NULL OR auth.recipient_session_hash = $6)
              RETURNING id`,
             [authorizationId, candidate.position, candidate.countryId, candidate.requestedPrice, requestedAt, sessionHash ?? null],
           );
           const requestId = request.rows[0]?.id;
           if (!requestId) {
-            const currentResult = await client.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
-              'SELECT status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
+            const currentResult = await client.query<{ status: string; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+              'SELECT status, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
               [authorizationId],
             );
             const current = currentResult.rows[0];
@@ -1862,8 +1748,8 @@ export class ActivationAuthorizations {
             return 'error';
           }
 
-          const currentAuthorization = await client.query<{ status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
-            'SELECT status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
+          const currentAuthorization = await client.query<{ status: string; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null }>(
+            'SELECT status, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE id = $1',
             [authorizationId],
           );
           const current = currentAuthorization.rows[0];
@@ -1978,9 +1864,9 @@ export class ActivationAuthorizations {
     let newlyClaimed = false;
     const authorizationId = await this.database.transaction(async (client) => {
       const result = await client.query<{
-        id: string; status: string; expires_at: Date | null; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null;
+        id: string; status: string; number_acquisition_expires_at: Date | null; recipient_session_hash: string | null;
       }>(
-        'SELECT id, status, expires_at, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
+        'SELECT id, status, number_acquisition_expires_at, recipient_session_hash FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
         [tokenHash(token)],
       );
       const authorization = result.rows[0];
@@ -1993,36 +1879,26 @@ export class ActivationAuthorizations {
         return undefined;
       }
       if (authorization.status === 'unclaimed') {
-        if (authorization.expires_at === null) {
-          const configuredLocations = await this.database.completeDefaultCandidateLocationsFor(client);
-          if (!configuredLocations) return 'claim-failed' as const;
-          const numberAcquisitionExpiresAt = new Date(now.getTime() + CLAIM_ACQUISITION_LIFETIME_MS);
-          for (const location of configuredLocations) {
-            await client.query(
-              `INSERT INTO authorization_candidate_countries
-                (authorization_id, position, country_id, country_name, quoted_price, quoted_stock)
-               VALUES ($1, $2, $3, $4, NULL, NULL)`,
-              [authorization.id, location.position, location.countryId, location.countryName],
-            );
-          }
-          sessionToken = randomBytes(32).toString('base64url');
+        const configuredLocations = await this.database.completeDefaultCandidateLocationsFor(client);
+        if (!configuredLocations) return 'claim-failed' as const;
+        const numberAcquisitionExpiresAt = new Date(now.getTime() + CLAIM_ACQUISITION_LIFETIME_MS);
+        for (const location of configuredLocations) {
           await client.query(
-            `UPDATE activation_authorizations
-             SET status = 'in_progress', claimed_at = $2, number_acquisition_expires_at = $3,
-                 recipient_session_hash = $4, last_activity_at = $2
-             WHERE id = $1 AND status = 'unclaimed'`,
-            [authorization.id, now, numberAcquisitionExpiresAt, tokenHash(sessionToken)],
+            `INSERT INTO authorization_candidate_countries
+              (authorization_id, position, country_id, country_name)
+             VALUES ($1, $2, $3, $4)`,
+            [authorization.id, location.position, location.countryId, location.countryName],
           );
-          newlyClaimed = true;
-        } else {
-          // 兼容旧的逐条创建路径：其候选快照和创建期限仍由旧流程维护。
-          sessionToken = randomBytes(32).toString('base64url');
-          await client.query(
-            "UPDATE activation_authorizations SET status = 'in_progress', claimed_at = COALESCE(claimed_at, $2), recipient_session_hash = $3, last_activity_at = $2 WHERE id = $1 AND status = 'unclaimed'",
-            [authorization.id, now, tokenHash(sessionToken)],
-          );
-          newlyClaimed = true;
         }
+        sessionToken = randomBytes(32).toString('base64url');
+        await client.query(
+          `UPDATE activation_authorizations
+           SET status = 'in_progress', claimed_at = $2, number_acquisition_expires_at = $3,
+               recipient_session_hash = $4, last_activity_at = $2
+           WHERE id = $1 AND status = 'unclaimed'`,
+          [authorization.id, now, numberAcquisitionExpiresAt, tokenHash(sessionToken)],
+        );
+        newlyClaimed = true;
         return authorization.id;
       }
       return authorization.status === 'in_progress'
@@ -2055,9 +1931,9 @@ export class ActivationAuthorizations {
 
   async listAcquisitionReconciliations(): Promise<AcquisitionReconciliation[]> {
     const requests = await this.database.pool.query<{
-      id: string; recipient_identifier: string | null; token_suffix: string | null; country_name: string; status: 'requesting' | 'reconciling' | 'manual'; requested_at: Date;
+      id: string; token_suffix: string | null; country_name: string; status: 'requesting' | 'reconciling' | 'manual'; requested_at: Date;
     }>(
-      `SELECT request.id, auth.recipient_identifier, auth.token_suffix, candidate.country_name, request.status, request.requested_at
+      `SELECT request.id, auth.token_suffix, candidate.country_name, request.status, request.requested_at
        FROM number_acquisition_requests request
        JOIN activation_authorizations auth ON auth.id = request.authorization_id
        JOIN authorization_candidate_countries candidate ON candidate.authorization_id = request.authorization_id AND candidate.position = request.candidate_position
@@ -2071,7 +1947,6 @@ export class ActivationAuthorizations {
       );
       result.push({
         id: request.id,
-        ...(request.recipient_identifier !== null ? { recipientIdentifier: request.recipient_identifier } : {}),
         ...(request.token_suffix !== null ? { tokenSuffix: request.token_suffix } : {}),
         countryName: request.country_name,
         status: request.status === 'manual' ? '结果待人工对账' : '获取结果确认中',
@@ -2092,7 +1967,6 @@ export class ActivationAuthorizations {
         `SELECT request.id FROM number_acquisition_requests request
          JOIN activation_authorizations auth ON auth.id = request.authorization_id
          WHERE request.status IN ('requesting', 'reconciling')
-            OR (request.status = 'manual' AND auth.status IN ('revoked', 'expired'))
             OR (request.status = 'manual' AND auth.status = 'ended' AND auth.ended_reason = 'admin_revoked')
          ORDER BY request.requested_at`,
       );
@@ -2159,10 +2033,7 @@ export class ActivationAuthorizations {
     );
     const authorization = authorizationResult.rows[0];
     // 撤销后的请求只保留供应商激活 ID、时间、费用和状态等对账事实，不重新保存完整号码。
-    const terminalAccess = authorization
-      && (authorization.status === 'ended' && authorization.ended_reason === 'admin_revoked'
-        || authorization.status === 'revoked'
-        || authorization.status === 'expired');
+    const terminalAccess = Boolean(authorization && authorization.status === 'ended' && authorization.ended_reason === 'admin_revoked');
 
     const windowStart = new Date(request.requested_at.getTime() - 5 * 60 * 1000);
     const windowEnd = new Date(this.now().getTime() + 5 * 60 * 1000);
@@ -2302,15 +2173,13 @@ export class ActivationAuthorizations {
     number: HeroSmsNumber,
     fallbackPrice: number,
   ): Promise<boolean> {
-    const authorization = await client.query<{ expires_at: Date | null; number_acquisition_expires_at: Date | null; status: string; ended_reason: string | null }>(
-      'SELECT expires_at, number_acquisition_expires_at, status, ended_reason FROM activation_authorizations WHERE id = $1 FOR UPDATE',
+    const authorization = await client.query<{ number_acquisition_expires_at: Date | null; status: string; ended_reason: string | null }>(
+      'SELECT number_acquisition_expires_at, status, ended_reason FROM activation_authorizations WHERE id = $1 FOR UPDATE',
       [authorizationId],
     );
     const acquisitionExpiresAt = authorizationAcquisitionDeadline(authorization.rows[0]);
     const authorizationStatus = authorization.rows[0]?.status;
-    const terminalAccess = authorizationStatus === 'revoked'
-      || authorizationStatus === 'expired'
-      || (authorizationStatus === 'ended' && authorization.rows[0]?.ended_reason === 'admin_revoked');
+    const terminalAccess = authorizationStatus === 'ended' && authorization.rows[0]?.ended_reason === 'admin_revoked';
     if (!authorizationStatus || (!acquisitionExpiresAt && !terminalAccess)) throw new Error('激活授权不存在');
     const confirmedAt = this.now();
     const normalizedTimes = normalizeProviderActivationTimes(number, confirmedAt);

@@ -4,13 +4,9 @@ export type AuthorizationStatus =
   | 'unclaimed'
   | 'in_progress'
   | 'result_available'
-  | 'ended'
-  | 'sms_delivered'
-  | 'quota_exhausted'
-  | 'revoked'
-  | 'expired';
+  | 'ended';
 
-export type AuthorizationListDisplayStatus = '待领取' | '进行中' | '结果可查看' | '已结束' | '短信已送达' | '额度已用尽' | '已撤销' | '已到期';
+export type AuthorizationListDisplayStatus = '待领取' | '进行中' | '结果可查看' | '已结束';
 export type AuthorizationListTopLevelStatus = 'unclaimed' | 'in_progress' | 'result_available' | 'ended';
 
 export const AUTHORIZATION_LIST_PAGE_SIZE = 20;
@@ -41,12 +37,10 @@ export interface AuthorizationListPage {
 
 export interface AuthorizationListItem {
   id: string;
-  recipientIdentifier?: string;
   tokenSuffix?: string;
   internalNote?: string;
   status: AuthorizationListDisplayStatus;
   createdAt: Date;
-  expiresAt?: Date;
   lastActivityAt: Date;
   canRevoke: boolean;
   currentActivationStatus?: string;
@@ -54,28 +48,28 @@ export interface AuthorizationListItem {
 }
 
 export const AUTHORIZATION_STATUS_LABELS: Record<AuthorizationStatus, AuthorizationListDisplayStatus> = {
-  unclaimed: '待领取', in_progress: '进行中', result_available: '结果可查看', ended: '已结束',
-  sms_delivered: '短信已送达', quota_exhausted: '额度已用尽', revoked: '已撤销', expired: '已到期',
+  unclaimed: '待领取',
+  in_progress: '进行中',
+  result_available: '结果可查看',
+  ended: '已结束',
 };
 
 export const AUTHORIZATION_LIST_STATUS_LABELS: Record<AuthorizationListTopLevelStatus, AuthorizationListRecord['status']> = {
-  unclaimed: '待领取', in_progress: '进行中', result_available: '结果可查看', ended: '已结束',
+  unclaimed: '待领取',
+  in_progress: '进行中',
+  result_available: '结果可查看',
+  ended: '已结束',
 };
 
-/** 各顶层状态对应的底层状态集合：列表筛选与顶层归一展示共用同一份定义，旧状态不会从列表中消失。 */
 export const AUTHORIZATION_LIST_STATUS_BUCKETS: Record<AuthorizationListTopLevelStatus, readonly AuthorizationStatus[]> = {
   unclaimed: ['unclaimed'],
   in_progress: ['in_progress'],
-  result_available: ['result_available', 'sms_delivered'],
-  ended: ['ended', 'quota_exhausted', 'revoked', 'expired'],
+  result_available: ['result_available'],
+  ended: ['ended'],
 };
 
-/** 底层状态到列表顶层状态的唯一归一映射。 */
 export function topLevelStatusOf(status: AuthorizationStatus): AuthorizationListTopLevelStatus {
-  for (const [topLevel, statuses] of Object.entries(AUTHORIZATION_LIST_STATUS_BUCKETS) as Array<[AuthorizationListTopLevelStatus, readonly AuthorizationStatus[]]>) {
-    if (statuses.includes(status)) return topLevel;
-  }
-  return 'ended';
+  return status;
 }
 
 export interface DefaultCandidateLocation {
@@ -145,7 +139,7 @@ export class Database {
       CREATE TABLE IF NOT EXISTS default_candidate_countries (
         position SMALLINT PRIMARY KEY CHECK (position BETWEEN 1 AND 3),
         country_id INTEGER NOT NULL CHECK (country_id >= 0),
-        country_name TEXT
+        country_name TEXT NOT NULL
       );
 
       ALTER TABLE default_candidate_countries
@@ -156,23 +150,21 @@ export class Database {
 
       ALTER TABLE default_candidate_countries
         DROP CONSTRAINT IF EXISTS default_candidate_countries_country_name_check;
-      UPDATE default_candidate_countries
-        SET country_name = NULL
-        WHERE country_name IS NOT NULL AND btrim(country_name) = '';
+      DELETE FROM default_candidate_countries
+        WHERE country_name IS NULL OR btrim(country_name) = '';
+      ALTER TABLE default_candidate_countries
+        ALTER COLUMN country_name SET NOT NULL;
       ALTER TABLE default_candidate_countries
         ADD CONSTRAINT default_candidate_countries_country_name_check
-        CHECK (country_name IS NULL OR length(btrim(country_name)) > 0);
+        CHECK (length(btrim(country_name)) > 0);
 
       CREATE TABLE IF NOT EXISTS activation_authorizations (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        recipient_identifier TEXT,
-        normalized_recipient_identifier TEXT,
         internal_note TEXT,
         token_hash TEXT,
         token_suffix TEXT,
         status TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
-        expires_at TIMESTAMPTZ,
         claimed_at TIMESTAMPTZ,
         number_acquisition_expires_at TIMESTAMPTZ,
         result_view_until TIMESTAMPTZ,
@@ -180,15 +172,34 @@ export class Database {
         ended_at TIMESTAMPTZ,
         ended_reason TEXT,
         last_activity_at TIMESTAMPTZ,
-        revoked_at TIMESTAMPTZ
+        recipient_session_hash TEXT
       );
+    `);
 
-      ALTER TABLE activation_authorizations
-        ALTER COLUMN recipient_identifier DROP NOT NULL;
-      ALTER TABLE activation_authorizations
-        ALTER COLUMN normalized_recipient_identifier DROP NOT NULL;
-      ALTER TABLE activation_authorizations
-        ALTER COLUMN expires_at DROP NOT NULL;
+    // 检查是否存在未完结的旧模型记录
+    const columnCheck = await this.pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_name = 'activation_authorizations'
+         AND column_name = ANY($1::text[])`,
+      [['recipient_identifier', 'expires_at']],
+    );
+    if (columnCheck.rows.length > 0) {
+      const activeLegacyCheck = await this.pool.query(
+        `SELECT id FROM activation_authorizations
+         WHERE status IN ('unclaimed', 'in_progress', 'result_available', 'sms_delivered', 'quota_exhausted')
+           AND (
+             recipient_identifier IS NOT NULL
+             OR expires_at IS NOT NULL
+             OR (claimed_at IS NULL AND status <> 'unclaimed')
+           )
+         LIMIT 1`,
+      );
+      if (activeLegacyCheck.rows.length > 0) {
+        throw new Error('存在未完结的旧模型激活授权，收缩迁移无法安全继续');
+      }
+    }
+
+    await this.pool.query(`
       ALTER TABLE activation_authorizations
         ADD COLUMN IF NOT EXISTS token_suffix TEXT;
       ALTER TABLE activation_authorizations
@@ -205,20 +216,58 @@ export class Database {
         ADD COLUMN IF NOT EXISTS ended_reason TEXT;
       ALTER TABLE activation_authorizations
         ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;
-
-      ALTER TABLE activation_authorizations
-        ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
-
       ALTER TABLE activation_authorizations
         ADD COLUMN IF NOT EXISTS recipient_session_hash TEXT;
 
-      ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_status_check;
       UPDATE activation_authorizations
-        SET token_hash = NULL, recipient_session_hash = NULL
-        WHERE status IN ('revoked', 'expired')
-           OR (status = 'ended' AND ended_reason = 'admin_revoked');
+        SET status = 'ended',
+            ended_reason = 'admin_revoked',
+            ended_at = COALESCE(ended_at, created_at),
+            token_hash = NULL,
+            recipient_session_hash = NULL
+        WHERE status = 'revoked';
+
+      UPDATE activation_authorizations
+        SET status = 'ended',
+            ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
+            ended_at = COALESCE(ended_at, created_at),
+            token_hash = NULL,
+            recipient_session_hash = NULL
+        WHERE status = 'expired';
+
+      UPDATE activation_authorizations
+        SET status = 'ended',
+            ended_reason = COALESCE(ended_reason, 'quota_exhausted'),
+            token_hash = NULL,
+            recipient_session_hash = NULL
+        WHERE status = 'quota_exhausted';
+
+      UPDATE activation_authorizations
+        SET status = CASE
+              WHEN result_view_until IS NOT NULL AND result_view_until > now() THEN 'result_available'
+              ELSE 'ended'
+            END,
+            ended_reason = CASE
+              WHEN result_view_until IS NOT NULL AND result_view_until > now() THEN ended_reason
+              ELSE 'result_view_expired'
+            END,
+            ended_at = CASE
+              WHEN result_view_until IS NOT NULL AND result_view_until > now() THEN ended_at
+              ELSE COALESCE(ended_at, result_view_until, now())
+            END,
+            token_hash = CASE
+              WHEN result_view_until IS NOT NULL AND result_view_until > now() THEN token_hash
+              ELSE NULL
+            END,
+            recipient_session_hash = CASE
+              WHEN result_view_until IS NOT NULL AND result_view_until > now() THEN recipient_session_hash
+              ELSE NULL
+            END
+        WHERE status = 'sms_delivered';
+
+      ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_status_check;
       ALTER TABLE activation_authorizations ADD CONSTRAINT activation_authorizations_status_check
-        CHECK (status IN ('unclaimed', 'in_progress', 'result_available', 'ended', 'sms_delivered', 'quota_exhausted', 'revoked', 'expired'));
+        CHECK (status IN ('unclaimed', 'in_progress', 'result_available', 'ended'));
 
       ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_expires_at_check;
       ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_check;
@@ -235,32 +284,12 @@ export class Database {
         WHERE token_suffix IS NOT NULL;
 
       DROP INDEX IF EXISTS activation_authorizations_unclaimed_recipient_idx;
-      UPDATE activation_authorizations
-      SET normalized_recipient_identifier = NULL
-      WHERE id IN (
-        SELECT id FROM (
-          SELECT id,
-                 row_number() OVER (
-                   PARTITION BY normalized_recipient_identifier
-                   ORDER BY CASE status
-                     WHEN 'result_available' THEN 1
-                     WHEN 'sms_delivered' THEN 2
-                     WHEN 'in_progress' THEN 3
-                     WHEN 'unclaimed' THEN 4
-                     ELSE 5
-                   END, last_activity_at DESC NULLS LAST, created_at DESC, id DESC
-                 ) AS duplicate_rank
-          FROM activation_authorizations
-          WHERE normalized_recipient_identifier IS NOT NULL
-            AND status IN ('unclaimed', 'in_progress', 'result_available', 'sms_delivered')
-        ) duplicates
-        WHERE duplicates.duplicate_rank > 1
-      );
-
       DROP INDEX IF EXISTS activation_authorizations_unended_recipient_idx;
-      CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_unended_recipient_idx
-        ON activation_authorizations (normalized_recipient_identifier)
-        WHERE normalized_recipient_identifier IS NOT NULL AND status IN ('unclaimed', 'in_progress', 'result_available', 'sms_delivered');
+
+      ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS recipient_identifier;
+      ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS normalized_recipient_identifier;
+      ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS expires_at;
+      ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS revoked_at;
 
       CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_recipient_session_idx
         ON activation_authorizations (recipient_session_hash)
@@ -281,18 +310,17 @@ export class Database {
         position SMALLINT NOT NULL CHECK (position BETWEEN 1 AND 3),
         country_id INTEGER NOT NULL CHECK (country_id >= 0),
         country_name TEXT NOT NULL,
-        quoted_price NUMERIC CHECK (quoted_price >= 0),
-        quoted_stock INTEGER CHECK (quoted_stock > 0),
         used_at TIMESTAMPTZ,
         PRIMARY KEY (authorization_id, position)
       );
 
       ALTER TABLE authorization_candidate_countries
         ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ;
+      -- 彻底删除领取时的报价和库存快照字段（ADR-0004），候选位置只保存稳定地区事实。
       ALTER TABLE authorization_candidate_countries
-        ALTER COLUMN quoted_price DROP NOT NULL;
+        DROP COLUMN IF EXISTS quoted_price;
       ALTER TABLE authorization_candidate_countries
-        ALTER COLUMN quoted_stock DROP NOT NULL;
+        DROP COLUMN IF EXISTS quoted_stock;
       ALTER TABLE authorization_candidate_countries
         DROP CONSTRAINT IF EXISTS authorization_candidate_countri_authorization_id_country_id_key;
 
@@ -363,24 +391,18 @@ export class Database {
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_refund_reconciliation_status_check
         CHECK (refund_reconciliation_status IN ('pending', 'resolved'));
 
-      UPDATE activation_authorizations auth
-      SET result_view_until = (
-        SELECT max(activation.sms_received_at) + INTERVAL '5 minutes'
-        FROM supplier_activations activation
-        WHERE activation.authorization_id = auth.id AND activation.sms_received_at IS NOT NULL
-      )
-      WHERE auth.status = 'sms_delivered' AND auth.result_view_until IS NULL
-        AND EXISTS (
-          SELECT 1 FROM supplier_activations activation
-          WHERE activation.authorization_id = auth.id AND activation.sms_received_at IS NOT NULL
-        );
-
       UPDATE supplier_activations
         SET status = 'manual_reconciliation'
         WHERE status = 'timed_out' AND timeout_final_status_confirmed_at IS NULL;
 
+      -- 旧运行时版本可能在三个候选位置都消耗且最后激活已超时后留下 in_progress 中间态；
+      -- 收缩模型下收敛为已结束并记录额度用尽原因，提示窗口期内仍保留 token 与浏览器绑定。
       UPDATE activation_authorizations auth
-        SET status = 'quota_exhausted'
+        SET status = 'ended',
+            ended_reason = COALESCE(ended_reason, 'quota_exhausted'),
+            ended_at = COALESCE(ended_at, now()),
+            end_prompt_until = COALESCE(end_prompt_until, now() + INTERVAL '2 minutes'),
+            last_activity_at = now()
         WHERE auth.status = 'in_progress'
           AND NOT EXISTS (
             SELECT 1 FROM authorization_candidate_countries candidate
@@ -605,66 +627,6 @@ export class Database {
     });
   }
 
-  async replaceDefaultCandidateCountryIds(countryIds: readonly number[]): Promise<void> {
-    await this.transaction(async (client) => {
-      await client.query('DELETE FROM default_candidate_countries');
-      for (const [index, countryId] of countryIds.entries()) {
-        await client.query(
-          'INSERT INTO default_candidate_countries (position, country_id) VALUES ($1, $2)',
-          [index + 1, countryId],
-        );
-      }
-    });
-  }
-
-  async hasUnendedAuthorization(normalizedRecipientIdentifier: string, now: Date): Promise<boolean> {
-    await this.expireDueAuthorizations(now);
-    const result = await this.pool.query(
-      `SELECT 1 FROM activation_authorizations
-       WHERE normalized_recipient_identifier = $1
-         AND (status IN ('unclaimed', 'in_progress')
-           OR (status IN ('result_available', 'sms_delivered') AND result_view_until > $2))
-       LIMIT 1`,
-      [normalizedRecipientIdentifier, now],
-    );
-    return result.rowCount === 1;
-  }
-
-  async createActivationAuthorization(input: {
-    recipientIdentifier: string;
-    normalizedRecipientIdentifier: string;
-    internalNote?: string;
-    tokenHash: string;
-    tokenSuffix?: string;
-    createdAt: Date;
-    expiresAt: Date;
-    candidates: Array<{ countryId: number; countryName: string; price: number; stock: number }>;
-  }): Promise<string> {
-    if (input.candidates.length !== 3) {
-      throw new Error('激活授权必须包含三个候选位置');
-    }
-    return this.transaction(async (client) => {
-      const result = await client.query<{ id: string }>(
-        `INSERT INTO activation_authorizations
-          (recipient_identifier, normalized_recipient_identifier, internal_note, token_hash, token_suffix, status, created_at, expires_at, last_activity_at)
-         VALUES ($1, $2, $3, $4, $5, 'unclaimed', $6, $7, $6)
-         RETURNING id`,
-        [input.recipientIdentifier, input.normalizedRecipientIdentifier, input.internalNote ?? null, input.tokenHash, input.tokenSuffix ?? null, input.createdAt, input.expiresAt],
-      );
-      const id = result.rows[0]?.id;
-      if (!id) throw new Error('创建激活授权失败');
-      for (const [index, candidate] of input.candidates.entries()) {
-        await client.query(
-          `INSERT INTO authorization_candidate_countries
-            (authorization_id, position, country_id, country_name, quoted_price, quoted_stock)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [id, index + 1, candidate.countryId, candidate.countryName, candidate.price, candidate.stock],
-        );
-      }
-      return id;
-    });
-  }
-
   async createUnclaimedAuthorizationBatch(input: readonly { tokenHash: string; tokenSuffix: string; createdAt: Date }[]): Promise<string[]> {
     if (input.length === 0) {
       throw new Error('批量创建至少需要一个授权链接');
@@ -687,8 +649,8 @@ export class Database {
       for (const record of input) {
         const result = await client.query<{ id: string }>(
           `INSERT INTO activation_authorizations
-            (recipient_identifier, normalized_recipient_identifier, internal_note, token_hash, token_suffix, status, created_at, expires_at, last_activity_at)
-           VALUES (NULL, NULL, NULL, $1, $2, 'unclaimed', $3, NULL, $3)
+            (internal_note, token_hash, token_suffix, status, created_at, last_activity_at)
+           VALUES (NULL, $1, $2, 'unclaimed', $3, $3)
            RETURNING id`,
           [record.tokenHash, record.tokenSuffix, record.createdAt],
         );
@@ -756,22 +718,22 @@ export class Database {
     };
   }
 
-  async authorizationByTokenHash(hash: string): Promise<{ id: string; status: AuthorizationStatus; expiresAt: Date | null } | undefined> {
-    const result = await this.pool.query<{ id: string; status: AuthorizationStatus; expires_at: Date | null }>(
-      'SELECT id, status, expires_at FROM activation_authorizations WHERE token_hash = $1',
+  async authorizationByTokenHash(hash: string): Promise<{ id: string; status: AuthorizationStatus; numberAcquisitionExpiresAt: Date | null } | undefined> {
+    const result = await this.pool.query<{ id: string; status: AuthorizationStatus; number_acquisition_expires_at: Date | null }>(
+      'SELECT id, status, number_acquisition_expires_at FROM activation_authorizations WHERE token_hash = $1',
       [hash],
     );
     const row = result.rows[0];
-    return row ? { id: row.id, status: row.status, expiresAt: row.expires_at } : undefined;
+    return row ? { id: row.id, status: row.status, numberAcquisitionExpiresAt: row.number_acquisition_expires_at } : undefined;
   }
 
   async expireDueAuthorizations(now: Date): Promise<void> {
     await this.transaction(async (client) => {
       const due = await client.query<{ id: string; status: AuthorizationStatus }>(
         `SELECT id, status FROM activation_authorizations
-         WHERE COALESCE(number_acquisition_expires_at, expires_at) IS NOT NULL
-           AND COALESCE(number_acquisition_expires_at, expires_at) <= $1
-           AND status NOT IN ('result_available', 'sms_delivered')
+         WHERE number_acquisition_expires_at IS NOT NULL
+           AND number_acquisition_expires_at <= $1
+           AND status NOT IN ('result_available', 'ended')
            AND NOT (status = 'ended' AND end_prompt_until > $1)
            AND NOT (
              status = 'in_progress' AND EXISTS (
@@ -793,19 +755,14 @@ export class Database {
       );
       if (!due.rowCount) return;
       const ids = due.rows.map((row) => row.id);
-      // UPDATE 的 WHERE 重新校验活跃激活防护：SELECT FOR UPDATE 的防护基于语句快照求值，
-      // 若并发领取事务的激活 INSERT 尚未提交，行可能误入选；复核可避免清掉刚交付号码的凭据。
       await client.query(
         `UPDATE activation_authorizations
-         SET status = CASE
-               WHEN status IN ('unclaimed', 'in_progress', 'sms_delivered', 'quota_exhausted', 'revoked', 'expired') THEN 'expired'
-               ELSE 'ended'
-             END,
+         SET status = 'ended',
              ended_at = COALESCE(ended_at, $2),
-             ended_reason = COALESCE(ended_reason, 'claim_window_ended'),
+             ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
              token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
          WHERE id = ANY($1::uuid[])
-           AND status NOT IN ('result_available', 'sms_delivered')
+           AND status NOT IN ('result_available', 'ended')
            AND NOT (status = 'ended' AND end_prompt_until > $2)
            AND NOT (
              status = 'in_progress' AND EXISTS (
@@ -829,16 +786,13 @@ export class Database {
   async expireAuthorization(id: string, now: Date): Promise<void> {
     await this.pool.query(
       `UPDATE activation_authorizations
-       SET status = CASE
-             WHEN status IN ('unclaimed', 'in_progress', 'sms_delivered', 'quota_exhausted', 'revoked', 'expired') THEN 'expired'
-             ELSE 'ended'
-           END,
+       SET status = 'ended',
            ended_at = COALESCE(ended_at, $2),
-           ended_reason = COALESCE(ended_reason, 'claim_window_ended'),
+           ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
            token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
-       WHERE id = $1 AND COALESCE(number_acquisition_expires_at, expires_at) IS NOT NULL
-         AND COALESCE(number_acquisition_expires_at, expires_at) <= $2
-         AND status NOT IN ('result_available', 'sms_delivered')
+       WHERE id = $1 AND number_acquisition_expires_at IS NOT NULL
+         AND number_acquisition_expires_at <= $2
+         AND status NOT IN ('result_available', 'ended')
          AND NOT (status = 'ended' AND end_prompt_until > $2)
          AND NOT (
            status = 'in_progress' AND EXISTS (
