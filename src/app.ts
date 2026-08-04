@@ -8,6 +8,7 @@ import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedErr
 import { ActivationAuthorizations, AuthorizationValidationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationTokenGeneratorInput, type BatchAuthorizationPreflight, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { type AuthorizationListPage, type AuthorizationListQuery, type AuthorizationListTopLevelStatus } from './database.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
+import { countryCallingCode } from './country-calling-code.js';
 import { countryFlagHtml, formatCurrency, formatDateTime } from './country-flag.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
@@ -146,6 +147,7 @@ function htmlPage(title: string, content: string): string {
     .section-verification-result { border-bottom: 1px solid #edf2f5; padding-bottom: 14px; }
     .section-action { margin-top: 14px; }
     .country { font-weight: 600; font-size: 16px; margin: 0 0 12px; color: #17202a; }
+    .country .calling-code { color: #53616c; font-size: 13px; font-weight: 500; }
     .number { margin: 12px 0; color: #17202a; font-size: clamp(28px, 8vw, 40px); font-weight: 700; letter-spacing: .02em; overflow-wrap: anywhere; }
     .number-expiry, .result-view-expiry { color: #53616c; font-size: 14px; margin: 12px 0 0; }
     .quota-info { color: #53616c; font-size: 14px; margin: 0 0 4px; font-weight: 500; }
@@ -330,9 +332,36 @@ function batchAuthorizationCreatedPage(path: string, csrfToken: string, authoriz
 
 function formatInternationalNumber(value: string): string {
   const e164 = value.startsWith('+') ? value : `+${value}`;
-  if (/^\+44\d{10}$/.test(e164)) return `${e164.slice(0, 3)} ${e164.slice(3, 5)} ${e164.slice(5, 9)} ${e164.slice(9)}`;
-  if (/^\+1\d{10}$/.test(e164)) return `${e164.slice(0, 2)} ${e164.slice(2, 5)} ${e164.slice(5, 8)} ${e164.slice(8)}`;
+  const digits = e164.slice(1);
+  if (/^44\d{10}$/.test(digits)) return `+44 ${formatNationalNumber(digits.slice(2), '44')}`;
+  if (/^1\d{10}$/.test(digits)) return `+1 ${formatNationalNumber(digits.slice(1), '1')}`;
   return e164.replace(/(\d{3})(?=\d)/g, '$1 ').trim();
+}
+
+interface NationalNumberSplit {
+  callingCode: string;
+  nationalNumber: string;
+}
+
+// 仅当国际号码去除 `+` 后以该地区呼叫代码开头时才拆分；地区未知、代码缺失或号码不匹配时返回 undefined。
+function splitNationalNumber(e164: string, callingCode?: string): NationalNumberSplit | undefined {
+  if (!callingCode) return undefined;
+  const digits = e164.startsWith('+') ? e164.slice(1) : e164;
+  if (!digits.startsWith(callingCode)) return undefined;
+  const nationalNumber = digits.slice(callingCode.length);
+  if (!nationalNumber) return undefined;
+  return { callingCode, nationalNumber };
+}
+
+// 国内号码分组沿用整号格式化规则的对应分支（+1 用 3-3-4、+44 用 2-4-4、其余每 3 位分组）。
+function formatNationalNumber(nationalNumber: string, callingCode: string): string {
+  if (callingCode === '1' && /^\d{10}$/.test(nationalNumber)) {
+    return `${nationalNumber.slice(0, 3)} ${nationalNumber.slice(3, 6)} ${nationalNumber.slice(6)}`;
+  }
+  if (callingCode === '44' && /^\d{10}$/.test(nationalNumber)) {
+    return `${nationalNumber.slice(0, 2)} ${nationalNumber.slice(2, 6)} ${nationalNumber.slice(6)}`;
+  }
+  return nationalNumber.replace(/(\d{3})(?=\d)/g, '$1 ').trim();
 }
 
 function recipientPage(token: string, view: RecipientAuthorizationView, message?: string): string {
@@ -358,9 +387,14 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   }
   if (view.state === 'claimed' && (view.phoneNumber || view.smsDelivered)) {
     const e164 = view.phoneNumber ? (view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`) : undefined;
-    const countryMarkup = view.countryName ? `<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName)}</p>` : '';
+    const split = e164 ? splitNationalNumber(e164, countryCallingCode(view.countryName)) : undefined;
+    const countryMarkup = view.countryName
+      ? `<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName)}${split ? ` <span class="calling-code">(+${escapeHtml(split.callingCode)})</span>` : ''}</p>`
+      : '';
     const numberMarkup = e164
-      ? `<p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
+      ? split
+        ? `<p class="number">${escapeHtml(formatNationalNumber(split.nationalNumber, split.callingCode))}</p><button type="button" data-copy-value="${escapeHtml(split.nationalNumber)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
+        : `<p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
       : '';
     const numberExpiryIso = view.numberExpiresAt?.toISOString();
     const numberExpiryMarkup = numberExpiryIso

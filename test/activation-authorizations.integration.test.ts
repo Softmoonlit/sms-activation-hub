@@ -754,8 +754,9 @@ if (!databaseUrl) {
 
       const numberPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(numberPage.statusCode, 200);
-      assert.match(numberPage.body, /英国|\+44 20 7946 0123/);
-      assert.match(numberPage.body, /data-copy-value="\+442079460123"/);
+      assert.match(numberPage.body, /英国 <span class="calling-code">\(\+44\)<\/span>/);
+      assert.match(numberPage.body, /20 7946 0123/);
+      assert.match(numberPage.body, /data-copy-value="2079460123"/);
       assert.match(numberPage.body, /号码有效至|可换号时间|剩余可用号码次数：2/);
       assert.doesNotMatch(numberPage.body, /获取号码后，请在 24 小时内使用|链接剩余时间/);
       assert.doesNotMatch(numberPage.body, new RegExp(`${activationId}|HeroSMS|价格|库存`));
@@ -886,7 +887,7 @@ if (!databaseUrl) {
     const restarted = await openApplication(heroSms, () => now);
     try {
       const recovered = await restarted.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(recovered.body, /\+44 20 7946 0124/);
+      assert.match(recovered.body, /20 7946 0124/);
       assert.equal(getNumberCalls, 2);
     } finally { await restarted.app.close(); }
   });
@@ -1178,6 +1179,7 @@ if (!databaseUrl) {
       assert.equal(claimed.statusCode, 303);
       const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      // 恢复记录地区为美国（呼叫代码 1）而号码为 +44 开头，代码与号码不匹配 → 降级为整号显示。
       assert.match(page.body, /\+44 20 7946 0123/);
       assert.equal(getNumberCalls, 1, '对账必须恢复原请求，不得盲目重试');
     } finally { await app.close(); }
@@ -1225,7 +1227,7 @@ if (!databaseUrl) {
       const linked = await post(app, session, link, {});
       assert.equal(linked.statusCode, 303);
       const recoveredPage = await app.inject({ method: 'GET', url: `/a/${firstToken}`, headers: { cookie: firstCookie } });
-      assert.match(recoveredPage.body, /\+1 415 555 0121/, '人工关联后应恢复号码和激活状态');
+      assert.match(recoveredPage.body, /415 555 0121/, '人工关联后应恢复号码和激活状态');
 
       const secondCookie = `recipient_session=${cookieValue(paused, 'recipient_session')}`;
       const secondUncertain = await app.inject({ method: 'POST', url: `/a/${secondToken}/numbers`, headers: { cookie: secondCookie } });
@@ -1276,7 +1278,7 @@ if (!databaseUrl) {
     const restarted = await openApplication(heroSms, () => fixedNow);
     try {
       const page = await restarted.app.inject({ method: 'GET', url: `/a/${token!}`, headers: { cookie: recipientCookie! } });
-      assert.match(page.body, /\+1 415 555 0123/);
+      assert.match(page.body, /415 555 0123/);
     } finally { await restarted.app.close(); }
   });
 
@@ -1322,7 +1324,7 @@ if (!databaseUrl) {
       });
       assert.equal(replaced.statusCode, 303);
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(page.body, /\+1 415 555 0124/);
+      assert.match(page.body, /415 555 0124/);
 
       const activations = await database.pool.query<{ provider_activation_id: string; candidate_position: number }>(
         'SELECT provider_activation_id, candidate_position FROM supplier_activations WHERE provider_activation_id = ANY($1) ORDER BY candidate_position',
@@ -1393,7 +1395,7 @@ if (!databaseUrl) {
       assert.equal((await post(app, session, link, {})).statusCode, 303);
 
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(page.body, /\+1 415 555 0124/);
+      assert.match(page.body, /415 555 0124/);
       const activations = await database.pool.query<{ provider_activation_id: string; candidate_position: number }>(
         'SELECT provider_activation_id, candidate_position FROM supplier_activations WHERE provider_activation_id = ANY($1) ORDER BY candidate_position',
         [[firstActivationId, linkedActivationId]],
@@ -1431,7 +1433,7 @@ if (!databaseUrl) {
 
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(page.statusCode, 200);
-      assert.match(page.body, /美国|\+1 415 555 0123|复制号码/);
+      assert.match(page.body, /美国 <span class="calling-code">\(\+1\)<\/span>|415 555 0123|复制号码/);
       assert.match(page.body, /使用说明|482913|复制验证码|验证码可查看至/);
       assert.match(page.body, /剩余可用号码次数/);
       assert.match(page.body, /已收到验证码/);
@@ -1571,7 +1573,7 @@ if (!databaseUrl) {
       now = new Date('2026-08-09T00:07:59.999Z');
       const beforeExpiry = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(beforeExpiry.statusCode, 200);
-      assert.match(beforeExpiry.body, /482913|\+1 415 555 0123/);
+      assert.match(beforeExpiry.body, /482913|415 555 0123/);
 
       now = new Date('2026-08-09T00:08:00.000Z');
       const afterExpiry = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
@@ -1724,7 +1726,7 @@ if (!databaseUrl) {
     try {
       const page = await recovered.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /短信已收到，暂时无法显示验证码，请联系发送者/);
-      assert.match(page.body, /\+1 415 555 0123|复制号码/);
+      assert.match(page.body, /415 555 0123|复制号码/);
       assert.match(page.body, /验证码可查看至：/);
       assert.match(page.body, /剩余可用号码次数：2/);
       assert.match(page.body, /<button[^>]*disabled[^>]*>已收到验证码<\/button>/);
@@ -1803,7 +1805,7 @@ if (!databaseUrl) {
       await new Promise((resolve) => setImmediate(resolve));
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /482913|复制验证码/);
-      assert.match(page.body, /\+1 415 555 0123|复制号码/);
+      assert.match(page.body, /415 555 0123|复制号码/);
       assert.doesNotMatch(page.body, /获取下一个号码|获取号码/);
     } finally { await app.close(); }
   });
@@ -1851,7 +1853,7 @@ if (!databaseUrl) {
       assert.deepEqual(acquiredCountries, [1, 2], '后继号码只能使用未成功获取过的地区');
 
       const replacement = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(replacement.body, /\+44 20 7946 0123/);
+      assert.match(replacement.body, /20 7946 0123/);
       assert.match(replacement.body, /剩余可用号码次数：1/);
       const oldData = await database.pool.query<{ status: string; phone_number: string | null; sms_code: string | null; sms_text: string | null }>(
         'SELECT status, phone_number, sms_code, sms_text FROM supplier_activations WHERE provider_activation_id = $1', [cancelledActivationId],
@@ -2182,7 +2184,7 @@ if (!databaseUrl) {
     try {
       assert.equal(getNumberCalls, 2, '供应商确认取消后应自动获取后继号码');
       const page = await restarted.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(page.body, /\+1 415 555 0123/);
+      assert.match(page.body, /415 555 0123/);
     } finally { await restarted.app.close(); }
   });
 
@@ -2281,7 +2283,7 @@ if (!databaseUrl) {
       recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
       now = new Date('2026-08-14T00:19:59.999Z');
       const justBeforeTimeout = await initial.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(justBeforeTimeout.body, /\+1 415 555 0123/);
+      assert.match(justBeforeTimeout.body, /415 555 0123/);
     } finally { await initial.close(); }
 
     now = new Date('2026-08-14T00:20:00.000Z');
@@ -2292,7 +2294,7 @@ if (!databaseUrl) {
       assert.match(page.body, /号码已过期/);
       assert.match(page.body, /剩余可用号码次数：2/);
       assert.match(page.body, /获取下一个号码/);
-      assert.doesNotMatch(page.body, /\+1 415 555 0123/);
+      assert.doesNotMatch(page.body, /415 555 0123/);
       const next = await timedOut.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
       assert.equal(next.statusCode, 303);
       assert.equal(getNumberCalls, 2, '只有接收者再次点击才获取下一个号码');
@@ -2307,7 +2309,7 @@ if (!databaseUrl) {
     try {
       assert.ok(historyCalls > historyCallsBeforeRefund, '费用仍非零时必须保留退款对账任务，重启后继续确认');
       const page = await reconciled.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(page.body, /\+44 20 7946 0123/, '重启后继续处理退款对账不会改变接收者当前激活');
+      assert.match(page.body, /20 7946 0123/, '重启后继续处理退款对账不会改变接收者当前激活');
     } finally { await reconciled.close(); }
   });
 
@@ -2360,7 +2362,7 @@ if (!databaseUrl) {
     const { app: activeRestart } = await openApplication(heroSms, () => now);
     try {
       const page = await activeRestart.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(page.body, /\+1 415 555 0123/);
+      assert.match(page.body, /415 555 0123/);
       const session = await login(activeRestart);
       const home = await activeRestart.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const authorizationId = authorizationIdFromHome(home.body, token);
@@ -2423,7 +2425,7 @@ if (!databaseUrl) {
     try {
       const page = await reconciled.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /482913|复制验证码/);
-      assert.match(page.body, /\+1 415 555 0123|复制号码/);
+      assert.match(page.body, /415 555 0123|复制号码/);
       assert.doesNotMatch(page.body, /获取下一个号码|获取号码/);
     } finally { await reconciled.close(); }
   });
@@ -2460,7 +2462,7 @@ if (!databaseUrl) {
     try {
       const page = await restarted.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /获取下一个号码/);
-      assert.doesNotMatch(page.body, /482913|Your code is|\+1 415 555 0123/);
+      assert.doesNotMatch(page.body, /482913|Your code is|415 555 0123/);
       assert.equal(getNumberCalls, 1);
     } finally { await restarted.close(); }
   });
@@ -2510,7 +2512,7 @@ if (!databaseUrl) {
     try {
       const page = await confirmed.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /482913|复制验证码/);
-      assert.match(page.body, /\+1 415 555 0123|复制号码/);
+      assert.match(page.body, /415 555 0123|复制号码/);
     } finally { await confirmed.app.close(); }
   });
 
@@ -2550,7 +2552,7 @@ if (!databaseUrl) {
       assert.match(detail.body, /completion_confirming|completed/);
       const recipient = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(recipient.statusCode, 200);
-      assert.match(recipient.body, /482913|复制验证码|\+1 415 555 0123/);
+      assert.match(recipient.body, /482913|复制验证码|415 555 0123/);
       now = new Date('2026-08-21T00:05:00.000Z');
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } })).statusCode, 404);
     } finally { await app.close(); }
@@ -3152,7 +3154,7 @@ if (!databaseUrl) {
       assert.equal(getNumberCalls, 1);
 
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(page.body, /\+1 415 555 0123|复制号码/);
+      assert.match(page.body, /415 555 0123|复制号码/);
       // 剩余窗口保持供应商原窗口（取得时间 + 20 分钟）：不因截止截短，也不因确认延迟延长。
       assert.match(page.body, /data-countdown="2026-08-02T00:19:59.999Z"/);
     } finally { await app.close(); }
@@ -4123,7 +4125,7 @@ if (!databaseUrl) {
       const pageStateA = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(pageStateA.statusCode, 200);
       assert.match(pageStateA.body, /aria-label="当前号码"/);
-      assert.match(pageStateA.body, /\+1 415 555 0123/);
+      assert.match(pageStateA.body, /415 555 0123/);
       assert.match(pageStateA.body, /号码有效至：还剩/);
       assert.match(pageStateA.body, /💡 使用说明/);
       assert.match(pageStateA.body, /aria-label="验证码"/);
@@ -4170,7 +4172,8 @@ if (!databaseUrl) {
       const pageResultAvailable = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(pageResultAvailable.statusCode, 200);
       assert.match(pageResultAvailable.body, /aria-label="当前号码"/);
-      assert.match(pageResultAvailable.body, /\+331 422 781 86/);
+      assert.match(pageResultAvailable.body, /142 278 186/);
+      assert.match(pageResultAvailable.body, /法国 <span class="calling-code">\(\+33\)<\/span>/);
       assert.match(pageResultAvailable.body, /号码有效至：还剩/);
       assert.match(pageResultAvailable.body, /aria-label="验证码"/);
       assert.match(pageResultAvailable.body, /987654/);
@@ -4189,6 +4192,64 @@ if (!databaseUrl) {
         payload: 'replacement=confirm',
       });
       assert.equal(forbiddenConfirm.statusCode, 409);
+    } finally { await app.close(); }
+  });
+
+  test('地区不在呼叫代码映射表时接收者页面整号显示并整号复制', async () => {
+    let now = new Date('2026-08-04T20:00:00.000Z');
+    const activationId = `unknown-region-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+        activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '未知地区' },
+        { countryId: 2, countryName: '英国' },
+        { countryId: 3, countryName: '法国' },
+      ]);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.equal(page.statusCode, 200);
+      assert.match(page.body, /未知地区/);
+      assert.doesNotMatch(page.body, /\(\+1\)/);
+      assert.match(page.body, /\+1 415 555 0123/, '地区未知时整号显示');
+      assert.match(page.body, /data-copy-value="\+14155550123"/, '地区未知时整号复制');
+    } finally { await app.close(); }
+  });
+
+  test('供应商号码与地区呼叫代码不匹配时接收者页面整号显示并整号复制', async () => {
+    let now = new Date('2026-08-04T21:00:00.000Z');
+    const activationId = `code-mismatch-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async (_serviceCode, countryId) => {
+        assert.equal(countryId, 1, '首位置应为美国');
+        return {
+          activationId, phoneNumber: '+442079460123', activationCost: 0.8, currency: 'USD', activationTime: now,
+          activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.equal(page.statusCode, 200);
+      assert.match(page.body, /美国/);
+      assert.doesNotMatch(page.body, /\(\+1\)/, '拆分失败时国家信息行不带呼叫代码');
+      assert.match(page.body, /\+44 20 7946 0123/, '号码与地区呼叫代码不匹配时整号显示');
+      assert.match(page.body, /data-copy-value="\+442079460123"/, '号码与地区呼叫代码不匹配时整号复制');
     } finally { await app.close(); }
   });
 }

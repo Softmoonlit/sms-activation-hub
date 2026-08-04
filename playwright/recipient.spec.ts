@@ -20,6 +20,7 @@ const config: AppConfig = {
 let latestActivationId = '';
 let latestCountryId = 0;
 let acquisitionCount = 0;
+const phoneNumberByCountry: Record<number, string> = { 1: '+14155550123', 2: '+442079460123', 3: '+33142278186' };
 const heroSms: HeroSms = {
   balance: async () => 10,
   services: async () => [{ code: 'openai', name: 'OpenAI' }],
@@ -30,7 +31,7 @@ const heroSms: HeroSms = {
     latestActivationId = `pw-${randomUUID()}`;
     latestCountryId = countryId;
     return {
-      activationId: latestActivationId, phoneNumber: ['+442079460123', '+14155550123', '+33142278186'][acquisitionCount - 1]!, activationCost: 0.6, currency: 'USD',
+      activationId: latestActivationId, phoneNumber: phoneNumberByCountry[countryId]!, activationCost: 0.6, currency: 'USD',
       activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),
     };
   },
@@ -73,7 +74,8 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     await expect(page.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
     await expect(page.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
     await page.getByRole('button', { name: '获取号码' }).click();
-    await expect(page.getByText('+44 20 7946 0123', { exact: true })).toBeVisible();
+    await expect(page.getByText('415 555 0123', { exact: true })).toBeVisible();
+    await expect(page.getByText('(+1)', { exact: true })).toBeVisible();
     await expect(page.locator('.section-current-number')).toBeVisible();
     await expect(page.locator('.section-verification-result')).toBeVisible();
     await expect(page.getByText('复制上方号码，填到验证界面并确认；系统将自动接收并显示验证码。')).toBeVisible();
@@ -94,7 +96,7 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     assert.ok(resultBox.y < actionBox.y);
 
     await page.getByRole('button', { name: '复制号码' }).click();
-    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('+442079460123');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('4155550123');
 
     now = new Date('2026-08-01T00:02:00.000Z');
     await page.clock.setFixedTime(now);
@@ -104,10 +106,13 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     await page.getByRole('button', { name: '更换号码' }).click();
     await expect(page.getByText('更换后当前号码将不能继续使用')).toBeVisible();
     await page.getByRole('button', { name: '继续等待' }).click();
-    await expect(page.getByText('+44 20 7946 0123', { exact: true })).toBeVisible();
+    await expect(page.getByText('415 555 0123', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: '更换号码' }).click();
     await page.getByRole('button', { name: '确认更换号码' }).click();
-    await expect(page.getByText('+1 415 555 0123', { exact: true })).toBeVisible();
+    await expect(page.getByText('20 7946 0123', { exact: true })).toBeVisible();
+    await expect(page.getByText('(+44)', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '复制号码' }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('2079460123');
 
     now = new Date('2026-08-01T00:04:00.000Z');
     await page.clock.setFixedTime(now);
@@ -115,7 +120,10 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     await expect(page.getByRole('button', { name: '更换号码' })).toBeEnabled();
     await page.getByRole('button', { name: '更换号码' }).click();
     await page.getByRole('button', { name: '确认更换号码' }).click();
-    await expect(page.getByText('+331 422 781 86', { exact: true })).toBeVisible();
+    await expect(page.getByText('142 278 186', { exact: true })).toBeVisible();
+    await expect(page.getByText('(+33)', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '复制号码' }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('142278186');
     now = new Date('2026-08-01T00:06:00.000Z');
     await page.clock.setFixedTime(now);
     await page.reload();
