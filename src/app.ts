@@ -83,8 +83,15 @@ function authorizationStatusMarkup(status: string, endedReason?: string, endedAt
   return `<p>授权状态：${authorizationStatusLabel('已结束')}${summary ? `（${escapeHtml(summary)}）` : ''}</p>`;
 }
 
+// 激活状态 emoji 映射：供应商激活卡片内所有状态行共用；已取消使用返回类 emoji，避免正常取消被误读为异常。
+const activationStatusEmojis: Record<string, string> = {
+  获取结果确认中: '⏳', 等待短信: '📩', 取消确认中: '⏳', 已取消: '↩️', 结果待人工对账: '⚠️',
+  短信已送达: '📨', 完成确认中: '⏳', 已完成: '✅', 已超时: '⏰',
+};
+
 function activationStatusLabel(status: string): string {
-  return activationStatusLabels[status] ? `${activationStatusLabels[status]}（${status}）` : status;
+  const label = activationStatusLabels[status] ?? status;
+  return `${activationStatusEmojis[label] ?? ''} ${label}`;
 }
 
 const RECIPIENT_NO_NUMBERS_MESSAGE = '当前暂无可用号码，请稍后重试';
@@ -142,6 +149,7 @@ function htmlPage(title: string, content: string): string {
     .card form { display: grid; gap: 16px; }
     .card form button { justify-self: start; }
     .summary { display: grid; gap: 10px; padding: 0; list-style: none; }
+    .activation-current { background: #edf3f1; border: 1px solid #d7e3de; border-radius: 6px; padding: 10px 12px; }
     .authorization { border-top: 1px solid #e3e7e9; padding: 16px 0; }
     .authorization:first-child { border-top: 0; }
     .authorization p { margin: 4px 0; }
@@ -259,35 +267,35 @@ const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
   const isUnclaimedDetail = detail.status === '待领取' && !detail.claimedAt && detail.candidates.length === 0 && detail.activations.length === 0;
 
-  const candidateItems = detail.candidates.map((candidate, index) => {
-    return `<li><strong>位置 ${index + 1}（${escapeHtml(candidate.countryName)}）：</strong>${candidate.used ? '已消耗' : '未消耗'}</li>`;
-  }).join('');
-  const candidates = !isUnclaimedDetail && detail.candidates.length > 0
-    ? `<section class="card"><h2>候选地区</h2><ul class="summary">${candidateItems}</ul></section>`
-    : '';
-
-  const activations = detail.activations.length === 0 ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${detail.activations.map((activation) => `<li><strong>${escapeHtml(activation.countryName)}：</strong>${escapeHtml(activationStatusLabel(activation.status))}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt))}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理' : ''}</li>`).join('')}</ul>`;
-  const activationSection = !isUnclaimedDetail && (detail.candidates.length > 0 || detail.activations.length > 0)
-    ? `<section class="card"><h2>供应商激活</h2>${activations}</section>`
-    : '';
-
-  const costs = detail.costs.length === 0 ? '<p>尚无费用。</p>' : `<ul class="summary">${detail.costs.map((cost) => `<li>累计激活费用：${cost.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；已确认退款：${cost.confirmedRefund.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；净成本：${cost.netCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}</li>`).join('')}</ul>`;
-  const costSection = !isUnclaimedDetail && (detail.candidates.length > 0 || detail.costs.length > 0)
-    ? `<section class="card"><h2>成本</h2>${costs}</section>`
-    : '';
-
+  // 供应商激活卡片：当前激活高亮行、对账中的号码获取进行中行、历史激活行、未消耗候选位置占位行。
   const numberExpiryIso = detail.activation ? detail.activation.numberExpiresAt.toISOString() : '';
   const numberRemaining = detail.activation
     ? (detail.activation.numberExpiresAtCountdown
       ? `<span data-countdown="${numberExpiryIso}" data-format="minutes-seconds">${escapeHtml(numberExpiryIso)}</span>`
       : escapeHtml(formatDateTime(detail.activation.numberExpiresAt)))
     : '';
+  const currentActivationRow = detail.activation
+    ? `<li class="activation-current"><strong>位置 ${detail.activation.position} · ${escapeHtml(detail.activation.countryName)}：</strong>${activationStatusLabel(detail.activation.status)}，号码有效至：${numberRemaining}${detail.activation.phoneNumber ? `，<strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}` : ''}${detail.activation.verificationCode ? `，<strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}` : ''}，激活 ID ${escapeHtml(detail.activation.providerActivationId)}，费用 ${detail.activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(detail.activation.currency))}</li>`
+    : '';
+  const acquisitionRow = !detail.activation && detail.acquisition
+    ? `<li><strong>位置 ${detail.acquisition.position} · ${escapeHtml(detail.acquisition.countryName)}：</strong>${activationStatusLabel(detail.acquisition.status)}</li>`
+    : '';
+  const historyRows = detail.activations
+    .filter((activation) => !detail.activation || activation.providerActivationId !== detail.activation.providerActivationId)
+    .map((activation) => `<li><strong>位置 ${activation.position} · ${escapeHtml(activation.countryName)}：</strong>${activationStatusLabel(activation.status)}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt))}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理 ⚠️' : ''}</li>`).join('');
+  const unusedPositionRows = detail.candidates
+    .filter((candidate) => !candidate.used)
+    .map((candidate) => `<li><strong>位置 ${candidate.position} · ${escapeHtml(candidate.countryName)}：</strong>⬜ 未消耗</li>`).join('');
+  const activationListItems = [currentActivationRow, acquisitionRow, historyRows, unusedPositionRows].filter((markup) => markup !== '').join('');
+  const activations = activationListItems === '' ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${activationListItems}</ul>`;
+  const activationSection = !isUnclaimedDetail && (detail.candidates.length > 0 || detail.activations.length > 0)
+    ? `<section class="card"><h2>供应商激活</h2>${activations}${detail.activation?.unrecognizedSmsText ? `<h3>无法识别验证码的短信正文</h3><p class="token">${escapeHtml(detail.activation.unrecognizedSmsText)}</p>` : ''}</section>`
+    : '';
 
-  const currentActivation = detail.activation
-    ? `<section class="card"><h2>当前供应商激活</h2><ul class="summary"><li><strong>地区：</strong>${escapeHtml(detail.activation.countryName)}</li><li><strong>激活状态：</strong>${escapeHtml(activationStatusLabel(detail.activation.status))}</li><li><strong>号码有效至：</strong>${numberRemaining}</li>${detail.activation.phoneNumber ? `<li><strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}</li>` : ''}${detail.activation.verificationCode ? `<li><strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}</li>` : ''}</ul>${detail.activation.unrecognizedSmsText ? `<h3>无法识别验证码的短信正文</h3><p class="token">${escapeHtml(detail.activation.unrecognizedSmsText)}</p>` : ''}</section>`
-    : (detail.acquisition
-      ? `<section class="card"><h2>当前号码获取</h2><ul class="summary"><li><strong>地区：</strong>${escapeHtml(detail.acquisition.countryName)}</li><li><strong>获取状态：</strong>${escapeHtml(detail.acquisition.status)}</li></ul></section>`
-      : '');
+  const costs = detail.costs.length === 0 ? '<p>尚无费用。</p>' : `<ul class="summary">${detail.costs.map((cost) => `<li>累计激活费用：${cost.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；已确认退款：${cost.confirmedRefund.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；净成本：${cost.netCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}</li>`).join('')}</ul>`;
+  const costSection = !isUnclaimedDetail && (detail.candidates.length > 0 || detail.costs.length > 0)
+    ? `<section class="card"><h2>成本</h2>${costs}</section>`
+    : '';
 
   const revoke = detail.canRevoke ? `<p><a href="/${path}/authorizations/${detail.id}/revoke">撤销授权</a></p>` : '';
 
@@ -296,7 +304,7 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
   // 领取期限可由领取时间加一天心算，获取额度由未消耗候选位置表达，均不再单独展示。
   const lifecycle = `<p>创建时间：${escapeHtml(formatDateTime(detail.createdAt))}</p>${detail.claimedAt ? `<p>领取时间：${escapeHtml(formatDateTime(detail.claimedAt))}</p>` : ''}`;
 
-  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(identifierHeading)}</h2>${authorizationStatusMarkup(detail.status, detail.endedReason, detail.endedAt)}${lifecycle}${revoke}</section>${candidates}${activationSection}${costSection}${currentActivation}</section>${COUNTDOWN_SCRIPT}`;
+  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(identifierHeading)}</h2>${authorizationStatusMarkup(detail.status, detail.endedReason, detail.endedAt)}${lifecycle}${revoke}</section>${activationSection}${costSection}</section>${COUNTDOWN_SCRIPT}`;
   return adminPage('激活授权详情', '激活授权详情', path, csrfToken, `/${path}`, '返回首页', content);
 }
 

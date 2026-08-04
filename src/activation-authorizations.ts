@@ -52,9 +52,14 @@ export interface AuthorizationDetail {
   acquisition?: {
     countryName: string;
     status: '获取结果确认中' | '结果待人工对账';
+    position: number;
   };
   activation?: {
     countryName: string;
+    position: number;
+    providerActivationId: string;
+    activationCost: number;
+    currency: string;
     status: 'acquisition_confirming' | 'waiting_sms' | 'cancellation_confirming' | 'cancelled' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed' | 'timed_out';
     numberExpiresAt: Date;
     /** 仅非终态（waiting_sms、cancellation_confirming、sms_delivered 等）时为 true，前端据此决定是否显示倒计时。 */
@@ -63,8 +68,9 @@ export interface AuthorizationDetail {
     verificationCode?: string;
     unrecognizedSmsText?: string;
   };
-  candidates: Array<{ countryName: string; used: boolean }>;
+  candidates: Array<{ position: number; countryName: string; used: boolean }>;
   activations: Array<{
+    position: number;
     countryName: string;
     providerActivationId: string;
     status: 'acquisition_confirming' | 'waiting_sms' | 'cancellation_confirming' | 'cancelled' | 'manual_reconciliation' | 'sms_delivered' | 'completion_confirming' | 'completed' | 'timed_out';
@@ -469,8 +475,9 @@ export class ActivationAuthorizations {
       created_at: Date; claimed_at: Date | null; number_acquisition_expires_at: Date | null;
       result_view_until: Date | null; end_prompt_until: Date | null; ended_at: Date | null; ended_reason: string | null; last_activity_at: Date | null;
       country_name: string | null; activation_status: NonNullable<AuthorizationDetail['activation']>['status'] | null; number_expires_at: Date | null;
+      provider_activation_id: string | null; activation_position: number | null; activation_cost: string | null; activation_currency: string | null;
       sms_code: string | null; sms_text: string | null; phone_number: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
-      acquisition_country_name: string | null; cancel_available_at: Date | null;
+      acquisition_country_name: string | null; acquisition_position: number | null; cancel_available_at: Date | null;
     }>(
       `SELECT auth.id, auth.token_suffix, auth.status AS authorization_status,
               auth.created_at, auth.claimed_at,
@@ -483,16 +490,19 @@ export class ActivationAuthorizations {
               auth.end_prompt_until,
               auth.ended_at, auth.ended_reason, auth.last_activity_at,
               candidate.country_name, activation.status AS activation_status, activation.expires_at AS number_expires_at,
+              activation.provider_activation_id, candidate.position AS activation_position,
+              activation.activation_cost::text AS activation_cost, activation.currency AS activation_currency,
               activation.phone_number, activation.sms_code, activation.sms_text,
               (SELECT count(*) FROM authorization_candidate_countries candidate WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status, acquisition.country_name AS acquisition_country_name,
+              acquisition.candidate_position AS acquisition_position,
               activation.cancel_available_at
        FROM activation_authorizations auth
        LEFT JOIN LATERAL (
          SELECT * FROM supplier_activations item WHERE item.authorization_id = auth.id ORDER BY item.acquired_at DESC LIMIT 1
        ) activation ON true
        LEFT JOIN LATERAL (
-         SELECT request.status, candidate.country_name
+         SELECT request.status, request.candidate_position, candidate.country_name
          FROM number_acquisition_requests request
          JOIN authorization_candidate_countries candidate
            ON candidate.authorization_id = request.authorization_id AND candidate.position = request.candidate_position
@@ -507,14 +517,14 @@ export class ActivationAuthorizations {
     const row = result.rows[0];
     if (!row) return undefined;
     const [candidateResult, activationResult] = await Promise.all([
-      this.database.pool.query<{ country_name: string; used_at: Date | null }>(
-        'SELECT country_name, used_at FROM authorization_candidate_countries WHERE authorization_id = $1 ORDER BY position', [id],
+      this.database.pool.query<{ position: number; country_name: string; used_at: Date | null }>(
+        'SELECT position, country_name, used_at FROM authorization_candidate_countries WHERE authorization_id = $1 ORDER BY position', [id],
       ),
       this.database.pool.query<{
-        country_name: string; provider_activation_id: string; status: NonNullable<AuthorizationDetail['activation']>['status']; activation_cost: string; currency: string;
+        position: number; country_name: string; provider_activation_id: string; status: NonNullable<AuthorizationDetail['activation']>['status']; activation_cost: string; currency: string;
         acquired_at: Date; refund_amount: string | null; refund_reconciliation_status: 'pending' | 'resolved';
       }>(
-        `SELECT candidate.country_name, activation.provider_activation_id, activation.status, activation.activation_cost::text, activation.currency, activation.acquired_at,
+        `SELECT candidate.position, candidate.country_name, activation.provider_activation_id, activation.status, activation.activation_cost::text, activation.currency, activation.acquired_at,
                 refund.amount::text AS refund_amount, activation.refund_reconciliation_status
          FROM supplier_activations activation
          JOIN authorization_candidate_countries candidate
@@ -524,7 +534,7 @@ export class ActivationAuthorizations {
       ),
     ]);
     const activations = activationResult.rows.map((activation) => ({
-      countryName: activation.country_name, providerActivationId: activation.provider_activation_id, status: activation.status, activationCost: Number(activation.activation_cost),
+      position: activation.position, countryName: activation.country_name, providerActivationId: activation.provider_activation_id, status: activation.status, activationCost: Number(activation.activation_cost),
       currency: activation.currency, acquiredAt: activation.acquired_at,
       ...(activation.refund_amount ? { refundConfirmed: Number(activation.refund_amount) } : {}),
       refundPending: activation.refund_reconciliation_status === 'pending',
@@ -569,18 +579,22 @@ export class ActivationAuthorizations {
       ...(optionalDate(row.last_activity_at) ? { lastActivityAt: row.last_activity_at! } : {}),
       acquisitionCount: Number(row.used_count), canRevoke,
       candidates: candidateResult.rows.map((candidate) => ({
+        position: candidate.position,
         countryName: candidate.country_name,
         used: candidate.used_at !== null,
       })),
       activations,
       costs,
       ...(revocationConsequence ? { revocationConsequence } : {}),
-      ...(row.acquisition_status && row.acquisition_country_name ? { acquisition: {
+      ...(row.acquisition_status && row.acquisition_country_name && row.acquisition_position !== null ? { acquisition: {
         countryName: row.acquisition_country_name,
+        position: row.acquisition_position,
         status: row.acquisition_status === 'manual' ? '结果待人工对账' as const : '获取结果确认中' as const,
       } } : {}),
-      ...(row.country_name && row.activation_status && row.number_expires_at ? { activation: {
+      ...(row.country_name && row.activation_status && row.number_expires_at && row.provider_activation_id !== null && row.activation_position !== null && row.activation_cost !== null && row.activation_currency !== null ? { activation: {
         countryName: row.country_name, status: row.activation_status, numberExpiresAt: row.number_expires_at,
+        position: row.activation_position, providerActivationId: row.provider_activation_id,
+        activationCost: Number(row.activation_cost), currency: row.activation_currency,
         numberExpiresAtCountdown: ACTIVE_ACTIVATION_STATUSES.has(row.activation_status),
         ...(deliveryDataVisible && row.phone_number ? { phoneNumber: row.phone_number } : {}),
         ...(deliveryDataVisible && row.sms_code ? { verificationCode: row.sms_code } : {}),

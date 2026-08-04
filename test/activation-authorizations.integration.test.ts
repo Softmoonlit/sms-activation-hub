@@ -2502,7 +2502,7 @@ if (!databaseUrl) {
       const home = await restarted.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const detailPath = home.body.match(/href="(\/control7\/authorizations\/[0-9a-f-]{36})"/)?.[1]; assert.ok(detailPath);
       const detail = await restarted.inject({ method: 'GET', url: detailPath, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /manual_reconciliation/);
+      assert.match(detail.body, /结果待人工对账/);
       assert.doesNotMatch(detail.body, /timed_out/);
     } finally { await restarted.close(); }
 
@@ -2549,7 +2549,7 @@ if (!databaseUrl) {
       assert.equal(webhook.statusCode, 200);
       const detailPath = (await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } })).body.match(/href="(\/control7\/authorizations\/[0-9a-f-]{36})"/)?.[1]; assert.ok(detailPath);
       const detail = await app.inject({ method: 'GET', url: detailPath, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /completion_confirming|completed/);
+      assert.match(detail.body, /完成确认中|已完成/);
       const recipient = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(recipient.statusCode, 200);
       assert.match(recipient.body, /482913|复制验证码|415 555 0123/);
@@ -2599,7 +2599,7 @@ if (!databaseUrl) {
       assert.equal(cancelCalls, 1);
       const adminSession = await login(allowed.app);
       const detail = await allowed.app.inject({ method: 'GET', url: detailPath, headers: { cookie: adminSession.cookie } });
-      assert.match(detail.body, /cancelled/);
+      assert.match(detail.body, /已取消/);
       assert.doesNotMatch(detail.body, /\+14155550123/);
       assert.equal(getNumberCalls, 1, '授权到期后不得创建后继激活');
     } finally { await allowed.app.close(); }
@@ -3266,7 +3266,7 @@ if (!databaseUrl) {
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
       assert.match(detail.body, /授权状态：🏁 已结束（管理员撤销 · 2026-09-01 08:02:00）/);
       assert.doesNotMatch(detail.body, /结束原因：|结束时间：/);
-      assert.match(detail.body, /cancelled/);
+      assert.match(detail.body, /已取消/);
       assert.match(detail.body, /已确认退款：0\.80 USD/);
       assert.match(detail.body, /净成本：0\.00 USD/);
       assert.doesNotMatch(detail.body, /\+14155550123/);
@@ -3506,7 +3506,7 @@ if (!databaseUrl) {
       assert.equal(acquiredNumbers, 1);
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } })).statusCode, 404);
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /completion_confirming|completed/);
+      assert.match(detail.body, /完成确认中|已完成/);
     } finally { await app.close(); }
   });
 
@@ -3647,7 +3647,11 @@ if (!databaseUrl) {
       assert.match(detail.body, /获取时间 2026-09-06 08:00:00/);
       assert.match(detail.body, /已取消/);
       assert.match(detail.body, /等待短信/);
-      assert.match(detail.body, /候选地区/);
+      assert.match(detail.body, /位置 3 · 法国：<\/strong>📩 等待短信/);
+      assert.match(detail.body, /位置 1 · 美国：<\/strong>↩️ 已取消/);
+      assert.match(detail.body, /位置 2 · 英国：<\/strong>↩️ 已取消/);
+      assert.match(detail.body, /退款确认待处理 ⚠️/);
+      assert.doesNotMatch(detail.body, /<h2>候选地区<\/h2>|<h2>当前供应商激活<\/h2>/);
       assert.match(detail.body, /累计激活费用：4\.05 USD/);
       assert.match(detail.body, /已确认退款：0\.80 USD/);
       assert.match(detail.body, /净成本：3\.25 USD/);
@@ -4015,8 +4019,10 @@ if (!databaseUrl) {
       assert.match(detail2.body, /创建时间/);
       assert.match(detail2.body, /领取时间/);
       assert.doesNotMatch(detail2.body, /新号码获取截止时间|获取额度：/);
-      assert.match(detail2.body, /候选地区/);
-      assert.match(detail2.body, /位置 1（美国）：<\/strong>已消耗/);
+      assert.match(detail2.body, /位置 1 · 美国：<\/strong>📩 等待短信/);
+      assert.match(detail2.body, /位置 2 · 英国：<\/strong>⬜ 未消耗/);
+      assert.match(detail2.body, /位置 3 · 法国：<\/strong>⬜ 未消耗/);
+      assert.doesNotMatch(detail2.body, /候选地区|当前供应商激活/);
       assert.doesNotMatch(detail2.body, /报价|预检价格|库存/);
       assert.match(detail2.body, /撤销授权/);
 
@@ -4037,6 +4043,7 @@ if (!databaseUrl) {
       assert.match(detail3.body, /完整号码：/);
       assert.match(detail3.body, /验证码：/);
       assert.match(detail3.body, /654321/);
+      assert.match(detail3.body, /位置 1 · 美国：<\/strong>⏳ 完成确认中/);
       assert.match(detail3.body, /撤销授权/);
 
       // 4. 管理员撤销详情 (admin_revoked)

@@ -752,9 +752,12 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
     // 新号码获取截止时间与获取额度已从头部卡片移除
     await expect(desktopPage.getByText('新号码获取截止时间：')).toHaveCount(0);
     await expect(desktopPage.getByText('获取额度：')).toHaveCount(0);
-    await expect(desktopPage.getByRole('heading', { name: '候选地区', level: 2 })).toBeVisible();
-    await expect(desktopPage.getByText('位置 1（美国）：已消耗')).toBeVisible();
-    await expect(desktopPage.getByRole('heading', { name: '当前供应商激活', level: 2 })).toBeVisible();
+    await expect(desktopPage.getByRole('heading', { name: '供应商激活', level: 2 })).toBeVisible();
+    await expect(desktopPage.getByRole('heading', { name: '候选地区', level: 2 })).toHaveCount(0);
+    await expect(desktopPage.getByRole('heading', { name: '当前供应商激活', level: 2 })).toHaveCount(0);
+    await expect(desktopPage.getByText('位置 1 · 美国：')).toBeVisible();
+    await expect(desktopPage.getByText('位置 2 · 英国：⬜ 未消耗')).toBeVisible();
+    await expect(desktopPage.getByText('位置 3 · 法国：⬜ 未消耗')).toBeVisible();
     await expect(desktopPage.getByText('完整号码：+442079460777')).toBeVisible();
     await assertNoOverflow(desktopPage, '桌面进行中详情页');
 
