@@ -158,12 +158,13 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
     // 查看详情
     await card.getByRole('link', { name: '查看详情' }).click();
     await expect(page.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
-    await expect(page.getByText('授权状态：待领取')).toBeVisible();
+    await expect(page.getByText('授权状态：📋 待领取')).toBeVisible();
     await expect(page.getByText('创建时间：')).toBeVisible();
     await expect(page.getByRole('link', { name: '撤销授权' })).toBeVisible();
-    // 待领取授权不含候选位置与获取额度
+    // 待领取授权不含候选位置、获取额度与领取截止时间
     await expect(page.getByText('候选地区')).toHaveCount(0);
     await expect(page.getByText('获取额度：')).toHaveCount(0);
+    await expect(page.getByText('新号码获取截止时间：')).toHaveCount(0);
 
     // 进入撤销确认页
     await page.getByRole('link', { name: '撤销授权' }).click();
@@ -625,7 +626,7 @@ test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选�
     await page.goto(`${origin}/${config.adminPath}`);
     await expect(page.locator('article.authorization')).toHaveCount(20);
     await expect(page.locator('article.authorization .authorization-suffix').first()).toBeVisible();
-    await expect(page.locator('article.authorization .authorization-status').first()).toHaveText('待领取');
+    await expect(page.locator('article.authorization .authorization-status').first()).toHaveText('📋 待领取');
     await expect(page.locator('article.authorization .authorization-detail').first()).toBeVisible();
     await expect(page.getByText('第 1 / 2 页')).toBeVisible();
     await assertNoOverflow(page, '库存列表第一页');
@@ -732,7 +733,7 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
     await desktopPage.locator('article.authorization').first().getByRole('link', { name: '查看详情' }).click();
     await expect(desktopPage.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
     await expect(desktopPage.locator('h2', { hasText: `链接末 8 位：${suffix}` })).toBeVisible();
-    await expect(desktopPage.getByText('授权状态：待领取')).toBeVisible();
+    await expect(desktopPage.getByText('授权状态：📋 待领取')).toBeVisible();
     await expect(desktopPage.getByText('创建时间：')).toBeVisible();
     await expect(desktopPage.getByRole('link', { name: '撤销授权' })).toBeVisible();
     await expect(desktopPage.getByRole('heading', { name: '候选地区', level: 2 })).toBeHidden();
@@ -746,9 +747,11 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
 
     // 刷新桌面详情页
     await desktopPage.reload();
-    await expect(desktopPage.getByText('授权状态：进行中')).toBeVisible();
+    await expect(desktopPage.getByText('授权状态：🔄 进行中')).toBeVisible();
     await expect(desktopPage.getByText('领取时间：')).toBeVisible();
-    await expect(desktopPage.getByText('新号码获取截止时间：')).toBeVisible();
+    // 新号码获取截止时间与获取额度已从头部卡片移除
+    await expect(desktopPage.getByText('新号码获取截止时间：')).toHaveCount(0);
+    await expect(desktopPage.getByText('获取额度：')).toHaveCount(0);
     await expect(desktopPage.getByRole('heading', { name: '候选地区', level: 2 })).toBeVisible();
     await expect(desktopPage.getByText('位置 1（美国）：已消耗')).toBeVisible();
     await expect(desktopPage.getByRole('heading', { name: '当前供应商激活', level: 2 })).toBeVisible();
@@ -776,8 +779,9 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
     await mobilePage.getByRole('button', { name: '确认撤销授权' }).click();
 
     await mobilePage.goto(`${origin}/${config.adminPath}/authorizations/${authorizationId}`);
-    await expect(mobilePage.getByText('授权状态：已结束')).toBeVisible();
-    await expect(mobilePage.getByText('结束原因：管理员撤销')).toBeVisible();
+    await expect(mobilePage.getByText('授权状态：🏁 已结束（管理员撤销 · 2026-08-01 08:00:00）')).toBeVisible();
+    await expect(mobilePage.getByText('结束原因：')).toHaveCount(0);
+    await expect(mobilePage.getByText('结束时间：')).toHaveCount(0);
     await expect(mobilePage.getByText('+442079460777')).toBeHidden();
     await expect(mobilePage.getByRole('link', { name: '撤销授权' })).toBeHidden();
     await assertNoOverflow(mobilePage, '移动视口已撤销详情页');

@@ -66,6 +66,23 @@ const authorizationEndReasonLabels: Record<string, string> = {
   acquisition_expired: '领取后期限结束',
 };
 
+// 授权状态 emoji 映射：管理列表页与详情页共用，已结束状态行把结束原因与结束时间并入同一行。
+const authorizationStatusEmojis: Record<string, string> = {
+  待领取: '📋', 进行中: '🔄', 结果可查看: '✅', 已结束: '🏁',
+};
+
+// 授权状态展示文本（emoji + 状态）：管理列表页与详情页共用同一格式。
+function authorizationStatusLabel(status: string): string {
+  return `${authorizationStatusEmojis[status] ?? ''} ${status}`;
+}
+
+function authorizationStatusMarkup(status: string, endedReason?: string, endedAt?: Date): string {
+  if (status !== '已结束') return `<p>授权状态：${escapeHtml(authorizationStatusLabel(status))}</p>`;
+  const reason = endedReason ? authorizationEndReasonLabels[endedReason] ?? endedReason : undefined;
+  const summary = [reason, endedAt ? formatDateTime(endedAt) : undefined].filter((part): part is string => part !== undefined).join(' · ');
+  return `<p>授权状态：${authorizationStatusLabel('已结束')}${summary ? `（${escapeHtml(summary)}）` : ''}</p>`;
+}
+
 function activationStatusLabel(status: string): string {
   return activationStatusLabels[status] ? `${activationStatusLabels[status]}（${status}）` : status;
 }
@@ -223,7 +240,7 @@ function adminShell(path: string, csrfToken: string, listPage: AuthorizationList
   const filters = `<form class="inventory-filters" method="get" action="/${path}"><label>状态<select name="status"><option value="">全部状态</option><option value="unclaimed"${listPage.status === 'unclaimed' ? ' selected' : ''}>待领取</option><option value="in_progress"${listPage.status === 'in_progress' ? ' selected' : ''}>进行中</option><option value="result_available"${listPage.status === 'result_available' ? ' selected' : ''}>结果可查看</option><option value="ended"${listPage.status === 'ended' ? ' selected' : ''}>已结束</option></select></label><label>链接末 8 位<input name="suffix" value="${escapeHtml(listPage.tokenSuffix ?? '')}" inputmode="text" maxlength="8" pattern="[A-Za-z0-9_-]{8}"></label><button type="submit">筛选</button></form>`;
   const recent = listPage.items.length === 0
     ? `<p class="empty">${listPage.total === 0 && (listPage.status || listPage.tokenSuffix) ? '没有符合条件的激活授权。' : '尚未创建激活授权。'}</p>`
-    : `<div class="authorization-list">${listPage.items.map((authorization) => `<article class="authorization" data-authorization-id="${authorization.id}"><span class="authorization-suffix">${escapeHtml(authorization.tokenSuffix ?? '链接末 8 位未知')}</span><span class="authorization-status">${authorization.status}</span><a class="authorization-detail" aria-label="查看详情" href="/${path}/authorizations/${authorization.id}">→</a></article>`).join('')}</div>`;
+    : `<div class="authorization-list">${listPage.items.map((authorization) => `<article class="authorization" data-authorization-id="${authorization.id}"><span class="authorization-suffix">${escapeHtml(authorization.tokenSuffix ?? '链接末 8 位未知')}</span><span class="authorization-status">${escapeHtml(authorizationStatusLabel(authorization.status))}</span><a class="authorization-detail" aria-label="查看详情" href="/${path}/authorizations/${authorization.id}">→</a></article>`).join('')}</div>`;
   const pagination = listPage.totalPages > 0
     ? `<nav class="pagination" aria-label="授权列表分页"><a class="pagination-previous${listPage.hasPreviousPage ? '' : ' disabled'}"${listPage.hasPreviousPage ? ` href="/${path}${listQuery({ page: listPage.page - 1 })}"` : ' aria-disabled="true"'}>上一页</a><span>第 ${listPage.page} / ${listPage.totalPages} 页</span><a class="pagination-next${listPage.hasNextPage ? '' : ' disabled'}"${listPage.hasNextPage ? ` href="/${path}${listQuery({ page: listPage.page + 1 })}"` : ' aria-disabled="true"'}>下一页</a></nav>`
     : '';
@@ -237,7 +254,7 @@ function adminShell(path: string, csrfToken: string, listPage: AuthorizationList
 }
 
 
-const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll('[data-countdown]');if(!elements.length)return;const clock=(seconds)=>String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');const update=()=>{let reload=false;elements.forEach((el)=>{const target=Date.parse(el.dataset.countdown);const expired=target<=Date.now();const seconds=Math.max(0,Math.floor((target-Date.now())/1000));const fmt=el.dataset.format;if(fmt==='hours-minutes'){if(expired){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);el.textContent=(h>0?h+'小时 ':'')+m+'分钟';}}else if(fmt==='minutes-seconds'){if(expired){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}else if(fmt==='clock'){el.textContent=expired?(el.dataset.expiredText||'00:00'):clock(seconds);}else if(fmt==='cancel-countdown'){if(expired){el.textContent='已可'+(el.dataset.action==='end'?String.fromCharCode(32467,26463):String.fromCharCode(25442,21495));if(!el.dataset.reloaded){el.dataset.reloaded='true';reload=true;}}else{el.textContent=clock(seconds);}}});if(reload){setTimeout(()=>location.reload(),500);}};update();setInterval(update,1000);})();</script>`;
+const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll('[data-countdown]');if(!elements.length)return;const clock=(seconds)=>String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');const update=()=>{let reload=false;elements.forEach((el)=>{const target=Date.parse(el.dataset.countdown);const expired=target<=Date.now();const seconds=Math.max(0,Math.floor((target-Date.now())/1000));const fmt=el.dataset.format;if(fmt==='minutes-seconds'){if(expired){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}else if(fmt==='clock'){el.textContent=expired?(el.dataset.expiredText||'00:00'):clock(seconds);}else if(fmt==='cancel-countdown'){if(expired){el.textContent='已可'+(el.dataset.action==='end'?String.fromCharCode(32467,26463):String.fromCharCode(25442,21495));if(!el.dataset.reloaded){el.dataset.reloaded='true';reload=true;}}else{el.textContent=clock(seconds);}}});if(reload){setTimeout(()=>location.reload(),500);}};update();setInterval(update,1000);})();</script>`;
 
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail): string {
   const isUnclaimedDetail = detail.status === '待领取' && !detail.claimedAt && detail.candidates.length === 0 && detail.activations.length === 0;
@@ -274,23 +291,12 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
 
   const revoke = detail.canRevoke ? `<p><a href="/${path}/authorizations/${detail.id}/revoke">撤销授权</a></p>` : '';
 
-  const deadlineDate = detail.numberAcquisitionExpiresAt;
-  const authExpiryIso = deadlineDate?.toISOString();
-  const isEnded = detail.status === '已结束' || Boolean(detail.endedAt);
-  const authRemaining = isEnded
-    ? (deadlineDate ? escapeHtml(formatDateTime(deadlineDate)) : '已结束')
-    : (authExpiryIso
-      ? `<span data-countdown="${authExpiryIso}" data-format="hours-minutes">${escapeHtml(authExpiryIso)}</span>`
-      : '已结束');
-
   const identifierHeading = detail.tokenSuffix ? `链接末 8 位：${detail.tokenSuffix}` : '链接末 8 位：未知';
-  const endReason = detail.endedReason ? authorizationEndReasonLabels[detail.endedReason] ?? detail.endedReason : undefined;
+  // 头部卡片只保留授权状态、创建时间、领取时间（领取后）与撤销授权入口；
+  // 领取期限可由领取时间加一天心算，获取额度由未消耗候选位置表达，均不再单独展示。
+  const lifecycle = `<p>创建时间：${escapeHtml(formatDateTime(detail.createdAt))}</p>${detail.claimedAt ? `<p>领取时间：${escapeHtml(formatDateTime(detail.claimedAt))}</p>` : ''}`;
 
-  const lifecycle = !isUnclaimedDetail
-    ? `<p>创建时间：${escapeHtml(formatDateTime(detail.createdAt))}</p>${detail.claimedAt ? `<p>领取时间：${escapeHtml(formatDateTime(detail.claimedAt))}</p>` : ''}<p>新号码获取截止时间：${authRemaining}</p>${detail.endedAt ? `<p>结束时间：${escapeHtml(formatDateTime(detail.endedAt))}</p>` : ''}${endReason ? `<p>结束原因：${escapeHtml(endReason)}</p>` : ''}<p>获取额度：${detail.acquisitionCount}/3</p>`
-    : `<p>创建时间：${escapeHtml(formatDateTime(detail.createdAt))}</p>${detail.endedAt ? `<p>结束时间：${escapeHtml(formatDateTime(detail.endedAt))}</p>` : ''}${endReason ? `<p>结束原因：${escapeHtml(endReason)}</p>` : ''}`;
-
-  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(identifierHeading)}</h2><p>授权状态：${detail.status}</p>${lifecycle}${revoke}</section>${candidates}${activationSection}${costSection}${currentActivation}</section>${COUNTDOWN_SCRIPT}`;
+  const content = `<section class="dashboard"><section class="card"><h2>${escapeHtml(identifierHeading)}</h2>${authorizationStatusMarkup(detail.status, detail.endedReason, detail.endedAt)}${lifecycle}${revoke}</section>${candidates}${activationSection}${costSection}${currentActivation}</section>${COUNTDOWN_SCRIPT}`;
   return adminPage('激活授权详情', '激活授权详情', path, csrfToken, `/${path}`, '返回首页', content);
 }
 

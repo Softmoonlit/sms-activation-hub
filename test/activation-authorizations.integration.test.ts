@@ -548,9 +548,9 @@ if (!databaseUrl) {
       const id = authorizationIdFromHome(home.body, token);
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
       assert.match(detail.body, new RegExp(`链接末 8 位：${suffix}`));
-      assert.match(detail.body, /待领取/);
+      assert.match(detail.body, /授权状态：📋 待领取/);
       assert.match(detail.body, /创建时间/);
-      assert.doesNotMatch(detail.body, /获取额度|候选地区|供应商激活|成本/);
+      assert.doesNotMatch(detail.body, /获取额度|候选地区|供应商激活|成本|新号码获取截止时间|结束原因|结束时间|领取时间/);
 
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.equal(confirmation.statusCode, 200);
@@ -2366,7 +2366,7 @@ if (!databaseUrl) {
       const session = await login(activeRestart);
       const home = await activeRestart.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const authorizationId = authorizationIdFromHome(home.body, token);
-      assert.match(home.body, new RegExp(`data-authorization-id="${authorizationId}"[^>]*>[\\s\\S]*?<span class="authorization-status">进行中</span>`));
+      assert.match(home.body, new RegExp(`data-authorization-id="${authorizationId}"[^>]*>[\\s\\S]*?<span class="authorization-status">🔄 进行中</span>`));
     } finally { await activeRestart.close(); }
 
     now = new Date('2026-08-14T06:24:00.000Z');
@@ -3264,8 +3264,8 @@ if (!databaseUrl) {
         phone_number: null, sms_code: null, sms_text: null,
       });
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /授权状态：已结束/);
-      assert.match(detail.body, /结束原因：管理员撤销/);
+      assert.match(detail.body, /授权状态：🏁 已结束（管理员撤销 · 2026-09-01 08:02:00）/);
+      assert.doesNotMatch(detail.body, /结束原因：|结束时间：/);
       assert.match(detail.body, /cancelled/);
       assert.match(detail.body, /已确认退款：0\.80 USD/);
       assert.match(detail.body, /净成本：0\.00 USD/);
@@ -3598,7 +3598,7 @@ if (!databaseUrl) {
         'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
       );
       const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
-      await database.pool.query("UPDATE activation_authorizations SET status = 'ended', ended_reason = 'acquisition_expired', token_hash = NULL WHERE id = $1", [authorizationId]);
+      await database.pool.query("UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'acquisition_expired', token_hash = NULL WHERE id = $1", [authorizationId, now]);
       const activationIds = ['first', 'second', 'third'].map((suffix) => `${suffix}-${randomUUID()}`);
       // 先插入候选地区，满足 supplier_activations 的外键约束
       for (const [index] of activationIds.entries()) {
@@ -3631,7 +3631,7 @@ if (!databaseUrl) {
       );
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      assert.match(home.body, new RegExp(`data-authorization-id="${authorizationId}"[^>]*>[\\s\\S]*?<span class="authorization-status">已结束</span>`));
+      assert.match(home.body, new RegExp(`data-authorization-id="${authorizationId}"[^>]*>[\\s\\S]*?<span class="authorization-status">🏁 已结束</span>`));
       assert.doesNotMatch(home.body, /已到期|等待短信|待处理异常|退款|费用|供应商激活|当前地区/);
       assert.doesNotMatch(home.body, /\+14155550123|482913|短信正文/);
       const eventsBeforeDetail = await database.pool.query<{ count: string }>(
@@ -3640,15 +3640,14 @@ if (!databaseUrl) {
       assert.ok(Number(eventsBeforeDetail.rows[0]?.count) >= 4, '状态变更应留下非敏感生命周期事件');
 
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /授权状态：已结束/);
-      assert.match(detail.body, /结束原因：领取后期限结束/);
+      assert.match(detail.body, /授权状态：🏁 已结束（领取后期限结束 · 2026-09-06 08:00:00）/);
+      assert.doesNotMatch(detail.body, /结束原因：|结束时间：|获取额度：/);
       assert.match(detail.body, /供应商激活/);
       assert.match(detail.body, /first-/);
       assert.match(detail.body, /获取时间 2026-09-06 08:00:00/);
       assert.match(detail.body, /已取消/);
       assert.match(detail.body, /等待短信/);
       assert.match(detail.body, /候选地区/);
-      assert.match(detail.body, /获取额度：3\/3/);
       assert.match(detail.body, /累计激活费用：4\.05 USD/);
       assert.match(detail.body, /已确认退款：0\.80 USD/);
       assert.match(detail.body, /净成本：3\.25 USD/);
@@ -3707,7 +3706,7 @@ if (!databaseUrl) {
         const seen = new Set<string>();
         for (const article of firstArticles) {
           assert.match(article.suffix, /^[A-Za-z0-9_-]{8}$/);
-          assert.equal(article.status, '待领取');
+          assert.equal(article.status, '📋 待领取');
           assert.ok(expectedSuffixes.has(article.suffix));
           assert.ok(!seen.has(article.suffix), `后缀 ${article.suffix} 在分页中重复`);
           seen.add(article.suffix);
@@ -3776,10 +3775,10 @@ if (!databaseUrl) {
         assert.ok(articles.every((article) => article.status === expectedStatusLabel), `状态 ${status} 应显示 ${expectedStatusLabel}`);
         assert.match(response.body, new RegExp(`<option value="${status}" selected>`));
       };
-      await assertFilter('unclaimed', [links[3]!.slice(-8)], '待领取');
-      await assertFilter('in_progress', [links[0]!.slice(-8)], '进行中');
-      await assertFilter('result_available', [links[1]!.slice(-8)], '结果可查看');
-      await assertFilter('ended', [links[2]!.slice(-8)], '已结束');
+      await assertFilter('unclaimed', [links[3]!.slice(-8)], '📋 待领取');
+      await assertFilter('in_progress', [links[0]!.slice(-8)], '🔄 进行中');
+      await assertFilter('result_available', [links[1]!.slice(-8)], '✅ 结果可查看');
+      await assertFilter('ended', [links[2]!.slice(-8)], '🏁 已结束');
     } finally { await app.close(); }
   });
 
@@ -3964,13 +3963,14 @@ if (!databaseUrl) {
       const articles = listArticles(home.body);
       assert.equal(articles.length, 1);
       assert.equal(articles[0]?.suffix, '链接末 8 位未知', '不得伪造缺失的后缀');
-      assert.equal(articles[0]?.status, '已结束');
+      assert.equal(articles[0]?.status, '🏁 已结束');
       assert.ok([...home.body.matchAll(/href="([^"]+)"/g)].every((match) => !match[1]!.includes('/a/')), '列表不得提供公开链接入口');
 
       // 详情页仍可打开，同样不伪造后缀
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
       assert.equal(detail.statusCode, 200);
       assert.match(detail.body, /链接末 8 位：未知/);
+      assert.match(detail.body, /授权状态：🏁 已结束（管理员撤销 · 2026-08-01 08:00:00）/);
     } finally { await app.close(); }
   });
 
@@ -3997,10 +3997,10 @@ if (!databaseUrl) {
       const detail1 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
       assert.equal(detail1.statusCode, 200);
       assert.match(detail1.body, new RegExp(`链接末 8 位：${suffix1}`));
-      assert.match(detail1.body, /授权状态：待领取/);
+      assert.match(detail1.body, /授权状态：📋 待领取/);
       assert.match(detail1.body, /创建时间/);
       assert.match(detail1.body, /撤销授权/);
-      assert.doesNotMatch(detail1.body, /候选地区|供应商激活|成本|获取额度|新号码获取截止时间|授权到期时间|领取时间|尚无/);
+      assert.doesNotMatch(detail1.body, /候选地区|供应商激活|成本|获取额度|新号码获取截止时间|授权到期时间|领取时间|结束原因|结束时间|尚无/);
       assert.doesNotMatch(detail1.body, new RegExp(token1));
 
       // 2. 进行中详情 (in_progress)
@@ -4011,11 +4011,10 @@ if (!databaseUrl) {
 
       const detail2 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
       assert.equal(detail2.statusCode, 200);
-      assert.match(detail2.body, /授权状态：进行中/);
+      assert.match(detail2.body, /授权状态：🔄 进行中/);
       assert.match(detail2.body, /创建时间/);
       assert.match(detail2.body, /领取时间/);
-      assert.match(detail2.body, /新号码获取截止时间/);
-      assert.match(detail2.body, /获取额度：1\/3/);
+      assert.doesNotMatch(detail2.body, /新号码获取截止时间|获取额度：/);
       assert.match(detail2.body, /候选地区/);
       assert.match(detail2.body, /位置 1（美国）：<\/strong>已消耗/);
       assert.doesNotMatch(detail2.body, /报价|预检价格|库存/);
@@ -4034,7 +4033,7 @@ if (!databaseUrl) {
 
       const detail3 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
       assert.equal(detail3.statusCode, 200);
-      assert.match(detail3.body, /授权状态：结果可查看/);
+      assert.match(detail3.body, /授权状态：✅ 结果可查看/);
       assert.match(detail3.body, /完整号码：/);
       assert.match(detail3.body, /验证码：/);
       assert.match(detail3.body, /654321/);
@@ -4045,8 +4044,8 @@ if (!databaseUrl) {
       assert.equal(revokeRes.statusCode, 303);
       const detail4 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
       assert.equal(detail4.statusCode, 200);
-      assert.match(detail4.body, /授权状态：已结束/);
-      assert.match(detail4.body, /结束原因：管理员撤销/);
+      assert.match(detail4.body, /授权状态：🏁 已结束（管理员撤销 · 2026-08-01 08:00:00）/);
+      assert.doesNotMatch(detail4.body, /结束原因：|结束时间：/);
       assert.doesNotMatch(detail4.body, /撤销授权/);
       assert.doesNotMatch(detail4.body, /654321/);
 
@@ -4067,9 +4066,8 @@ if (!databaseUrl) {
       }
       const detail5 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${idB}`, headers: { cookie: session.cookie } });
       assert.equal(detail5.statusCode, 200);
-      assert.match(detail5.body, /授权状态：已结束/);
-      assert.match(detail5.body, /结束原因：获取额度用尽/);
-      assert.match(detail5.body, /获取额度：3\/3/);
+      assert.match(detail5.body, /授权状态：🏁 已结束（获取额度用尽 · 2026-08-01 08:00:00）/);
+      assert.doesNotMatch(detail5.body, /结束原因：|结束时间：|获取额度：/);
       assert.doesNotMatch(detail5.body, /撤销授权/);
 
       // 6. 期限结束详情 (acquisition_expired)
@@ -4086,8 +4084,8 @@ if (!databaseUrl) {
       );
       const detail6 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${idC}`, headers: { cookie: session.cookie } });
       assert.equal(detail6.statusCode, 200);
-      assert.match(detail6.body, /授权状态：已结束/);
-      assert.match(detail6.body, /结束原因：领取后期限结束/);
+      assert.match(detail6.body, /授权状态：🏁 已结束（领取后期限结束 · 2026-08-01 08:00:00）/);
+      assert.doesNotMatch(detail6.body, /结束原因：|结束时间：/);
       assert.doesNotMatch(detail6.body, /撤销授权/);
     } finally { await app.close(); }
   });
