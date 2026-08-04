@@ -315,8 +315,8 @@ test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部
     html = await page.content();
     assertNoSensitiveAdminInfo(html, '号码显示页面');
 
-    // 3. 换号按钮不足两分钟不出现
-    await expect(page.getByRole('button', { name: '更换号码' })).toHaveCount(0);
+    // 3. 换号按钮不足两分钟禁用
+    await expect(page.getByRole('button', { name: '更换号码' })).toBeDisabled();
 
     // 4. 短信送达后（验证码显示状态）
     const webhook = await app.inject({
@@ -354,6 +354,7 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const page = await context.newPage();
+    await page.clock.setFixedTime(now);
 
     // 初始状态
     await page.goto(`${origin}/a/${token}`);
@@ -374,15 +375,38 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
 
     // 领取号码后
     await page.getByRole('button', { name: '获取号码' }).click();
-    await expect(page.locator('.number')).toBeVisible();
+    await expect(page.getByText('+44 20 7946 0777', { exact: true })).toBeVisible();
+    await expect(page.getByText(/^号码有效至：还剩 20:00$/)).toBeVisible();
+    await expect(page.getByText(/^02:00 后可换号$/)).toBeVisible();
     await assertNoOverflow(page, '号码显示状态');
 
-    // 倒计时元素存在时不溢出
-    await expect(page.locator('[data-countdown]').first()).toBeVisible();
-    await assertNoOverflow(page, '倒计时显示状态');
+    // 秒数变化时倒计时和操作按钮保持稳定，不挤压相邻区域
+    const waitingPrompt = page.getByText(/^02:00 后可换号$/);
+    const waitingButton = page.getByRole('button', { name: '更换号码' });
+    const beforeTick = {
+      prompt: await waitingPrompt.boundingBox(),
+      button: await waitingButton.boundingBox(),
+    };
+    await page.clock.setFixedTime(new Date('2026-08-01T00:00:01.000Z'));
+    await page.waitForTimeout(1_100);
+    const afterTickPrompt = page.getByText(/^01:59 后可换号$/);
+    const afterTick = {
+      prompt: await afterTickPrompt.boundingBox(),
+      button: await waitingButton.boundingBox(),
+    };
+    assert.ok(beforeTick.prompt && beforeTick.button && afterTick.prompt && afterTick.button);
+    assert.equal(afterTick.prompt.width, beforeTick.prompt.width, '倒计时秒数变化不应改变提示宽度');
+    assert.equal(afterTick.button.y, beforeTick.button.y, '倒计时秒数变化不应移动操作按钮');
+    assert.ok(beforeTick.prompt.y + beforeTick.prompt.height <= beforeTick.button.y, '倒计时提示不得与操作按钮重叠');
 
-    // 时间快进，换号按钮出现后
+    // 号码窗口归零时立即显示明确过期状态，避免把零倒计时理解为仍可使用
+    await page.clock.setFixedTime(new Date('2026-08-01T00:20:00.000Z'));
+    await page.waitForTimeout(1_100);
+    await expect(page.getByText('号码有效至：还剩 00:00（号码已过期）', { exact: true })).toBeVisible();
+
+    // 时间快进，换号按钮可用
     now = new Date('2026-08-01T00:02:00.000Z');
+    await page.clock.setFixedTime(now);
     await page.reload();
     await expect(page.getByRole('button', { name: '更换号码' })).toBeVisible();
     await assertNoOverflow(page, '换号按钮显示状态');
@@ -405,8 +429,24 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
       },
     });
     assert.equal(webhook.statusCode, 200);
+    await page.clock.setFixedTime(new Date('2026-08-01T00:02:30.000Z'));
     await page.reload();
-    await expect(page.locator('#verification-code')).toBeVisible();
+    await expect(page.getByText('654321', { exact: true })).toBeVisible();
+    await expect(page.getByText(/^验证码可查看至：05:00$/)).toBeVisible();
+    await expect(page.getByRole('button', { name: '已收到验证码' })).toBeDisabled();
+    const resultOrder = await Promise.all([
+      page.getByRole('heading', { name: '当前号码' }).boundingBox(),
+      page.getByText('💡 使用说明', { exact: true }).boundingBox(),
+      page.getByRole('heading', { name: '验证码' }).boundingBox(),
+      page.getByText('剩余可用号码次数：2', { exact: true }).boundingBox(),
+      page.getByRole('button', { name: '已收到验证码' }).boundingBox(),
+    ]);
+    assert.ok(resultOrder.every((box) => box !== null));
+    const [numberHeading, guideHeading, resultHeading, quota, resultButton] = resultOrder;
+    assert.ok(numberHeading!.y + numberHeading!.height <= guideHeading!.y);
+    assert.ok(guideHeading!.y + guideHeading!.height <= resultHeading!.y);
+    assert.ok(resultHeading!.y + resultHeading!.height <= quota!.y);
+    assert.ok(quota!.y + quota!.height <= resultButton!.y, '结果页额度文案不得与禁用按钮重叠');
     await assertNoOverflow(page, '验证码显示状态');
 
     await context.close();

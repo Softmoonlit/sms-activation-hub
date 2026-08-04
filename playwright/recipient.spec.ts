@@ -68,38 +68,58 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['clipboard-read', 'clipboard-write'] });
     const page = await context.newPage();
+    await page.clock.setFixedTime(now);
     await page.goto(`${origin}/a/${token}`);
     await expect(page.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
     await expect(page.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
     await page.getByRole('button', { name: '获取号码' }).click();
-    await expect(page.locator('.number')).toHaveText('+44 20 7946 0123');
-    await expect(page.getByText('号码有效至')).toBeVisible();
+    await expect(page.getByText('+44 20 7946 0123', { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '当前号码' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '验证码' })).toBeVisible();
+    await expect(page.getByText(/^号码有效至：还剩 20:00$/)).toBeVisible();
+    await expect(page.getByText('正在监听短信验证码...')).toBeVisible();
     await expect(page.getByText('剩余可用号码次数：2')).toBeVisible();
-    await expect(page.getByText('获取号码后，请在 24 小时内使用')).toHaveCount(0);
-    await expect(page.getByText('链接剩余时间')).toHaveCount(0);
+    await expect(page.getByText(/^02:00 后可换号$/)).toBeVisible();
+    await expect(page.getByRole('button', { name: '更换号码' })).toBeDisabled();
+
+    // 验证可见内容的实际纵向顺序：当前号码区 < 使用说明 < 验证码结果区 < 换号操作区
+    const currentNumBox = await page.getByRole('heading', { name: '当前号码' }).boundingBox();
+    const guideBox = await page.getByText('💡 使用说明', { exact: true }).boundingBox();
+    const resultBox = await page.getByRole('heading', { name: '验证码' }).boundingBox();
+    const actionBox = await page.getByText('剩余可用号码次数：2', { exact: true }).boundingBox();
+    assert.ok(currentNumBox && guideBox && resultBox && actionBox);
+    assert.ok(currentNumBox.y < guideBox.y);
+    assert.ok(guideBox.y < resultBox.y);
+    assert.ok(resultBox.y < actionBox.y);
+
     await page.getByRole('button', { name: '复制号码' }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('+442079460123');
 
     now = new Date('2026-08-01T00:02:00.000Z');
+    await page.clock.setFixedTime(now);
     await page.reload();
+    await expect(page.getByText('长时间未收到验证码，可点击更换号码')).toBeVisible();
+    await expect(page.getByRole('button', { name: '更换号码' })).toBeEnabled();
     await page.getByRole('button', { name: '更换号码' }).click();
     await expect(page.getByText('更换后当前号码将不能继续使用')).toBeVisible();
     await page.getByRole('button', { name: '继续等待' }).click();
-    await expect(page.locator('.number')).toHaveText('+44 20 7946 0123');
+    await expect(page.getByText('+44 20 7946 0123', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: '更换号码' }).click();
     await page.getByRole('button', { name: '确认更换号码' }).click();
-    await expect(page.locator('.number')).toHaveText('+1 415 555 0123');
+    await expect(page.getByText('+1 415 555 0123', { exact: true })).toBeVisible();
 
     now = new Date('2026-08-01T00:04:00.000Z');
+    await page.clock.setFixedTime(now);
     await page.reload();
-    await expect(page.getByText('可换号时间')).toBeVisible();
+    await expect(page.getByRole('button', { name: '更换号码' })).toBeEnabled();
     await page.getByRole('button', { name: '更换号码' }).click();
     await page.getByRole('button', { name: '确认更换号码' }).click();
-    await expect(page.locator('.number')).toHaveText('+331 422 781 86');
-    await expect(page.getByText('可结束时间')).toBeVisible();
-
+    await expect(page.getByText('+331 422 781 86', { exact: true })).toBeVisible();
     now = new Date('2026-08-01T00:06:00.000Z');
+    await page.clock.setFixedTime(now);
     await page.reload();
+    await expect(page.getByText('仍长时间未收到验证码，可点击结束使用并联系管理员')).toBeVisible();
+    await expect(page.getByRole('button', { name: '结束使用' })).toBeEnabled();
     await page.getByRole('button', { name: '结束使用' }).click();
     await expect(page.getByRole('heading', { name: '结束使用此号码' })).toBeVisible();
     await expect(page.getByText('结束后当前号码将不能继续使用')).toBeVisible();
