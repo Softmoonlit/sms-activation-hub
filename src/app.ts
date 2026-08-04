@@ -134,8 +134,10 @@ function htmlPage(title: string, content: string): string {
     button.copied { background: #27ae60 !important; }
     .error { margin: 0 0 16px; color: #a12424; font-size: 14px; }
     .shell { width: min(calc(100% - 48px), 1000px); }
-    .shell header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d7dde1; padding-bottom: 16px; gap: 16px; }
-    .shell h1 { margin: 0; font-size: 22px; font-weight: 650; display: flex; align-items: center; gap: 0.35em; }
+    .shell header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; border-bottom: 1px solid #d7dde1; padding-bottom: 16px; gap: 16px; }
+    .shell header nav { justify-self: start; }
+    .shell header h1 { justify-self: center; margin: 0; font-size: 22px; font-weight: 650; display: flex; align-items: center; gap: 0.35em; text-align: center; }
+    .shell header form { justify-self: end; }
     .icon { width: 1em; height: 1em; flex-shrink: 0; stroke: currentColor; }
     nav a { color: #0f6655; box-sizing: border-box; font-size: 1rem; font-family: inherit; font-weight: 600; text-decoration: none; height: 40px; padding: 0 16px; border-radius: 4px; background: #edf3f1; transition: background 0.2s ease; display: inline-flex; align-items: center; gap: 0.35em; }
     nav a:hover { background: #dcebe6; }
@@ -218,7 +220,7 @@ function navLabelWithIcon(label: string): string {
 }
 
 function adminPage(title: string, heading: string, path: string, csrfToken: string, navigationPath: string, navigationLabel: string, content: string): string {
-  return htmlPage(title, `<main class="shell"><header><h1>${headingWithIcon(heading)}</h1><nav><a href="${navigationPath}">${navLabelWithIcon(navigationLabel)}</a></nav><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
+  return htmlPage(title, `<main class="shell"><header><nav><a href="${navigationPath}">${navLabelWithIcon(navigationLabel)}</a></nav><h1>${headingWithIcon(heading)}</h1><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
 }
 
 function parseAuthorizationListQuery(query: { page?: string; status?: string; suffix?: string }): AuthorizationListQuery {
