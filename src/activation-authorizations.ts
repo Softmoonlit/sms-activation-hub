@@ -81,6 +81,7 @@ export type RecipientAuthorizationState = 'available' | 'claimed' | 'unavailable
 
 export interface RecipientAuthorizationView {
   state: RecipientAuthorizationState;
+  hasAcquiredNumber: boolean;
   expiresAt?: Date;
   countryName?: string;
   phoneNumber?: string;
@@ -621,11 +622,11 @@ export class ActivationAuthorizations {
   }
 
   async recipientState(token: string, sessionToken?: string): Promise<RecipientAuthorizationView> {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { state: 'not-found' };
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { state: 'not-found', hasAcquiredNumber: false };
     const target = await this.database.pool.query<{ id: string }>(
       'SELECT id FROM activation_authorizations WHERE token_hash = $1', [tokenHash(token)],
     );
-    if (!target.rows[0]) return { state: 'not-found' };
+    if (!target.rows[0]) return { state: 'not-found', hasAcquiredNumber: false };
     await this.expireResultView(target.rows[0].id);
     // 页面访问也必须让二十分钟边界生效，不能等待下一次分钟扫描继续交付旧号码。
     await this.reconcileTimedOutActivations(target.rows[0].id);
@@ -666,7 +667,7 @@ export class ActivationAuthorizations {
       [tokenHash(token)],
     );
     const authorization = result.rows[0];
-    if (!authorization) return { state: 'not-found' };
+    if (!authorization) return { state: 'not-found', hasAcquiredNumber: false };
     const now = this.now();
     const accessDeadline = authorizationAcquisitionDeadline(authorization);
     if (accessDeadline !== null && accessDeadline <= now
@@ -680,23 +681,24 @@ export class ActivationAuthorizations {
       && !(authorization.status === 'in_progress'
         && authorization.acquisition_status && ['requesting', 'reconciling', 'manual'].includes(authorization.acquisition_status))) {
       await this.database.expireAuthorization(authorization.id, now);
-      return { state: 'not-found' };
+      return { state: 'not-found', hasAcquiredNumber: Number(authorization.used_count) > 0 };
     }
     const expiresAt = optionalDate(authorizationAcquisitionDeadline(authorization));
-    if (authorization.status === 'unclaimed') return { state: 'available', ...(expiresAt ? { expiresAt } : {}) };
+    const hasAcquiredNumber = Number(authorization.used_count) > 0;
+    if (authorization.status === 'unclaimed') return { state: 'available', hasAcquiredNumber, ...(expiresAt ? { expiresAt } : {}) };
     if (!sessionToken || !authorization.recipient_session_hash || tokenHash(sessionToken) !== authorization.recipient_session_hash) {
       return authorization.status === 'in_progress' || authorization.status === 'result_available'
-        ? { state: 'browser-mismatch', ...(expiresAt ? { expiresAt } : {}) }
-        : { state: 'unavailable', ...(expiresAt ? { expiresAt } : {}) };
+        ? { state: 'browser-mismatch', hasAcquiredNumber, ...(expiresAt ? { expiresAt } : {}) }
+        : { state: 'unavailable', hasAcquiredNumber, ...(expiresAt ? { expiresAt } : {}) };
     }
     if (authorization.status === 'ended'
       && authorization.ended_reason === QUOTA_EXHAUSTED_ENDED_REASON
       && authorization.end_prompt_until && authorization.end_prompt_until > now) {
-      return { state: 'claimed', quotaExhaustedPromptUntil: authorization.end_prompt_until };
+      return { state: 'claimed', hasAcquiredNumber, quotaExhaustedPromptUntil: authorization.end_prompt_until };
     }
     const deliveryContextVisible = authorization.activation_status !== 'manual_reconciliation' || authorization.last_activation_timed_out_at === null;
     return {
-      state: 'claimed', ...(expiresAt ? { expiresAt } : {}),
+      state: 'claimed', hasAcquiredNumber, ...(expiresAt ? { expiresAt } : {}),
       ...(authorization.country_name ? { countryName: authorization.country_name } : {}),
       ...(deliveryContextVisible && authorization.phone_number ? { phoneNumber: authorization.phone_number } : {}),
       ...(authorization.acquired_at ? { acquiredAt: authorization.acquired_at } : {}),

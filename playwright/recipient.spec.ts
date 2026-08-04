@@ -70,9 +70,13 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     const page = await context.newPage();
     await page.goto(`${origin}/a/${token}`);
     await expect(page.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
+    await expect(page.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
     await page.getByRole('button', { name: '获取号码' }).click();
     await expect(page.locator('.number')).toHaveText('+44 20 7946 0123');
+    await expect(page.getByText('号码有效至')).toBeVisible();
     await expect(page.getByText('剩余可用号码次数：2')).toBeVisible();
+    await expect(page.getByText('获取号码后，请在 24 小时内使用')).toHaveCount(0);
+    await expect(page.getByText('链接剩余时间')).toHaveCount(0);
     await page.getByRole('button', { name: '复制号码' }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('+442079460123');
 

@@ -311,7 +311,8 @@ if (!databaseUrl) {
       const claim = await app.inject({ method: 'POST', url: `/a/${token}` + '/numbers', headers: { cookie: 'recipient_session=stale-client-value' } });
       assert.equal(claim.statusCode, 503);
       assert.match(claim.body, /暂时无法获取号码，请联系发送者/);
-      assert.match(claim.body, /链接剩余时间/);
+      assert.match(claim.body, /获取号码后，请在 24 小时内使用/);
+      assert.doesNotMatch(claim.body, /链接剩余时间/);
       assert.doesNotMatch(claim.body, /授权/);
       const recipientCookie = cookieValue(claim, 'recipient_session');
       assert.notEqual(recipientCookie, 'stale-client-value');
@@ -494,7 +495,8 @@ if (!databaseUrl) {
       const boundCookie = cookieValue(bound, 'recipient_session');
       const boundPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: `recipient_session=${boundCookie}` } });
       assert.equal(boundPage.statusCode, 200);
-      assert.match(boundPage.body, /链接剩余时间/);
+      assert.match(boundPage.body, /号码有效至/);
+      assert.doesNotMatch(boundPage.body, /获取号码后，请在 24 小时内使用|链接剩余时间/);
       assert.doesNotMatch(boundPage.body, /授权/);
 
       const authorization = await database.pool.query<{
@@ -604,6 +606,8 @@ if (!databaseUrl) {
       const secondGet = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(firstGet.statusCode, 200);
       assert.match(firstGet.body, /获取号码/);
+      assert.match(firstGet.body, /获取号码后，请在 24 小时内使用/);
+      assert.doesNotMatch(firstGet.body, /链接剩余时间/);
       assert.equal(secondGet.statusCode, 200, '链接预览和重复 GET 不应领取授权');
       assert.equal(firstGet.headers['referrer-policy'], 'no-referrer');
       assert.match(String(firstGet.headers['x-robots-tag']), /noindex/);
@@ -752,7 +756,8 @@ if (!databaseUrl) {
       assert.equal(numberPage.statusCode, 200);
       assert.match(numberPage.body, /英国|\+44 20 7946 0123/);
       assert.match(numberPage.body, /data-copy-value="\+442079460123"/);
-      assert.match(numberPage.body, /授权剩余时间|号码有效至|可换号时间|剩余可用号码次数：2/);
+      assert.match(numberPage.body, /号码有效至|可换号时间|剩余可用号码次数：2/);
+      assert.doesNotMatch(numberPage.body, /获取号码后，请在 24 小时内使用|链接剩余时间/);
       assert.doesNotMatch(numberPage.body, new RegExp(`${activationId}|HeroSMS|价格|库存`));
 
       const lostCookie = await app.inject({ method: 'GET', url: `/a/${token}` });
@@ -869,6 +874,7 @@ if (!databaseUrl) {
       });
       assert.equal(confirming.statusCode, 202);
       assert.match(confirming.body, /正在确认号码获取结果，请稍候/);
+      assert.doesNotMatch(confirming.body, /获取号码后，请在 24 小时内使用|链接剩余时间/);
       assert.equal(getNumberCalls, 2);
 
       const retry = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
@@ -1205,6 +1211,8 @@ if (!databaseUrl) {
       const uncertain = await app.inject({ method: 'POST', url: `/a/${firstToken}/numbers` });
       assert.equal(uncertain.statusCode, 202);
       assert.match(uncertain.body, /号码状态待发送者处理/);
+      assert.match(uncertain.body, /获取号码后，请在 24 小时内使用/);
+      assert.doesNotMatch(uncertain.body, /链接剩余时间/);
       const firstCookie = `recipient_session=${cookieValue(uncertain, 'recipient_session')}`;
 
       const paused = await app.inject({ method: 'POST', url: `/a/${secondToken}/numbers` });
@@ -1255,6 +1263,8 @@ if (!databaseUrl) {
       token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
       const uncertain = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(uncertain.statusCode, 202);
+      assert.match(uncertain.body, /获取号码后，请在 24 小时内使用/);
+      assert.doesNotMatch(uncertain.body, /链接剩余时间/);
       recipientCookie = `recipient_session=${cookieValue(uncertain, 'recipient_session')}`;
     } finally { await opened.app.close(); }
 
@@ -2245,6 +2255,9 @@ if (!databaseUrl) {
       const next = await timedOut.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
       assert.equal(next.statusCode, 303);
       assert.equal(getNumberCalls, 2, '只有接收者再次点击才获取下一个号码');
+      const nextNumberPage = await timedOut.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(nextNumberPage.body, /号码有效至/);
+      assert.doesNotMatch(nextNumberPage.body, /获取号码后，请在 24 小时内使用|链接剩余时间/);
     } finally { await timedOut.close(); }
 
     const historyCallsBeforeRefund = historyCalls;
@@ -2725,8 +2738,8 @@ if (!databaseUrl) {
       now = new Date('2026-08-02T00:05:00.000Z');
       const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(page.statusCode, 200);
-      assert.match(page.body, /链接剩余时间/);
-      assert.match(page.body, /结束使用/);
+      assert.doesNotMatch(page.body, /获取号码后，请在 24 小时内使用|链接剩余时间/);
+      assert.match(page.body, /号码有效至|结束使用/);
       assert.match(page.body, /可结束时间/);
       assert.doesNotMatch(page.body, /更换号码|获取下一个号码/);
 

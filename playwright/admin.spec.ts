@@ -357,6 +357,19 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
 
     // 初始状态
     await page.goto(`${origin}/a/${token}`);
+    await expect(page.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
+    await expect(page.getByRole('button', { name: '获取号码' })).toBeVisible();
+    const firstHintLayout = await page.evaluate(() => {
+      const hint = [...document.querySelectorAll('p')].find((element) => element.textContent?.includes('获取号码后，请在 24 小时内使用'));
+      const button = document.querySelector('button');
+      if (!hint || !button) return null;
+      const hintRect = hint.getBoundingClientRect();
+      const buttonRect = button.getBoundingClientRect();
+      return { hintRight: hintRect.right, buttonTop: buttonRect.top, hintBottom: hintRect.bottom, viewportWidth: window.innerWidth };
+    });
+    assert.ok(firstHintLayout);
+    assert.ok(firstHintLayout.hintRight <= firstHintLayout.viewportWidth + 2, '首次提示不应超出移动视口');
+    assert.ok(firstHintLayout.buttonTop >= firstHintLayout.hintBottom, '首次提示不应挤压获取号码按钮');
     await assertNoOverflow(page, '初始状态');
 
     // 领取号码后
