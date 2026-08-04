@@ -282,14 +282,15 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
     : '';
   const historyRows = detail.activations
     .filter((activation) => !detail.activation || activation.providerActivationId !== detail.activation.providerActivationId)
-    .map((activation) => `<li><strong>位置 ${activation.position} · ${escapeHtml(activation.countryName)}：</strong>${activationStatusLabel(activation.status)}，激活 ID ${escapeHtml(activation.providerActivationId)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt))}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理 ⚠️' : ''}</li>`).join('');
+    .map((activation) => `<li><strong>位置 ${activation.position} · ${escapeHtml(activation.countryName)}：</strong>${activationStatusLabel(activation.status)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt))}，激活 ID ${escapeHtml(activation.providerActivationId)}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理 ⚠️' : ''}</li>`).join('');
   const unusedPositionRows = detail.candidates
     .filter((candidate) => !candidate.used)
     .map((candidate) => `<li><strong>位置 ${candidate.position} · ${escapeHtml(candidate.countryName)}：</strong>⬜ 未消耗</li>`).join('');
   const activationListItems = [currentActivationRow, acquisitionRow, historyRows, unusedPositionRows].filter((markup) => markup !== '').join('');
   const activations = activationListItems === '' ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${activationListItems}</ul>`;
+  const unrecognizedSmsText = detail.activation?.unrecognizedSmsText ?? detail.unrecognizedSmsText;
   const activationSection = !isUnclaimedDetail && (detail.candidates.length > 0 || detail.activations.length > 0)
-    ? `<section class="card"><h2>供应商激活</h2>${activations}${detail.activation?.unrecognizedSmsText ? `<h3>无法识别验证码的短信正文</h3><p class="token">${escapeHtml(detail.activation.unrecognizedSmsText)}</p>` : ''}</section>`
+    ? `<section class="card"><h2>供应商激活</h2>${activations}${unrecognizedSmsText ? `<h3>无法识别验证码的短信正文</h3><p class="token">${escapeHtml(unrecognizedSmsText)}</p>` : ''}</section>`
     : '';
 
   const costs = detail.costs.length === 0 ? '<p>尚无费用。</p>' : `<ul class="summary">${detail.costs.map((cost) => `<li>累计激活费用：${cost.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；已确认退款：${cost.confirmedRefund.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}；净成本：${cost.netCost.toFixed(2)} ${escapeHtml(formatCurrency(cost.currency))}</li>`).join('')}</ul>`;

@@ -54,6 +54,7 @@ export interface AuthorizationDetail {
     status: '获取结果确认中' | '结果待人工对账';
     position: number;
   };
+  unrecognizedSmsText?: string;
   activation?: {
     countryName: string;
     position: number;
@@ -586,16 +587,17 @@ export class ActivationAuthorizations {
       activations,
       costs,
       ...(revocationConsequence ? { revocationConsequence } : {}),
+      ...(!row.sms_code && deliveryDataVisible && row.sms_text ? { unrecognizedSmsText: row.sms_text } : {}),
       ...(row.acquisition_status && row.acquisition_country_name && row.acquisition_position !== null ? { acquisition: {
         countryName: row.acquisition_country_name,
         position: row.acquisition_position,
         status: row.acquisition_status === 'manual' ? '结果待人工对账' as const : '获取结果确认中' as const,
       } } : {}),
-      ...(row.country_name && row.activation_status && row.number_expires_at && row.provider_activation_id !== null && row.activation_position !== null && row.activation_cost !== null && row.activation_currency !== null ? { activation: {
+      ...(row.country_name && row.activation_status && ACTIVE_ACTIVATION_STATUSES.has(row.activation_status) && row.number_expires_at && row.provider_activation_id !== null && row.activation_position !== null && row.activation_cost !== null && row.activation_currency !== null ? { activation: {
         countryName: row.country_name, status: row.activation_status, numberExpiresAt: row.number_expires_at,
         position: row.activation_position, providerActivationId: row.provider_activation_id,
         activationCost: Number(row.activation_cost), currency: row.activation_currency,
-        numberExpiresAtCountdown: ACTIVE_ACTIVATION_STATUSES.has(row.activation_status),
+        numberExpiresAtCountdown: true,
         ...(deliveryDataVisible && row.phone_number ? { phoneNumber: row.phone_number } : {}),
         ...(deliveryDataVisible && row.sms_code ? { verificationCode: row.sms_code } : {}),
         ...(!row.sms_code && deliveryDataVisible && row.sms_text ? { unrecognizedSmsText: row.sms_text } : {}),

@@ -4257,4 +4257,58 @@ if (!databaseUrl) {
       assert.match(page.body, /data-copy-value="\+442079460123"/, '号码与地区呼叫代码不匹配时整号复制');
     } finally { await app.close(); }
   });
+
+  test('供应商激活卡片：非终态激活高亮展示，终态自动降级为无高亮历史行且格式满足获取时间在激活ID之前', async () => {
+    let now = new Date('2026-09-10T00:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+
+      // 领取并获取号码，进入 waiting_sms (非终态)
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = authorizationIdFromHome(home.body, token);
+
+      // 1. 在 waiting_sms 状态时，应当渲染高亮行 (class="activation-current")
+      const detailActive = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
+      assert.equal(detailActive.statusCode, 200);
+      assert.match(detailActive.body, /<li class="activation-current">/);
+      assert.match(detailActive.body, /位置 1 · 美国：<\/strong>.*等待短信/);
+      assert.match(detailActive.body, /号码有效至：/);
+      assert.match(detailActive.body, /激活 ID activation-1/);
+      assert.match(detailActive.body, /费用 0\.80 USD/);
+      assert.doesNotMatch(detailActive.body, /<li class="activation-current">[^<]*获取时间/);
+
+      // 2. 模拟短信送达 (进入 completion_confirming 状态，仍属于 ACTIVE_ACTIVATION_STATUSES)
+      const actRes = await database.pool.query<{ provider_activation_id: string }>(
+        'SELECT provider_activation_id FROM supplier_activations WHERE authorization_id = $1', [id],
+      );
+      const actId = actRes.rows[0]?.provider_activation_id; assert.ok(actId);
+      await app.inject({
+        method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+        payload: { activationId: actId, service: 'openai', country: 1, receivedAt: '2026-09-10T00:02:00.000Z', code: '888999', text: 'Your code is 888999' },
+      });
+
+      // 3. 跨过 5 分钟后触发完成确认，状态进入 completed 终态
+      now = new Date('2026-09-10T00:08:00.000Z');
+      await database.pool.query("UPDATE supplier_activations SET status = 'completed', completed_at = $2 WHERE provider_activation_id = $1", [actId, now]);
+
+      // 4. 变成 completed 终态后，应当不包含 activation-current 高亮行，原激活降级为普通历史行
+      const detailCompleted = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
+      assert.equal(detailCompleted.statusCode, 200);
+      assert.doesNotMatch(detailCompleted.body, /class="activation-current"/);
+      assert.doesNotMatch(detailCompleted.body, /号码有效至/);
+      assert.match(detailCompleted.body, /位置 1 · 美国：<\/strong>✅ 已完成，获取时间 2026-09-10 08:00:00，激活 ID activation-1，费用 0\.80 USD/);
+      // 验证“获取时间”位于“激活 ID”之前
+      const acquiredAtPos = detailCompleted.body.indexOf('获取时间');
+      const activationIdPos = detailCompleted.body.indexOf('激活 ID activation-1');
+      assert.ok(acquiredAtPos > 0 && activationIdPos > 0 && acquiredAtPos < activationIdPos, '获取时间必须位于激活 ID 之前');
+      assert.match(detailCompleted.body, /位置 2 · 英国：<\/strong>⬜ 未消耗/);
+      assert.match(detailCompleted.body, /位置 3 · 法国：<\/strong>⬜ 未消耗/);
+    } finally { await app.close(); }
+  });
 }
