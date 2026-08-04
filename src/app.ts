@@ -155,9 +155,12 @@ function htmlPage(title: string, content: string): string {
     .authorization { border-top: 1px solid #e3e7e9; padding: 16px 0; }
     .authorization:first-child { border-top: 0; }
     .authorization p { margin: 4px 0; }
-    .inventory-filters { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(180px, 1fr) auto; align-items: end; gap: 12px; margin: 16px 0; }
+    .inventory-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 12px; margin: 16px 0; }
     .inventory-filters label { gap: 6px; }
     .inventory-filters button { min-height: 40px; margin: 0; }
+    .card form.batch-create-form { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: end; gap: 12px; }
+    .card form.batch-create-form button { margin: 0; min-height: 40px; }
+    .card form.batch-create-form label { gap: 6px; }
     .authorization-list { display: grid; gap: 0; }
     .authorization-list .authorization { box-sizing: border-box; min-height: 56px; display: grid; grid-template-columns: minmax(0, 1fr) auto 40px; align-items: center; gap: 16px; padding: 8px 0; }
     .authorization-suffix { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
@@ -167,7 +170,7 @@ function htmlPage(title: string, content: string): string {
     .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 18px; font-size: 14px; }
     .pagination a { min-width: 72px; height: 36px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; color: #0f6655; background: #edf3f1; text-decoration: none; }
     .pagination a.disabled { color: #9daab2; background: #f0f2f3; pointer-events: none; }
-    @media (max-width: 600px) { .shell { width: min(calc(100% - 32px), 1000px); } .inventory-filters { grid-template-columns: 1fr; } .authorization-list .authorization { gap: 8px; grid-template-columns: minmax(0, 1fr) auto 40px; } .authorization-status { font-size: 13px; } .pagination { gap: 8px; } }
+    @media (max-width: 600px) { .shell { width: min(calc(100% - 32px), 1000px); } .inventory-filters { gap: 8px; } .authorization-list .authorization { gap: 8px; grid-template-columns: minmax(0, 1fr) auto 40px; } .authorization-status { font-size: 13px; } .pagination { gap: 8px; } }
     .danger { background: #a12424; }
     .token { overflow-wrap: anywhere; padding: 12px; background: #edf3f1; border-radius: 4px; }
     .recipient { width: min(calc(100% - 32px), 520px); }
@@ -259,7 +262,7 @@ function adminShell(path: string, csrfToken: string, listPage: AuthorizationList
     const recipient = `链接末 8 位：${request.tokenSuffix ?? '未知'}`;
     return `<article class="authorization"><p><strong>${escapeHtml(recipient)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(request.requestedAt.toISOString())}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
   }).join('')}</section>`;
-  const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>批量创建激活授权链接</h2><p>一次生成 1 至 50 条永久待领取授权链接，不读取候选地区或 HeroSMS。</p><form method="post" action="/${path}/authorizations/batch/preview"><input type="hidden" name="csrf" value="${csrfToken}"><label>创建数量<input name="quantity" type="number" min="1" max="50" step="1" value="10" required></label><button type="submit">预览批量创建</button></form></section><section class="card inventory-card"><h2>最近激活授权</h2>${filters}${recent}${pagination}</section></section>`;
+  const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>批量创建激活授权链接</h2><p>一次可生成 1 至 50 条授权链接。</p><form class="batch-create-form" method="post" action="/${path}/authorizations/batch/preview"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">预览批量创建</button><label>创建数量<input name="quantity" type="number" min="1" max="50" step="1" value="10" required></label></form></section><section class="card inventory-card"><h2>最近激活授权</h2>${filters}${recent}${pagination}</section></section>`;
   return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', content);
 }
 
