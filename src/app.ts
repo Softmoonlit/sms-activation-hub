@@ -143,19 +143,20 @@ function htmlPage(title: string, content: string): string {
     .danger { background: #a12424; }
     .token { overflow-wrap: anywhere; padding: 12px; background: #edf3f1; border-radius: 4px; }
     .recipient { width: min(calc(100% - 32px), 520px); }
-    .recipient h2 { margin: 20px 0 12px; font-size: 16px; font-weight: 650; color: #17202a; border-bottom: 1px solid #edf2f5; padding-bottom: 8px; }
+    .section-verification-result { border-bottom: 1px solid #edf2f5; padding-bottom: 14px; }
+    .section-action { margin-top: 14px; }
     .country { font-weight: 600; font-size: 16px; margin: 0 0 12px; color: #17202a; }
     .number { margin: 12px 0; color: #17202a; font-size: clamp(28px, 8vw, 40px); font-weight: 700; letter-spacing: .02em; overflow-wrap: anywhere; }
     .number-expiry, .result-view-expiry { color: #53616c; font-size: 14px; margin: 12px 0 0; }
-    .quota-info { color: #53616c; font-size: 14px; margin: 0 0 8px; font-weight: 500; }
-    .action-prompt { color: #53616c; font-size: 14px; margin: 8px 0 12px; line-height: 1.55; overflow-wrap: anywhere; }
+    .quota-info { color: #53616c; font-size: 14px; margin: 0 0 4px; font-weight: 500; }
+    .action-prompt { color: #53616c; font-size: 14px; margin: 0 0 8px; line-height: 1.55; overflow-wrap: anywhere; }
     .facts { display: grid; gap: 10px; margin: 20px 0; padding: 0; list-style: none; color: #53616c; }
     .recipient button { width: 100%; }
     button:disabled { background: #b0bec5; cursor: not-allowed; opacity: 0.85; }
     [data-countdown] { display: inline-block; min-width: 5ch; font-variant-numeric: tabular-nums; }
     .steps-guide { background: #f0f7f5; border: 1px solid #c2e0d8; border-radius: 6px; padding: 14px 16px; margin: 16px 0; text-align: left; }
     .guide-title { font-weight: 600; color: #0f6655; margin: 0 0 6px; font-size: 14px; }
-    .guide-steps { margin: 0; padding-left: 20px; font-size: 13px; color: #334155; line-height: 1.6; }
+    .guide-copy { margin: 0; font-size: 13px; color: #334155; line-height: 1.6; }
     .status-waiting { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; color: #0f6655; margin: 12px 0 16px; font-weight: 500; }
     .spinner { width: 14px; height: 14px; border: 2px solid #0f665533; border-top-color: #0f6655; border-radius: 50%; animation: spin 1s linear infinite; display: inline-block; box-sizing: border-box; }
     .success-badge { display: inline-block; background: #e6f4ea; color: #137333; font-weight: 600; font-size: 13px; padding: 4px 12px; border-radius: 12px; margin-bottom: 8px; }
@@ -366,9 +367,9 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
       ? `<p class="number-expiry">号码有效至：还剩 <span data-countdown="${escapeHtml(numberExpiryIso)}" data-format="clock" data-expired-text="00:00（号码已过期）">${escapeHtml(numberExpiryIso)}</span></p>`
       : '';
 
-    const currentNumberSection = `<section class="section-current-number"><h2>当前号码</h2>${countryMarkup}${numberMarkup}${numberExpiryMarkup}</section>`;
+    const currentNumberSection = `<section class="section-current-number" aria-label="当前号码">${countryMarkup}${numberMarkup}${numberExpiryMarkup}</section>`;
 
-    const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><ol class="guide-steps"><li>复制上方号码，填入 OpenAI 验证页面并发送验证码</li><li>发送后请保持本页面开着，系统将自动接收并显示验证码</li></ol></div>`;
+    const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码，填到验证界面并确认；系统将自动接收并显示验证码。</p></div>`;
 
     let verificationMarkup = '';
     if (view.smsDelivered) {
@@ -383,7 +384,7 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     } else {
       verificationMarkup = `<div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
     }
-    const verificationSection = `<section class="section-verification-result"><h2>验证码</h2>${verificationMarkup}</section>`;
+    const verificationSection = `<section class="section-verification-result" aria-label="验证码">${verificationMarkup}</section>`;
 
     let actionPrompt = '';
     let actionButton = '';

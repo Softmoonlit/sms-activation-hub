@@ -435,9 +435,9 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
     await expect(page.getByText(/^验证码可查看至：05:00$/)).toBeVisible();
     await expect(page.getByRole('button', { name: '已收到验证码' })).toBeDisabled();
     const resultOrder = await Promise.all([
-      page.getByRole('heading', { name: '当前号码' }).boundingBox(),
+      page.locator('.section-current-number').boundingBox(),
       page.getByText('💡 使用说明', { exact: true }).boundingBox(),
-      page.getByRole('heading', { name: '验证码' }).boundingBox(),
+      page.locator('.section-verification-result').boundingBox(),
       page.getByText('剩余可用号码次数：2', { exact: true }).boundingBox(),
       page.getByRole('button', { name: '已收到验证码' }).boundingBox(),
     ]);

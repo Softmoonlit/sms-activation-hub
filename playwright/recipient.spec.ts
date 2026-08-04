@@ -74,8 +74,9 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     await expect(page.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
     await page.getByRole('button', { name: '获取号码' }).click();
     await expect(page.getByText('+44 20 7946 0123', { exact: true })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '当前号码' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '验证码' })).toBeVisible();
+    await expect(page.locator('.section-current-number')).toBeVisible();
+    await expect(page.locator('.section-verification-result')).toBeVisible();
+    await expect(page.getByText('复制上方号码，填到验证界面并确认；系统将自动接收并显示验证码。')).toBeVisible();
     await expect(page.getByText(/^号码有效至：还剩 20:00$/)).toBeVisible();
     await expect(page.getByText('正在监听短信验证码...')).toBeVisible();
     await expect(page.getByText('剩余可用号码次数：2')).toBeVisible();
@@ -83,9 +84,9 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     await expect(page.getByRole('button', { name: '更换号码' })).toBeDisabled();
 
     // 验证可见内容的实际纵向顺序：当前号码区 < 使用说明 < 验证码结果区 < 换号操作区
-    const currentNumBox = await page.getByRole('heading', { name: '当前号码' }).boundingBox();
+    const currentNumBox = await page.locator('.section-current-number').boundingBox();
     const guideBox = await page.getByText('💡 使用说明', { exact: true }).boundingBox();
-    const resultBox = await page.getByRole('heading', { name: '验证码' }).boundingBox();
+    const resultBox = await page.locator('.section-verification-result').boundingBox();
     const actionBox = await page.getByText('剩余可用号码次数：2', { exact: true }).boundingBox();
     assert.ok(currentNumBox && guideBox && resultBox && actionBox);
     assert.ok(currentNumBox.y < guideBox.y);

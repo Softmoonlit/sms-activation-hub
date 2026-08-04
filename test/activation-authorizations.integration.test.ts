@@ -4122,11 +4122,11 @@ if (!databaseUrl) {
 
       const pageStateA = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(pageStateA.statusCode, 200);
-      assert.match(pageStateA.body, /当前号码/);
+      assert.match(pageStateA.body, /aria-label="当前号码"/);
       assert.match(pageStateA.body, /\+1 415 555 0123/);
       assert.match(pageStateA.body, /号码有效至：还剩/);
       assert.match(pageStateA.body, /💡 使用说明/);
-      assert.match(pageStateA.body, /验证码/);
+      assert.match(pageStateA.body, /aria-label="验证码"/);
       assert.match(pageStateA.body, /正在监听短信验证码.../);
       assert.match(pageStateA.body, /剩余可用号码次数：2/);
       assert.match(pageStateA.body, /后可换号/);
@@ -4169,10 +4169,10 @@ if (!databaseUrl) {
 
       const pageResultAvailable = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(pageResultAvailable.statusCode, 200);
-      assert.match(pageResultAvailable.body, /当前号码/);
+      assert.match(pageResultAvailable.body, /aria-label="当前号码"/);
       assert.match(pageResultAvailable.body, /\+331 422 781 86/);
       assert.match(pageResultAvailable.body, /号码有效至：还剩/);
-      assert.match(pageResultAvailable.body, /验证码/);
+      assert.match(pageResultAvailable.body, /aria-label="验证码"/);
       assert.match(pageResultAvailable.body, /987654/);
       assert.match(pageResultAvailable.body, /复制验证码/);
       assert.match(pageResultAvailable.body, /验证码可查看至：/);
