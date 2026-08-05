@@ -652,6 +652,11 @@ export async function createApp(config: AppConfig, database = new Database(confi
     }, 1_000);
     cancellationConfirmationReconciliationTimer.unref();
   };
+  /** 换号/结束使用、撤销、授权到期及对账延后等任何运行期状态转移进入“取消确认中”
+   *  或产生新的取消重试时间后，都重新安排专用调度器：按数据库中最早到期时间触发。 */
+  const wakeCancellationConfirmationReconciliationScheduling = (): void => {
+    void scheduleNextCancellationConfirmationReconciliation().catch(retryCancellationConfirmationReconciliationScheduling);
+  };
   const scheduleNextCancellationConfirmationReconciliation = async (): Promise<void> => {
     if (closing) return;
     if (cancellationConfirmationReconciliationTimer) clearTimeout(cancellationConfirmationReconciliationTimer);
@@ -661,10 +666,21 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const currentTime = dependencies.now?.() ?? new Date();
     const delay = Math.min(Math.max(0, reconcileAt.getTime() - currentTime.getTime()), 2_147_483_647);
     cancellationConfirmationReconciliationTimer = setTimeout(() => {
+      if (closing) return;
       cancellationConfirmationReconciliationTimer = undefined;
       trackPromise(
-        activationAuthorizations.reconcileCancellationConfirmations()
-          .then(scheduleNextCancellationConfirmationReconciliation)
+        // 先领取授权到期产生的取消任务（waiting_sms + 到期取消标记），再对账取消确认中记录，
+        // 与 60 秒后台扫描保持同一相对顺序；完成后按数据库中最早到期时间安排下一次。
+        activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry()
+          .then(() => activationAuthorizations.reconcileCancellationConfirmations())
+          .then(async () => {
+            await scheduleNextCancellationConfirmationReconciliation();
+            // 对账返回 too-early 时会把换号/结束使用或撤销来源的记录回退到 waiting_sms
+            // 并持久化新的重试期限：换号与撤销专用调度器须按该期限精确触发，
+            // 60 秒后台扫描仅作恢复机制。
+            await scheduleNextPendingReplacementCancellation();
+            await scheduleNextRevocationCancellation();
+          })
           .catch(retryCancellationConfirmationReconciliationScheduling),
       );
     }, delay);
@@ -687,10 +703,16 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const currentTime = dependencies.now?.() ?? new Date();
     const delay = Math.min(Math.max(0, cancelAt.getTime() - currentTime.getTime()), 2_147_483_647);
     revocationCancellationTimer = setTimeout(() => {
+      if (closing) return;
       revocationCancellationTimer = undefined;
       trackPromise(
         activationAuthorizations.cancelRevokedActivations()
-          .then(scheduleNextRevocationCancellation)
+          .then(async () => {
+            await scheduleNextPendingReplacementCancellation();
+            await scheduleNextRevocationCancellation();
+            // 撤销取消可能把记录留在“取消确认中”（供应商请求异常等）：重新安排取消确认对账调度。
+            wakeCancellationConfirmationReconciliationScheduling();
+          })
           .catch(retryRevocationCancellationScheduling),
       );
     }, delay);
@@ -721,10 +743,16 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const currentTime = dependencies.now?.() ?? new Date();
     const delay = Math.min(Math.max(0, cancelAt.getTime() - currentTime.getTime()), 2_147_483_647);
     pendingReplacementCancellationTimer = setTimeout(() => {
+      if (closing) return;
       pendingReplacementCancellationTimer = undefined;
       trackPromise(
         activationAuthorizations.retryPendingReplacementCancellations()
-          .then(scheduleNextPendingReplacementCancellation)
+          .then(async () => {
+            await scheduleNextPendingReplacementCancellation();
+            await scheduleNextRevocationCancellation();
+            // 换号/结束使用重试可能把记录留在“取消确认中”（供应商请求异常等）：重新安排取消确认对账调度。
+            wakeCancellationConfirmationReconciliationScheduling();
+          })
           .catch(retryPendingReplacementCancellationScheduling),
       );
     }, delay);
@@ -739,10 +767,15 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const currentTime = dependencies.now?.() ?? new Date();
     const delay = Math.min(Math.max(0, expiresAt.getTime() - currentTime.getTime()), 2_147_483_647);
     authorizationExpiryTimer = setTimeout(() => {
+      if (closing) return;
       authorizationExpiryTimer = undefined;
       trackPromise(
         activationAuthorizations.expireDue()
-          .then(scheduleNextAuthorizationExpiry)
+          .then(async () => {
+            await scheduleNextAuthorizationExpiry();
+            // 授权到期可能产生新的取消对账时间：重新安排取消确认对账调度。
+            wakeCancellationConfirmationReconciliationScheduling();
+          })
           .catch(retryAuthorizationExpiryScheduling),
       );
     }, delay);
@@ -937,6 +970,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
 
   app.post<{ Params: { token: string } }>('/a/:token/numbers', async (request, reply) => {
     const result = await activationAuthorizations.claimAndGetNumber(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    // 号码获取可能产生授权到期取消任务（跨截止确认的号码）：重新安排取消确认对账调度。
+    wakeCancellationConfirmationReconciliationScheduling();
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
     if (result.state === 'browser-mismatch') {
@@ -978,6 +1013,10 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (request.body?.replacement === 'wait') return reply.redirect(`/a/${request.params.token}`, 303);
     if (request.body?.replacement !== 'confirm') return reply.code(400).send();
     const result = await activationAuthorizations.requestNumberReplacement(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    // 换号/结束使用请求可能进入“取消确认中”或产生新的取消重试时间：
+    // 无条件重新安排两个专用调度器，不依赖页面刷新、短信 webhook 或 60 秒后台扫描。
+    void scheduleNextPendingReplacementCancellation().catch(retryPendingReplacementCancellationScheduling);
+    wakeCancellationConfirmationReconciliationScheduling();
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
     const view = await recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
@@ -991,8 +1030,6 @@ export async function createApp(config: AppConfig, database = new Database(confi
       : result.state === 'no-numbers'
         ? RECIPIENT_NO_NUMBERS_MESSAGE
         : RECIPIENT_ACQUISITION_ERROR_MESSAGE;
-    // 换号请求后重新计算换号/结束使用取消重试调度：too-early 或挂起时由后台在期限后自动继续。
-    void scheduleNextPendingReplacementCancellation().catch(retryPendingReplacementCancellationScheduling);
     return reply.code(result.state === 'too-early' || result.state === 'no-numbers' ? 409 : 503)
       .type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, message));
   });
@@ -1100,7 +1137,12 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await activationAuthorizations.pollWaitingActivations();
     await activationAuthorizations.finishDeliveredActivations();
     await activationAuthorizations.deleteExpiredSensitiveDeliveryData();
+    // 后台扫描只是通用恢复机制：结束后重新武装全部精确调度器，
+    // 正常调度正确性由各调度器按数据库中最早到期时间承担。
     await scheduleNextAuthorizationExpiry();
+    await scheduleNextRevocationCancellation();
+    await scheduleNextCancellationConfirmationReconciliation();
+    await scheduleNextPendingReplacementCancellation();
   };
   let backgroundTasksRunning = false;
   const expirationSweep = setInterval(() => {

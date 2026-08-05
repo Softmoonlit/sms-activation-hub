@@ -151,6 +151,15 @@ async function resetTablesBeforeApplication(): Promise<void> {
   }
 }
 
+/** 轮询等待真实定时器触发的异步条件；预算必须远小于 60 秒后台扫描周期，确保对账来自专用调度器。 */
+async function waitFor(condition: () => boolean, timeoutMs: number, intervalMs = 20): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`等待条件在 ${timeoutMs}ms 内未满足`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 if (!databaseUrl) {
   test('激活授权集成测试需要 TEST_DATABASE_URL', () => {
     throw new Error('未设置 TEST_DATABASE_URL；请通过 npm test 运行完整测试');
@@ -2193,6 +2202,9 @@ if (!databaseUrl) {
     } finally { await opened.app.close(); }
 
     reconciled = true;
+    // 专用对账调度器（issue #07）在首个应用内已按到期时间对账并持久化 +60 秒重试期限：
+    // 重启前推进时间越过该期限，启动对账才能继续收敛。
+    now = new Date('2026-08-12T22:07:05.000Z');
     const restarted = await openApplication(heroSms, () => now);
     try {
       const page = await restarted.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
@@ -2233,6 +2245,9 @@ if (!databaseUrl) {
     } finally { await opened.app.close(); }
 
     reconciled = true;
+    // 专用对账调度器（issue #07）在首个应用内已按到期时间对账并持久化 +60 秒重试期限：
+    // 重启前推进时间越过该期限，启动对账才能确认取消并获取后继号码。
+    now = new Date('2026-08-13T00:03:05.000Z');
     const restarted = await openApplication(heroSms, () => now);
     try {
       assert.equal(getNumberCalls, 2, '供应商确认取消后应自动获取后继号码');
@@ -4838,6 +4853,13 @@ if (!databaseUrl) {
          WHERE provider_activation_id = $1`,
         [firstId, new Date(now.getTime() + 10 * 60_000)],
       );
+      // 全路径唤醒（issue #07）下专用调度器已按到期时间对两条记录各执行过一轮对账：
+      // 显式把第二条恢复为到期状态，保持“一条未到期、一条已到期”的测试前提。
+      await seeding.database.pool.query(
+        `UPDATE supplier_activations SET cancellation_retry_after = NULL
+         WHERE provider_activation_id = $1`,
+        [secondId],
+      );
     } finally { await seeding.app.close(); }
 
     // 阶段二：重启应用触发启动对账；后台扫描与启动对账调用同一对账入口，共享同一资格规则。
@@ -4909,15 +4931,8 @@ if (!databaseUrl) {
       const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
 
       now = new Date('2026-08-20T18:02:05.000Z');
-      const replacing = await app.inject({
-        method: 'POST', url: `/a/${token}/replacement/confirm`,
-        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
-        payload: 'replacement=confirm',
-      });
-      assert.equal(replacing.statusCode, 202);
-      assert.equal(cancelCalls, 1);
-
-      // 模拟重试期限持久化失败：对重试期限列的写入一律抛错。
+      // 换号进入取消确认中会立即唤醒专用对账调度器（issue #07 全路径唤醒）：
+      // 在请求前安装失败触发器，使首个对账 claim 也确定性落在期限持久化失败路径上，避免与定时器竞争。
       await database.pool.query(`
         CREATE OR REPLACE FUNCTION sms_test_fail_retry_after() RETURNS trigger AS $$
         BEGIN RAISE EXCEPTION 'simulated retry_after persist failure'; END;
@@ -4926,6 +4941,14 @@ if (!databaseUrl) {
         CREATE TRIGGER sms_test_fail_retry_after
         BEFORE UPDATE OF cancellation_retry_after ON supplier_activations
         FOR EACH ROW EXECUTE FUNCTION sms_test_fail_retry_after()`);
+      const replacing = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replacing.statusCode, 202);
+      assert.equal(cancelCalls, 1);
+
       try {
         // 期限无法持久化时本轮不得调用供应商：零延迟循环被阻断在对账 claim 之前。
         for (let i = 0; i < 3; i += 1) {
@@ -5353,5 +5376,584 @@ if (!databaseUrl) {
       assert.equal(authorization.rows[0]?.status, 'ended');
       assert.equal(authorization.rows[0]?.ended_reason, 'acquisition_expired');
     } finally { await restarted.app.close(); }
+  });
+
+  test('启动时无待对账记录，普通换号进入取消确认中后按到期时间自动对账，不依赖刷新、webhook 或 60 秒扫描', async () => {
+    let now = new Date('2026-08-30T08:00:00.000Z');
+    const activationId = `wake-replacement-${randomUUID()}`;
+    let cancelCalls = 0;
+    let activationStatusCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async () => {
+        activationStatusCalls += 1;
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const first = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(first.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(first, 'recipient_session')}`;
+
+      // 应用启动时没有任何待对账记录，启动调度不武装任何 timer；两分钟后普通换号进入“取消确认中”。
+      now = new Date('2026-08-30T08:02:05.000Z');
+      const replacing = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replacing.statusCode, 202);
+      assert.equal(cancelCalls, 1);
+
+      // 不刷新管理员详情、不发送 webhook、不访问任何页面：专用调度器按最早到期时间自动对账。
+      // 断言预算远小于 60 秒，60 秒全局后台扫描不可能承担本次对账，只可能是换号路由唤醒的精确调度。
+      await waitFor(() => activationStatusCalls === 1, 2_000);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(activationStatusCalls, 1, '对账只发生一次，重试期限已持久化');
+      assert.equal(cancelCalls, 1, '对账只查询供应商状态，不重发取消');
+      const state = await database.pool.query<{ status: string; cancellation_retry_after: Date | null }>(
+        'SELECT status, cancellation_retry_after FROM supplier_activations WHERE provider_activation_id = $1',
+        [activationId],
+      );
+      assert.equal(state.rows[0]?.status, 'cancellation_confirming');
+      assert.equal(state.rows[0]?.cancellation_retry_after?.getTime(), now.getTime() + 60_000);
+    } finally { await resetAuthorizationTables(database); await app.close(); }
+  });
+
+  test('结束使用、撤销和授权到期新建或延后对账时间后均重新安排最早 timer', async () => {
+    // —— 阶段一：结束使用进入“取消确认中”后重新安排对账调度 ——
+    let now = new Date('2026-08-30T10:00:00.000Z');
+    let getNumberCalls = 0;
+    let cancelCalls = 0;
+    let activationStatusCalls = 0;
+    const endUseHeroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: `end-use-wake-${getNumberCalls}-${randomUUID()}`,
+          phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        if (cancelCalls <= 2) return 'cancelled';
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async () => {
+        activationStatusCalls += 1;
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const firstApp = await openApplication(endUseHeroSms, () => now);
+    try {
+      await resetAuthorizationTables(firstApp.database);
+      const session = await login(firstApp.app);
+      const created = await createAuthorization(firstApp.app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await firstApp.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      const replace = async (): Promise<number> => (await firstApp.app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      })).statusCode;
+
+      now = new Date('2026-08-30T10:02:05.000Z');
+      assert.equal(await replace(), 303);
+      now = new Date('2026-08-30T10:04:10.000Z');
+      assert.equal(await replace(), 303);
+      now = new Date('2026-08-30T10:06:15.000Z');
+      assert.equal(await replace(), 202);
+      assert.equal(getNumberCalls, 3);
+      assert.equal(cancelCalls, 3);
+      // 不刷新页面：结束使用进入“取消确认中”后，调度器按到期时间自动对账并保留结束使用意图。
+      await waitFor(() => activationStatusCalls >= 1, 2_000);
+      const ending = await firstApp.database.pool.query<{ status: string; end_use_pending: boolean; cancellation_retry_after: Date | null }>(
+        `SELECT status, end_use_pending, cancellation_retry_after
+         FROM supplier_activations ORDER BY acquired_at DESC LIMIT 1`,
+      );
+      assert.equal(ending.rows[0]?.status, 'cancellation_confirming');
+      assert.equal(ending.rows[0]?.end_use_pending, true, '结束使用意图保留');
+      assert.equal(ending.rows[0]?.cancellation_retry_after?.getTime(), now.getTime() + 60_000);
+    } finally { await firstApp.app.close(); }
+    const firstCleanup = new Database(databaseUrl!);
+    try { await resetAuthorizationTables(firstCleanup); } finally { await firstCleanup.close(); }
+
+    // —— 阶段二：管理员撤销把激活转入“取消确认中”后重新安排对账调度 ——
+    now = new Date('2026-08-30T12:00:00.000Z');
+    const revokeActivationId = `wake-revoke-${randomUUID()}`;
+    cancelCalls = 0;
+    activationStatusCalls = 0;
+    const revokeHeroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId: revokeActivationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async () => {
+        activationStatusCalls += 1;
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const revokeApp = await openApplication(revokeHeroSms, () => now);
+    try {
+      await resetAuthorizationTables(revokeApp.database);
+      const session = await login(revokeApp.app);
+      const created = await createAuthorization(revokeApp.app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await revokeApp.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const home = await revokeApp.app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const authorizationId = authorizationIdFromHome(home.body, token);
+
+      now = new Date('2026-08-30T12:02:05.000Z');
+      assert.equal((await post(revokeApp.app, session, `/${config.adminPath}/authorizations/${authorizationId}/revoke`, {})).statusCode, 303);
+      assert.equal(cancelCalls, 1);
+      // 撤销的立即取消请求异常后记录留在“取消确认中”：调度器按到期时间自动对账，不依赖详情刷新。
+      await waitFor(() => activationStatusCalls >= 1, 2_000);
+      const revoked = await revokeApp.database.pool.query<{ status: string; authorization_revocation_cancellation_pending: boolean; cancellation_retry_after: Date | null }>(
+        `SELECT status, authorization_revocation_cancellation_pending, cancellation_retry_after
+         FROM supplier_activations WHERE provider_activation_id = $1`,
+        [revokeActivationId],
+      );
+      assert.equal(revoked.rows[0]?.status, 'cancellation_confirming');
+      assert.equal(revoked.rows[0]?.authorization_revocation_cancellation_pending, true, '撤销意图保留');
+      assert.equal(revoked.rows[0]?.cancellation_retry_after?.getTime(), now.getTime() + 60_000);
+    } finally { await revokeApp.app.close(); }
+    const revokeCleanup = new Database(databaseUrl!);
+    try { await resetAuthorizationTables(revokeCleanup); } finally { await revokeCleanup.close(); }
+
+    // —— 阶段三：授权到期创建新的对账时间后重新安排最早 timer ——
+    now = new Date('2026-08-31T10:00:00.000Z');
+    const expiryActivationId = `wake-expiry-${randomUUID()}`;
+    const normalActivationId = `wake-expiry-normal-${randomUUID()}`;
+    getNumberCalls = 0;
+    cancelCalls = 0;
+    const statusIds: string[] = [];
+    const expiryHeroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        if (getNumberCalls === 1) {
+          // 第一个授权跨领取截止确认号码：不交付，产生授权到期取消任务。
+          now = new Date('2026-09-01T10:00:00.000Z');
+          return {
+            activationId: expiryActivationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+            activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+          };
+        }
+        now = new Date('2026-08-31T10:00:01.000Z');
+        return {
+          activationId: normalActivationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async (activationId) => {
+        statusIds.push(activationId);
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const expiryApp = await openApplication(expiryHeroSms, () => now);
+    try {
+      await resetAuthorizationTables(expiryApp.database);
+      const session = await login(expiryApp.app);
+      const created = await createBatch(expiryApp.app, session, '2');
+      const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(tokens.length, 2);
+      // 第一个授权跨截止确认：创建授权到期取消任务（waiting_sms + 到期取消标记），不交付。
+      const crossed = await expiryApp.app.inject({ method: 'POST', url: `/a/${tokens[0]!}/numbers` });
+      assert.equal(crossed.statusCode, 404);
+      assert.equal(getNumberCalls, 1);
+      // 把到期任务的时间改写为“两分钟前取得且可取消时间已过”（CHECK 约束要求可取消时间不早于取得时间），
+      // 使它的到期时间进入过去，成为最早到期任务；第二个授权随后正常取得号码。
+      await expiryApp.database.pool.query(
+        `UPDATE supplier_activations
+         SET acquired_at = $2, cancel_available_at = $3
+         WHERE provider_activation_id = $1`,
+        [expiryActivationId, new Date('2026-08-31T09:58:00.000Z'), new Date('2026-08-31T10:00:00.000Z')],
+      );
+      now = new Date('2026-08-31T10:00:01.000Z');
+      const claimed = await expiryApp.app.inject({ method: 'POST', url: `/a/${tokens[1]!}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      assert.equal(getNumberCalls, 2);
+      // 获取号码路由唤醒对账调度：到期任务已到期，立即领取并请求取消（不依赖后台扫描）。
+      await waitFor(() => cancelCalls === 1, 1_000);
+
+      now = new Date('2026-08-31T10:02:05.000Z');
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      const replacing = await expiryApp.app.inject({
+        method: 'POST', url: `/a/${tokens[1]!}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      // 第二个授权换号进入取消确认中：调度器须按最早到期时间对账到期任务。
+      assert.equal(replacing.statusCode, 202);
+      await waitFor(() => statusIds.includes(normalActivationId), 2_000);
+      // 到期任务先被领取 timer 对账一次，换号进入后再被重新安排的 timer 对账一次；换号单只对账一次。
+      assert.equal(statusIds[0], expiryActivationId, '到期单按最早到期时间先对账');
+      assert.equal(statusIds.filter((id) => id === normalActivationId).length, 1, '换号单只对账一次');
+      assert.equal(cancelCalls, 2, '到期单领取与换号单各请求一次取消');
+      const expiryState = await expiryApp.database.pool.query<{ status: string; authorization_expiry_cancellation_pending: boolean; cancellation_retry_after: Date | null }>(
+        `SELECT status, authorization_expiry_cancellation_pending, cancellation_retry_after
+         FROM supplier_activations WHERE provider_activation_id = $1`,
+        [expiryActivationId],
+      );
+      assert.equal(expiryState.rows[0]?.status, 'cancellation_confirming');
+      assert.equal(expiryState.rows[0]?.authorization_expiry_cancellation_pending, true, '授权到期来源标记保留，too-early 回退后仍被调度覆盖');
+      assert.equal(expiryState.rows[0]?.cancellation_retry_after?.getTime(), now.getTime() + 60_000);
+    } finally { await expiryApp.app.close(); }
+    const expiryCleanup = new Database(databaseUrl!);
+    try { await resetAuthorizationTables(expiryCleanup); } finally { await expiryCleanup.close(); }
+  });
+
+  test('对账延后回退后撤销专用调度器按新重试期限精确处理', async () => {
+    // 对账返回 too-early 时会把撤销来源的记录回退到 waiting_sms 并持久化新的重试期限：
+    // 换号路由不会武装撤销调度器，回退记录只能由对账完成链重新武装的撤销专用调度器
+    // 按期限精确触发，而不是等待 60 秒后台扫描。
+    let now = new Date('2026-08-30T16:00:00.000Z');
+    let getNumberCalls = 0;
+    let cancelCalls = 0;
+    const statusIds: string[] = [];
+    const fallbackId = `fallback-revoked-${randomUUID()}`;
+    const normalId = `fallback-normal-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: getNumberCalls === 1 ? fallbackId : normalId,
+          phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async (activationId) => {
+        statusIds.push(activationId);
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const fallbackApp = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(fallbackApp.database);
+      const session = await login(fallbackApp.app);
+      const created = await createBatch(fallbackApp.app, session, '2');
+      const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(tokens.length, 2);
+      const recipientCookies: string[] = [];
+      for (const token of tokens) {
+        const claimed = await fallbackApp.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+        assert.equal(claimed.statusCode, 303);
+        recipientCookies.push(`recipient_session=${cookieValue(claimed, 'recipient_session')}`);
+      }
+      const replace = async (token: string, cookie: string): Promise<number> => (await fallbackApp.app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      })).statusCode;
+
+      now = new Date('2026-08-30T16:02:05.000Z');
+      // 模拟撤销来源的对账延后回退：waiting_sms + 撤销意图 + 已过期的重试期限。
+      await fallbackApp.database.pool.query(
+        `UPDATE supplier_activations
+         SET authorization_revocation_cancellation_pending = true, cancellation_retry_after = $2
+         WHERE provider_activation_id = $1`,
+        [fallbackId, new Date('2026-08-30T16:02:07.000Z')],
+      );
+      // 推进时间越过重试期限：换号路由只武装换号与取消确认调度器，
+      // 撤销回退记录只能由对账完成链重新武装的撤销专用调度器按期限触发。
+      now = new Date('2026-08-30T16:02:08.000Z');
+      assert.equal(await replace(tokens[1]!, recipientCookies[1]!), 202);
+      await waitFor(() => cancelCalls === 2, 4_000);
+      await waitFor(() => statusIds.includes(fallbackId), 2_000);
+      const fallbackState = await fallbackApp.database.pool.query<{ status: string; authorization_revocation_cancellation_pending: boolean; cancellation_retry_after: Date | null }>(
+        `SELECT status, authorization_revocation_cancellation_pending, cancellation_retry_after
+         FROM supplier_activations WHERE provider_activation_id = $1`,
+        [fallbackId],
+      );
+      assert.equal(fallbackState.rows[0]?.status, 'cancellation_confirming');
+      assert.equal(fallbackState.rows[0]?.authorization_revocation_cancellation_pending, true, '撤销来源标记保留');
+      assert.equal(fallbackState.rows[0]?.cancellation_retry_after?.getTime(), now.getTime() + 60_000, '撤销重试后对账按新期限继续');
+    } finally { await fallbackApp.app.close(); }
+    const fallbackCleanup = new Database(databaseUrl!);
+    try { await resetAuthorizationTables(fallbackCleanup); } finally { await fallbackCleanup.close(); }
+  });
+
+  test('新增更早任务会替换原 timer，新增更晚任务不会推迟已有更早任务', async () => {
+    // —— 阶段一：新增更早到期任务替换原 timer，立即对账 ——
+    let now = new Date('2026-08-30T14:00:00.000Z');
+    let getNumberCalls = 0;
+    const statusIds: string[] = [];
+    const firstId = `earlier-replaces-${randomUUID()}`;
+    const secondId = `earlier-replaces-later-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: getNumberCalls === 1 ? firstId : secondId,
+          phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => { throw new HeroSmsResponseError('uncertain'); },
+      activationStatus: async (activationId) => {
+        statusIds.push(activationId);
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const firstApp = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(firstApp.database);
+      const session = await login(firstApp.app);
+      const created = await createBatch(firstApp.app, session, '2');
+      const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(tokens.length, 2);
+      const recipientCookies: string[] = [];
+      for (const token of tokens) {
+        const claimed = await firstApp.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+        assert.equal(claimed.statusCode, 303);
+        recipientCookies.push(`recipient_session=${cookieValue(claimed, 'recipient_session')}`);
+      }
+      const replace = async (token: string, cookie: string): Promise<number> => (await firstApp.app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      })).statusCode;
+
+      now = new Date('2026-08-30T14:02:05.000Z');
+      assert.equal(await replace(tokens[0]!, recipientCookies[0]!), 202);
+      // 第一条记录首次对账把重试期限推到 60 秒后；把它的到期时间改为 +8 秒。
+      await waitFor(() => statusIds.includes(firstId), 1_000);
+      await firstApp.database.pool.query(
+        `UPDATE supplier_activations SET cancellation_retry_after = $2
+         WHERE provider_activation_id = $1`,
+        [firstId, new Date(now.getTime() + 8_000)],
+      );
+      // 第二条记录进入取消确认中（到期时间更早）：必须替换原 timer 并立即对账。
+      assert.equal(await replace(tokens[1]!, recipientCookies[1]!), 202);
+      await waitFor(() => statusIds.includes(secondId), 1_500);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.deepEqual(statusIds, [firstId, secondId], '更早到期任务替换原 timer 后立即对账，+8 秒任务未被提前处理');
+    } finally { await firstApp.app.close(); }
+    const firstCleanup = new Database(databaseUrl!);
+    try { await resetAuthorizationTables(firstCleanup); } finally { await firstCleanup.close(); }
+
+    // —— 阶段二：新增更晚到期任务不推迟已有更早任务 ——
+    now = new Date('2026-08-30T18:00:00.000Z');
+    getNumberCalls = 0;
+    statusIds.length = 0;
+    const thirdId = `later-no-delay-early-${randomUUID()}`;
+    const fourthId = `later-no-delay-late-${randomUUID()}`;
+    const phaseBHeroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: getNumberCalls === 1 ? thirdId : fourthId,
+          phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => { throw new HeroSmsResponseError('uncertain'); },
+      activationStatus: async (activationId) => {
+        statusIds.push(activationId);
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const phaseB = await openApplication(phaseBHeroSms, () => now);
+    try {
+      await resetAuthorizationTables(phaseB.database);
+      const session = await login(phaseB.app);
+      const created = await createBatch(phaseB.app, session, '2');
+      const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(tokens.length, 2);
+      const recipientCookies: string[] = [];
+      for (const token of tokens) {
+        const claimed = await phaseB.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+        assert.equal(claimed.statusCode, 303);
+        recipientCookies.push(`recipient_session=${cookieValue(claimed, 'recipient_session')}`);
+      }
+      const replace = async (token: string, cookie: string): Promise<number> => (await phaseB.app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      })).statusCode;
+
+      now = new Date('2026-08-30T18:02:05.000Z');
+      assert.equal(await replace(tokens[0]!, recipientCookies[0]!), 202);
+      await waitFor(() => statusIds.includes(thirdId), 1_000);
+      // 更早任务到期时间改为 +3 秒（重试期限此刻已由首次对账推到 +60 秒）。
+      await phaseB.database.pool.query(
+        `UPDATE supplier_activations SET cancellation_retry_after = $2
+         WHERE provider_activation_id = $1`,
+        [thirdId, new Date(now.getTime() + 3_000)],
+      );
+      // 更晚任务进入取消确认中（到期 = now）：重新安排后先对账它，但不推迟更早任务的 +3 秒 timer。
+      assert.equal(await replace(tokens[1]!, recipientCookies[1]!), 202);
+      await waitFor(() => statusIds.includes(fourthId), 1_000);
+      // 把更晚任务的到期时间改为 +10 秒：不得影响已安排的更早任务。
+      await phaseB.database.pool.query(
+        `UPDATE supplier_activations SET cancellation_retry_after = $2
+         WHERE provider_activation_id = $1`,
+        [fourthId, new Date(now.getTime() + 10_000)],
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      assert.deepEqual(statusIds, [thirdId, fourthId], '更早任务在 +3 秒前未被提前处理');
+      // 推进时间越过更早任务的到期点：其 timer 仍按原时间触发，不被更晚任务推迟。
+      now = new Date('2026-08-30T18:02:09.000Z');
+      await waitFor(() => statusIds.filter((id) => id === thirdId).length >= 2, 3_000);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(statusIds.filter((id) => id === fourthId).length, 1, '更晚任务（+10 秒）未被提前处理');
+    } finally { await phaseB.app.close(); }
+    const phaseBCleanup = new Database(databaseUrl!);
+    try { await resetAuthorizationTables(phaseBCleanup); } finally { await phaseBCleanup.close(); }
+  });
+
+  test('一次对账完成后自动安排数据库中的下一个到期记录', async () => {
+    let now = new Date('2026-08-30T20:00:00.000Z');
+    let getNumberCalls = 0;
+    const statusIds: string[] = [];
+    const firstId = `chain-next-${randomUUID()}`;
+    const secondId = `chain-next-second-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: getNumberCalls === 1 ? firstId : secondId,
+          phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => { throw new HeroSmsResponseError('uncertain'); },
+      activationStatus: async (activationId) => {
+        statusIds.push(activationId);
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createBatch(app, session, '2');
+      const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(tokens.length, 2);
+      const recipientCookies: string[] = [];
+      for (const token of tokens) {
+        const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+        assert.equal(claimed.statusCode, 303);
+        recipientCookies.push(`recipient_session=${cookieValue(claimed, 'recipient_session')}`);
+      }
+      const replace = async (token: string, cookie: string): Promise<number> => (await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      })).statusCode;
+
+      now = new Date('2026-08-30T20:02:05.000Z');
+      assert.equal(await replace(tokens[0]!, recipientCookies[0]!), 202);
+      await waitFor(() => statusIds.includes(firstId), 1_000);
+      // 第一条到期时间改为 +2 秒（其重试期限此刻已由首次对账推到 +60 秒）。
+      await database.pool.query(
+        `UPDATE supplier_activations SET cancellation_retry_after = $2
+         WHERE provider_activation_id = $1`,
+        [firstId, new Date(now.getTime() + 2_000)],
+      );
+      // 第二条进入取消确认中（到期 = now）：先对账第二条。
+      assert.equal(await replace(tokens[1]!, recipientCookies[1]!), 202);
+      await waitFor(() => statusIds.includes(secondId), 1_000);
+      // 推进时间越过第一条的到期点：第二条对账完成后，调度器无需任何唤醒
+      // 自动安排数据库中的下一个到期记录（第一条 +2 秒）。
+      now = new Date('2026-08-30T20:02:08.000Z');
+      await waitFor(() => statusIds.filter((id) => id === firstId).length >= 2, 3_000);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.deepEqual(statusIds, [firstId, secondId, firstId], '对账完成后按最早到期时间自动安排下一条');
+      assert.equal(statusIds.filter((id) => id === secondId).length, 1, '第二条重试期限未到不重复对账');
+    } finally { await resetAuthorizationTables(database); await app.close(); }
+  });
+
+  test('应用关闭时 timer 被清理，不留下悬挂任务', async () => {
+    let now = new Date('2026-08-30T22:00:00.000Z');
+    const activationId = `shutdown-cleanup-${randomUUID()}`;
+    let activationStatusCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => { throw new HeroSmsResponseError('uncertain'); },
+      activationStatus: async () => {
+        activationStatusCalls += 1;
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+
+      now = new Date('2026-08-30T22:02:05.000Z');
+      const replacing = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replacing.statusCode, 202);
+      await waitFor(() => activationStatusCalls === 1, 1_000);
+      // 把重试期限改为 +1 秒，再次提交换号（409 too-early）触发调度器按新时间重新安排 timer。
+      await database.pool.query(
+        `UPDATE supplier_activations SET cancellation_retry_after = $2
+         WHERE provider_activation_id = $1`,
+        [activationId, new Date(now.getTime() + 1_000)],
+      );
+      const tooEarly = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(tooEarly.statusCode, 409);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // 在 timer 到期前关闭应用；随后时间越过到期点，不得再有任何供应商调用。
+      await app.close();
+      now = new Date('2026-08-30T22:02:10.000Z');
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      assert.equal(activationStatusCalls, 1, '关闭后悬挂 timer 不得继续对账');
+    } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
   });
 }

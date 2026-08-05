@@ -781,12 +781,14 @@ export class ActivationAuthorizations {
          VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
         [event.activationId, event.receivedAt, payloadDigest, this.now()],
       );
-      if (!inserted.rowCount) return 'accepted';
+      // 撤销单已无接收者访问，不受窗口约束：即使同一送达事件此前已被对账记录（幂等冲突），
+      // 也必须按完成收尾，否则“撤销单 + 窗口外送达 + 事件已记录”会让取消确认中永久滞留。
+      const revoked = authorization.status === 'ended' && authorization.ended_reason === 'admin_revoked';
+      if (!inserted.rowCount && !revoked) return 'accepted';
 
       // 供应商报告的短信送达时间是唯一有效性依据，号码窗口采用严格半开区间；
-      // 撤销单已无接收者访问，不受窗口约束：短信已到达即按完成收尾并在供应商侧释放号码，
+      // 撤销单不受窗口约束：短信已到达即按完成收尾并在供应商侧释放号码，
       // 避免“撤销单 + 窗口外送达”成为取消确认中的永久滞留路径。
-      const revoked = authorization.status === 'ended' && authorization.ended_reason === 'admin_revoked';
       if (!revoked && (event.receivedAt < current.acquired_at || event.receivedAt >= current.expires_at)) return 'accepted';
       const now = this.now();
       const viewUntil = resultViewDeadline(event.receivedAt);
@@ -1404,11 +1406,14 @@ export class ActivationAuthorizations {
     }
   }
 
+  /** 下一个需要取消确认对账的时间点：取消确认中记录，以及授权到期产生的待取消记录（waiting_sms + 到期取消标记）。
+   *  对账调度器按此最早到期时间触发；授权到期来源在 too-early 回退后仍保留到期标记，继续被本查询覆盖。 */
   async nextCancellationConfirmationReconciliation(): Promise<Date | undefined> {
     const result = await this.database.pool.query<{ reconcile_at: Date | null }>(
       `SELECT min(GREATEST(activation.cancel_available_at, COALESCE(activation.cancellation_retry_after, activation.cancel_available_at))) AS reconcile_at
        FROM supplier_activations activation
-       WHERE activation.status = 'cancellation_confirming'`,
+       WHERE activation.status = 'cancellation_confirming'
+          OR (activation.status = 'waiting_sms' AND activation.authorization_expiry_cancellation_pending)`,
     );
     return result.rows[0]?.reconcile_at || undefined;
   }
@@ -1573,7 +1578,9 @@ export class ActivationAuthorizations {
     for (;;) {
       const now = this.now();
       const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
-        `UPDATE supplier_activations SET status = 'cancellation_confirming', authorization_expiry_cancellation_pending = false
+        // 到期取消标记是授权到期来源标记，跨取消确认状态保留：
+        // 对账返回 too-early 回退等待短信后仍被对账调度器按重试期限覆盖，不会滞留。
+        `UPDATE supplier_activations SET status = 'cancellation_confirming'
          WHERE id = (
            SELECT id FROM supplier_activations
            WHERE status = 'waiting_sms' AND authorization_expiry_cancellation_pending AND cancel_available_at <= $1
