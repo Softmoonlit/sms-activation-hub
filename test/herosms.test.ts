@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { HeroSmsHttpAdapter, HeroSmsResponseError } from '../src/herosms.js';
+import { HeroSmsHttpAdapter, HeroSmsResponseError, parseSupplierDate } from '../src/herosms.js';
 
 type HeroSmsOpenApi = { components: { examples: Record<string, { value: unknown }> } };
 type RequestedUrl = URL;
@@ -312,6 +312,19 @@ test('HeroSMS adapter 按取消结果区分成功、短信冲突、过早取消�
     assert.equal(error.kind, 'response');
     return true;
   });
+});
+
+test('供应商时间解析：无时区按莫斯科时区解释，带时区按原样解析', () => {
+  // 无时区字符串：供应商发送的莫斯科本地时间（UTC+3），按 +03:00 解释
+  assert.deepEqual(parseSupplierDate('2026-08-05 03:15:00'), new Date('2026-08-05T00:15:00.000Z'));
+  // 带 +03:00 偏移的字符串：按原样解析
+  assert.deepEqual(parseSupplierDate('2026-08-05T03:15:00+03:00'), new Date('2026-08-05T00:15:00.000Z'));
+  // 带 Z 的字符串：按原样解析
+  assert.deepEqual(parseSupplierDate('2026-08-05T03:15:00Z'), new Date('2026-08-05T03:15:00.000Z'));
+  // 无法解析的输入返回 undefined，供 webhook 校验拒绝
+  assert.equal(parseSupplierDate('garbage'), undefined);
+  assert.equal(parseSupplierDate('0000-00-00 00:00:00'), undefined);
+  assert.equal(parseSupplierDate(42), undefined);
 });
 
 test('HeroSMS adapter 拒绝格式错误的成功响应', async () => {

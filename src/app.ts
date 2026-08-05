@@ -12,7 +12,7 @@ import { countryCallingCode } from './country-calling-code.js';
 import { countryFlagHtml, formatCurrency, formatDateTime } from './country-flag.js';
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
-import { HeroSmsHttpAdapter, type HeroSms } from './herosms.js';
+import { HeroSmsHttpAdapter, parseSupplierDate, type HeroSms } from './herosms.js';
 
 const ADMIN_COOKIE = 'admin_session';
 const CSRF_COOKIE = 'admin_csrf';
@@ -641,6 +641,33 @@ export async function createApp(config: AppConfig, database = new Database(confi
   };
   let authorizationExpiryTimer: NodeJS.Timeout | undefined;
   let revocationCancellationTimer: NodeJS.Timeout | undefined;
+  let cancellationConfirmationReconciliationTimer: NodeJS.Timeout | undefined;
+  const retryCancellationConfirmationReconciliationScheduling = (): void => {
+    if (closing) return;
+    cancellationConfirmationReconciliationTimer = setTimeout(() => {
+      cancellationConfirmationReconciliationTimer = undefined;
+      trackPromise(scheduleNextCancellationConfirmationReconciliation().catch(retryCancellationConfirmationReconciliationScheduling));
+    }, 1_000);
+    cancellationConfirmationReconciliationTimer.unref();
+  };
+  const scheduleNextCancellationConfirmationReconciliation = async (): Promise<void> => {
+    if (closing) return;
+    if (cancellationConfirmationReconciliationTimer) clearTimeout(cancellationConfirmationReconciliationTimer);
+    cancellationConfirmationReconciliationTimer = undefined;
+    const reconcileAt = await activationAuthorizations.nextCancellationConfirmationReconciliation();
+    if (!reconcileAt) return;
+    const currentTime = dependencies.now?.() ?? new Date();
+    const delay = Math.min(Math.max(0, reconcileAt.getTime() - currentTime.getTime()), 2_147_483_647);
+    cancellationConfirmationReconciliationTimer = setTimeout(() => {
+      cancellationConfirmationReconciliationTimer = undefined;
+      trackPromise(
+        activationAuthorizations.reconcileCancellationConfirmations()
+          .then(scheduleNextCancellationConfirmationReconciliation)
+          .catch(retryCancellationConfirmationReconciliationScheduling),
+      );
+    }, delay);
+    cancellationConfirmationReconciliationTimer.unref();
+  };
   const retryRevocationCancellationScheduling = (): void => {
     if (closing) return;
     revocationCancellationTimer = setTimeout(() => {
@@ -723,8 +750,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const text = typeof body?.text === 'string' && body.text.length <= 10_000 ? body.text : undefined;
     const code = typeof body?.code === 'string' && body.code.trim() && body.code.length <= 256 ? body.code.trim() : undefined;
     const countryId = typeof body?.country === 'number' ? body.country : typeof body?.country === 'string' ? Number(body.country) : NaN;
-    const receivedAt = typeof body?.receivedAt === 'string' ? new Date(body.receivedAt) : new Date(NaN);
-    if (!activationId || !serviceCode || text === undefined || !Number.isSafeInteger(countryId) || countryId < 0 || Number.isNaN(receivedAt.getTime())) {
+    const receivedAt = parseSupplierDate(body?.receivedAt);
+    if (!activationId || !serviceCode || text === undefined || !Number.isSafeInteger(countryId) || countryId < 0 || !receivedAt) {
       return reply.code(400).send();
     }
     await activationAuthorizations.receiveHeroSmsWebhook({
@@ -868,6 +895,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const revoked = await activationAuthorizations.revoke(request.params.id);
     if (!revoked) return reply.code(409).type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list({}), '该激活授权已经不可撤销。'));
     void scheduleNextRevocationCancellation().catch(retryRevocationCancellationScheduling);
+    void scheduleNextCancellationConfirmationReconciliation().catch(retryCancellationConfirmationReconciliationScheduling);
     return reply.redirect(adminRoot, 303);
   });
 
@@ -1054,6 +1082,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   expirationSweep.unref();
   await scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
   await scheduleNextRevocationCancellation().catch(retryRevocationCancellationScheduling);
+  await scheduleNextCancellationConfirmationReconciliation().catch(retryCancellationConfirmationReconciliationScheduling);
 
   app.setNotFoundHandler(async (_request, reply) => reply.code(404).type('text/plain; charset=utf-8').send('Not Found'));
   app.addHook('onClose', async () => {
@@ -1061,6 +1090,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     clearInterval(expirationSweep);
     if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
     if (revocationCancellationTimer) clearTimeout(revocationCancellationTimer);
+    if (cancellationConfirmationReconciliationTimer) clearTimeout(cancellationConfirmationReconciliationTimer);
     await Promise.all(pendingFinishTasks);
     await database.close();
   });

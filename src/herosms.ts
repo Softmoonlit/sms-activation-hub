@@ -146,7 +146,7 @@ function objectEntries(value: unknown): [string, unknown][] | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : undefined;
 }
 
-function dateValue(value: unknown): Date | undefined {
+export function parseSupplierDate(value: unknown): Date | undefined {
   if (typeof value !== 'string' || /^0{4}-0{2}-0{2}/.test(value)) return undefined;
   const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(' ', 'T')}+03:00` : value;
   const date = new Date(normalized);
@@ -174,7 +174,7 @@ function activationRecord(value: unknown, active: boolean): HeroSmsActivationRec
     activationId, phoneNumber, activationCost, currency, status,
     ...(serviceCode ? { serviceCode } : {}),
     ...(countryId !== undefined ? { countryId } : {}),
-    activationTime: dateValue(active ? fields.activationTime : fields.date),
+    activationTime: parseSupplierDate(active ? fields.activationTime : fields.date),
   };
 }
 
@@ -294,8 +294,8 @@ export class HeroSmsHttpAdapter implements HeroSms {
     const currency = typeof currencyValue === 'number' && Number.isFinite(currencyValue)
       ? currencyValue.toString()
       : nonEmptyString(currencyValue);
-    const activationTime = dateValue(fields.activationTime);
-    const activationEndTime = dateValue(fields.activationEndTime);
+    const activationTime = parseSupplierDate(fields.activationTime);
+    const activationEndTime = parseSupplierDate(fields.activationEndTime);
     if (!activationId || !phoneNumber
       || (fields.activationCost !== undefined && activationCost === undefined)
       || (fields.currency !== undefined && !currency)
@@ -321,7 +321,7 @@ export class HeroSmsHttpAdapter implements HeroSms {
     if (!smsFields) throw new HeroSmsResponseError('response');
     const code = nonEmptyString(smsFields.code);
     const text = nonEmptyString(smsFields.text);
-    const receivedAt = dateValue(smsFields.dateTime);
+    const receivedAt = parseSupplierDate(smsFields.dateTime);
     if (!text) throw new HeroSmsResponseError('response');
     return { delivered: true, text, ...(code ? { code } : {}), ...(receivedAt ? { receivedAt } : {}) };
   }

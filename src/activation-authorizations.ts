@@ -447,7 +447,12 @@ export class ActivationAuthorizations {
       return activation.provider_activation_id;
     });
     if (cancellation === undefined) return false;
-    if (cancellation) await this.cancelRevokedActivation(cancellation);
+    if (cancellation) {
+      await this.cancelRevokedActivation(cancellation);
+    } else {
+      // 撤销时激活已处于“取消确认中”：打标记后立即对账一次，不再干等周期任务。
+      await this.reconcileCancellationConfirmations().catch(() => undefined);
+    }
     return true;
   }
 
@@ -755,8 +760,8 @@ export class ActivationAuthorizations {
       );
       const candidate = found.rows[0];
       if (!candidate || candidate.country_id !== event.countryId || event.serviceCode !== this.openAiServiceCode) return 'ignored';
-      const authorizationResult = await client.query<{ status: AuthorizationStatus; result_view_until: Date | null }>(
-        'SELECT status, result_view_until FROM activation_authorizations WHERE id = $1 FOR UPDATE',
+      const authorizationResult = await client.query<{ status: AuthorizationStatus; ended_reason: string | null; result_view_until: Date | null }>(
+        'SELECT status, ended_reason, result_view_until FROM activation_authorizations WHERE id = $1 FOR UPDATE',
         [candidate.authorization_id],
       );
       const authorization = authorizationResult.rows[0];
@@ -776,8 +781,11 @@ export class ActivationAuthorizations {
       );
       if (!inserted.rowCount) return 'accepted';
 
-      // 供应商报告的短信送达时间是唯一有效性依据，号码窗口采用严格半开区间。
-      if (event.receivedAt < current.acquired_at || event.receivedAt >= current.expires_at) return 'accepted';
+      // 供应商报告的短信送达时间是唯一有效性依据，号码窗口采用严格半开区间；
+      // 撤销单已无接收者访问，不受窗口约束：短信已到达即按完成收尾并在供应商侧释放号码，
+      // 避免“撤销单 + 窗口外送达”成为取消确认中的永久滞留路径。
+      const revoked = authorization.status === 'ended' && authorization.ended_reason === 'admin_revoked';
+      if (!revoked && (event.receivedAt < current.acquired_at || event.receivedAt >= current.expires_at)) return 'accepted';
       const now = this.now();
       const viewUntil = resultViewDeadline(event.receivedAt);
       const smsBeforeCancellation = current.status === 'cancelled'
@@ -1390,6 +1398,15 @@ export class ActivationAuthorizations {
     }
   }
 
+  async nextCancellationConfirmationReconciliation(): Promise<Date | undefined> {
+    const result = await this.database.pool.query<{ reconcile_at: Date | null }>(
+      `SELECT min(GREATEST(activation.cancel_available_at, COALESCE(activation.authorization_revocation_cancellation_retry_after, activation.cancel_available_at))) AS reconcile_at
+       FROM supplier_activations activation
+       WHERE activation.status = 'cancellation_confirming'`,
+    );
+    return result.rows[0]?.reconcile_at || undefined;
+  }
+
   async reconcileCancellationConfirmations(): Promise<void> {
     const pending = await this.database.pool.query<{ provider_activation_id: string; country_id: number }>(
       "SELECT provider_activation_id, country_id FROM supplier_activations WHERE status = 'cancellation_confirming' ORDER BY acquired_at",
@@ -1411,8 +1428,47 @@ export class ActivationAuthorizations {
             text: status.text,
             ...(status.code ? { code: status.code } : {}),
           });
+        } else {
+          const cancellation = await this.heroSms.cancelActivation(activation.provider_activation_id);
+          if (cancellation === 'cancelled') {
+            const confirmed = await this.confirmCancellation(activation.provider_activation_id);
+            if (confirmed?.replacementAllowed) {
+              await this.acquireReplacementNumber(confirmed.authorizationId);
+            }
+          } else if (cancellation === 'sms-delivered') {
+            const latestStatus = await this.heroSms.activationStatus(activation.provider_activation_id);
+            if (latestStatus.delivered && latestStatus.text && latestStatus.receivedAt) {
+              await this.receiveHeroSmsWebhook({
+                activationId: activation.provider_activation_id,
+                serviceCode: this.openAiServiceCode,
+                countryId: activation.country_id,
+                receivedAt: latestStatus.receivedAt,
+                text: latestStatus.text,
+                ...(latestStatus.code ? { code: latestStatus.code } : {}),
+              });
+            }
+          } else if (cancellation === 'too-early') {
+            const retryAfter = new Date(this.now().getTime() + 60_000);
+            await this.database.pool.query(
+              `UPDATE supplier_activations
+               SET status = 'waiting_sms', replacement_pending = false, end_use_pending = false,
+                   authorization_revocation_cancellation_retry_after = $2
+               WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
+              [activation.provider_activation_id, retryAfter],
+            );
+          }
         }
-      } catch { /* 保持取消确认状态，下一次持久任务继续对账。 */ }
+      } catch {
+        // 供应商请求异常：保持取消确认状态，由下方重试标记控制下一周期。
+      }
+      // 本轮未能收敛（请求异常、确认取消被拒、短信已送达但不在号码窗口内等）：
+      // 统一打 60 秒重试标记，避免调度器以零间隔紧循环轰炸供应商 API。
+      await this.database.pool.query(
+        `UPDATE supplier_activations
+         SET authorization_revocation_cancellation_retry_after = $2
+         WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
+        [activation.provider_activation_id, new Date(this.now().getTime() + 60_000)],
+      ).catch(() => undefined);
     }
   }
 
