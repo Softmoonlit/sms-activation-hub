@@ -72,7 +72,16 @@ export interface AuthorizationDetail {
     verificationCode?: string;
     unrecognizedSmsText?: string;
   };
-  candidates: Array<{ position: number; countryName: string; used: boolean }>;
+  candidates: Array<{
+    position: number;
+    countryName: string;
+    used: boolean;
+    recentAcquisitionResult?: {
+      kind: 'confirmed_absent' | 'failed';
+      errorKind?: string;
+      determinedAt: Date;
+    };
+  }>;
   activations: Array<{
     position: number;
     countryName: string;
@@ -551,8 +560,26 @@ export class ActivationAuthorizations {
     const row = result.rows[0];
     if (!row) return undefined;
     const [candidateResult, activationResult] = await Promise.all([
-      this.database.pool.query<{ position: number; country_name: string; used_at: Date | null }>(
-        'SELECT position, country_name, used_at FROM authorization_candidate_countries WHERE authorization_id = $1 ORDER BY position', [id],
+      this.database.pool.query<{
+        position: number; country_name: string; used_at: Date | null;
+        recent_result_kind: 'confirmed_absent' | 'failed' | null; recent_result_error_kind: string | null; recent_result_updated_at: Date | null;
+      }>(
+        `SELECT candidate.position, candidate.country_name, candidate.used_at,
+                recent.status AS recent_result_kind, recent.error_kind AS recent_result_error_kind,
+                recent.updated_at AS recent_result_updated_at
+         FROM authorization_candidate_countries candidate
+         LEFT JOIN LATERAL (
+           SELECT request.status, request.error_kind, request.updated_at, request.id
+           FROM number_acquisition_requests request
+           WHERE request.authorization_id = candidate.authorization_id
+             AND request.candidate_position = candidate.position
+             AND request.status IN ('confirmed_absent', 'failed')
+             AND (request.error_kind IS NULL OR request.error_kind NOT IN ('authorization-expired', 'authorization-unavailable', 'active-activation'))
+           ORDER BY request.updated_at DESC, request.id DESC
+           LIMIT 1
+         ) recent ON true
+         WHERE candidate.authorization_id = $1
+         ORDER BY candidate.position`, [id],
       ),
       this.database.pool.query<{
         position: number; country_name: string; provider_activation_id: string; status: NonNullable<AuthorizationDetail['activation']>['status']; activation_cost: string; currency: string;
@@ -616,6 +643,11 @@ export class ActivationAuthorizations {
         position: candidate.position,
         countryName: candidate.country_name,
         used: candidate.used_at !== null,
+        ...(candidate.used_at === null && candidate.recent_result_kind && candidate.recent_result_updated_at ? { recentAcquisitionResult: {
+          kind: candidate.recent_result_kind,
+          ...(candidate.recent_result_error_kind ? { errorKind: candidate.recent_result_error_kind } : {}),
+          determinedAt: candidate.recent_result_updated_at,
+        } } : {}),
       })),
       activations,
       costs,

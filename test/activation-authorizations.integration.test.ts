@@ -1282,6 +1282,9 @@ if (!databaseUrl) {
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       assert.match(home.body, /结果待人工对账/);
+      assert.match(home.body, /请求时间：08-07 08:00/);
+      assert.match(home.body, /时间 08-07 08:00/);
+      assert.doesNotMatch(home.body, /2026-08-07T00:00:00\.000Z/);
       const link = home.body.match(/action="(\/control7\/acquisition-requests\/[0-9a-f-]{36}\/candidates\/[^"/]+\/link)"/)?.[1]; assert.ok(link);
       const linked = await post(app, session, link, {});
       assert.equal(linked.statusCode, 303);
@@ -3371,7 +3374,7 @@ if (!databaseUrl) {
         phone_number: null, sms_code: null, sms_text: null,
       });
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /授权状态：🏁 已结束（管理员撤销 · 2026-09-01 08:02:00）/);
+      assert.match(detail.body, /授权状态：🏁 已结束（管理员撤销 · 09-01 08:02）/);
       assert.doesNotMatch(detail.body, /结束原因：|结束时间：/);
       assert.match(detail.body, /已取消/);
       assert.match(detail.body, /已确认退款：0\.80 USD/);
@@ -3747,11 +3750,11 @@ if (!databaseUrl) {
       assert.ok(Number(eventsBeforeDetail.rows[0]?.count) >= 4, '状态变更应留下非敏感生命周期事件');
 
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
-      assert.match(detail.body, /授权状态：🏁 已结束（领取后期限结束 · 2026-09-06 08:00:00）/);
+      assert.match(detail.body, /授权状态：🏁 已结束（领取后期限结束 · 09-06 08:00）/);
       assert.doesNotMatch(detail.body, /结束原因：|结束时间：|获取额度：/);
       assert.match(detail.body, /供应商激活/);
       assert.match(detail.body, /first-/);
-      assert.match(detail.body, /获取时间 2026-09-06 08:00:00/);
+      assert.match(detail.body, /获取时间 09-06 08:00/);
       assert.match(detail.body, /已取消/);
       assert.match(detail.body, /等待短信/);
       assert.match(detail.body, /位置 3 · 法国：<\/strong>📩 等待短信/);
@@ -3769,6 +3772,108 @@ if (!databaseUrl) {
         'SELECT count(*)::text AS count FROM lifecycle_events WHERE authorization_id = $1', [authorizationId],
       );
       assert.equal(eventsAfterDetail.rows[0]?.count, eventsBeforeDetail.rows[0]?.count, '读取详情不得写入审计事件');
+    } finally { await app.close(); }
+  });
+
+  test('管理员详情按候选位置展示最近已结束号码获取结果并排除调用前中止记录', async () => {
+    const now = new Date('2026-08-06T00:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '4');
+      const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]!);
+      assert.equal(tokens.length, 4);
+      const authorizationIds: string[] = [];
+      for (const token of tokens) {
+        const authorization = await database.pool.query<{ id: string }>(
+          'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+        );
+        const id = authorization.rows[0]?.id;
+        assert.ok(id);
+        authorizationIds.push(id);
+        await database.pool.query(
+          `UPDATE activation_authorizations
+           SET status = 'in_progress', claimed_at = $2, number_acquisition_expires_at = $3
+           WHERE id = $1`,
+          [id, now, new Date(now.getTime() + 24 * 60 * 60 * 1000)],
+        );
+        for (let position = 1; position <= 3; position++) {
+          await database.pool.query(
+            `INSERT INTO authorization_candidate_countries
+              (authorization_id, position, country_id, country_name)
+             VALUES ($1, $2, 1, '美国')`,
+            [id, position],
+          );
+        }
+      }
+
+      const insertRequest = async (
+        authorizationId: string,
+        position: number,
+        status: 'confirmed_absent' | 'failed',
+        errorKind: string | null,
+        updatedAt: Date,
+      ) => {
+        await database.pool.query(
+          `INSERT INTO number_acquisition_requests
+            (authorization_id, candidate_position, country_id, requested_price, status, error_kind, requested_at, updated_at)
+           VALUES ($1, $2, 1, 0.8, $3, $4, $5, $6)`,
+          [authorizationId, position, status, errorKind, new Date(updatedAt.getTime() - 1_000), updatedAt],
+        );
+      };
+
+      const resultTimes = [
+        new Date('2026-08-05T00:10:00.000Z'), new Date('2026-08-05T00:20:00.000Z'), new Date('2026-08-05T00:30:00.000Z'),
+        new Date('2026-08-05T00:40:00.000Z'), new Date('2026-08-05T00:50:00.000Z'), new Date('2026-08-05T01:00:00.000Z'),
+        new Date('2026-08-05T01:10:00.000Z'), new Date('2026-08-05T01:20:00.000Z'), new Date('2026-08-05T01:30:00.000Z'),
+        new Date('2026-08-05T01:40:00.000Z'), new Date('2026-08-05T01:50:00.000Z'), new Date('2026-08-05T02:00:00.000Z'),
+      ];
+      const resultCases: Array<{ authorization: number; position: number; errorKind: string }> = [
+        { authorization: 0, position: 1, errorKind: 'no-numbers' },
+        { authorization: 0, position: 2, errorKind: 'confirmed_absent' },
+        { authorization: 1, position: 1, errorKind: 'balance' },
+        { authorization: 1, position: 2, errorKind: 'authentication' },
+        { authorization: 1, position: 3, errorKind: 'account' },
+        { authorization: 2, position: 1, errorKind: 'request' },
+        { authorization: 2, position: 2, errorKind: 'rate-limit' },
+        { authorization: 2, position: 3, errorKind: 'provider' },
+        { authorization: 3, position: 1, errorKind: 'response' },
+        { authorization: 3, position: 2, errorKind: 'unrecognized-failure' },
+      ];
+      for (const [index, resultCase] of resultCases.entries()) {
+        await insertRequest(authorizationIds[resultCase.authorization]!, resultCase.position, resultCase.errorKind === 'confirmed_absent' ? 'confirmed_absent' : 'failed', resultCase.errorKind === 'confirmed_absent' ? null : resultCase.errorKind, resultTimes[index]!);
+      }
+
+      // 最新记录是调用前中止时，查询应回溯到最近一次真实供应商调用的已结束结果。
+      await insertRequest(authorizationIds[0]!, 1, 'failed', 'authorization-expired', resultTimes[10]!);
+      // 报价零库存没有创建请求的候选位置应只显示未消耗，不伪造结果。
+      await database.pool.query(
+        `UPDATE activation_authorizations SET status = 'in_progress' WHERE id = $1`, [authorizationIds[3]],
+      );
+      await database.pool.query(
+        `UPDATE authorization_candidate_countries SET used_at = $2
+         WHERE authorization_id = $1 AND position = 3`, [authorizationIds[3], now],
+      );
+      await insertRequest(authorizationIds[3]!, 3, 'failed', 'active-activation', resultTimes[11]!);
+
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationIds[0]}`, headers: { cookie: session.cookie } });
+      assert.equal(detail.statusCode, 200);
+      assert.match(detail.body, /位置 1 · 美国：<\/strong>⬜ 未消耗，无库存 · 08-05 08:10/);
+      assert.match(detail.body, /位置 2 · 美国：<\/strong>⬜ 未消耗，对账确认未取得号码 · 08-05 08:20/);
+      assert.doesNotMatch(detail.body, /authorization-expired|获取时间 08-05 08:30/);
+
+      const abnormalDetails = await Promise.all(authorizationIds.slice(1, 4).map((id) => app.inject({
+        method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie },
+      })));
+      assert.match(abnormalDetails[0]!.body, /⬜ 未消耗，⚠️ 余额不足 · 08-05 08:30/);
+      assert.match(abnormalDetails[0]!.body, /⬜ 未消耗，⚠️ 认证失败 · 08-05 08:40/);
+      assert.match(abnormalDetails[0]!.body, /⬜ 未消耗，⚠️ 账号不可用 · 08-05 08:50/);
+      assert.match(abnormalDetails[1]!.body, /⬜ 未消耗，⚠️ 号码请求被拒绝 · 08-05 09:00/);
+      assert.match(abnormalDetails[1]!.body, /⬜ 未消耗，⚠️ 请求过于频繁 · 08-05 09:10/);
+      assert.match(abnormalDetails[1]!.body, /⬜ 未消耗，⚠️ 服务暂时不可用 · 08-05 09:20/);
+      assert.match(abnormalDetails[2]!.body, /⬜ 未消耗，⚠️ 响应无法识别 · 08-05 09:30/);
+      assert.match(abnormalDetails[2]!.body, /⬜ 未消耗，⚠️ 号码获取失败 · 08-05 09:40/);
+      assert.doesNotMatch(abnormalDetails[2]!.body, /位置 3 · 美国：<\/strong>⬜ 未消耗.*active-activation/);
     } finally { await app.close(); }
   });
 
@@ -4081,7 +4186,7 @@ if (!databaseUrl) {
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
       assert.equal(detail.statusCode, 200);
       assert.match(detail.body, /链接末 8 位：未知/);
-      assert.match(detail.body, /授权状态：🏁 已结束（管理员撤销 · 2026-08-01 08:00:00）/);
+      assert.match(detail.body, /授权状态：🏁 已结束（管理员撤销 · 08-01 08:00）/);
     } finally { await app.close(); }
   });
 
@@ -4158,7 +4263,7 @@ if (!databaseUrl) {
       assert.equal(revokeRes.statusCode, 303);
       const detail4 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
       assert.equal(detail4.statusCode, 200);
-      assert.match(detail4.body, /授权状态：🏁 已结束（管理员撤销 · 2026-08-01 08:00:00）/);
+      assert.match(detail4.body, /授权状态：🏁 已结束（管理员撤销 · 08-01 08:00）/);
       assert.doesNotMatch(detail4.body, /结束原因：|结束时间：/);
       assert.doesNotMatch(detail4.body, /撤销授权/);
       assert.doesNotMatch(detail4.body, /654321/);
@@ -4180,7 +4285,7 @@ if (!databaseUrl) {
       }
       const detail5 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${idB}`, headers: { cookie: session.cookie } });
       assert.equal(detail5.statusCode, 200);
-      assert.match(detail5.body, /授权状态：🏁 已结束（获取额度用尽 · 2026-08-01 08:00:00）/);
+      assert.match(detail5.body, /授权状态：🏁 已结束（获取额度用尽 · 08-01 08:00）/);
       assert.doesNotMatch(detail5.body, /结束原因：|结束时间：|获取额度：/);
       assert.doesNotMatch(detail5.body, /撤销授权/);
 
@@ -4198,7 +4303,7 @@ if (!databaseUrl) {
       );
       const detail6 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${idC}`, headers: { cookie: session.cookie } });
       assert.equal(detail6.statusCode, 200);
-      assert.match(detail6.body, /授权状态：🏁 已结束（领取后期限结束 · 2026-08-01 08:00:00）/);
+      assert.match(detail6.body, /授权状态：🏁 已结束（领取后期限结束 · 08-01 08:00）/);
       assert.doesNotMatch(detail6.body, /结束原因：|结束时间：/);
       assert.doesNotMatch(detail6.body, /撤销授权/);
     } finally { await app.close(); }
@@ -4410,7 +4515,7 @@ if (!databaseUrl) {
       assert.equal(detailCompleted.statusCode, 200);
       assert.doesNotMatch(detailCompleted.body, /class="activation-current"/);
       assert.doesNotMatch(detailCompleted.body, /号码有效至/);
-      assert.match(detailCompleted.body, /位置 1 · 美国：<\/strong>✅ 已完成，获取时间 2026-09-10 08:00:00，激活 ID activation-1，费用 0\.80 USD/);
+      assert.match(detailCompleted.body, /位置 1 · 美国：<\/strong>✅ 已完成，获取时间 09-10 08:00，激活 ID activation-1，费用 0\.80 USD/);
       // 验证“获取时间”位于“激活 ID”之前
       const acquiredAtPos = detailCompleted.body.indexOf('获取时间');
       const activationIdPos = detailCompleted.body.indexOf('激活 ID activation-1');

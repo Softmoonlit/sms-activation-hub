@@ -158,15 +158,17 @@ export function formatCurrency(currency?: string): string {
 
 export function formatDateTime(date?: Date): string {
   if (!date || Number.isNaN(date.getTime())) return '';
-  const formatter = new Intl.DateTimeFormat('zh-CN', {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit',
     hour12: false,
   });
-  return formatter.format(date).replace(/\//g, '-');
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  const currentYear = new Intl.DateTimeFormat('en', { timeZone: 'Asia/Shanghai', year: 'numeric' }).format(new Date());
+  const dateWithoutYear = `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+  return parts.year === currentYear ? dateWithoutYear : `${parts.year}-${dateWithoutYear}`;
 }

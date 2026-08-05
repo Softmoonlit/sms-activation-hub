@@ -97,6 +97,25 @@ function activationStatusLabel(status: string): string {
 const RECIPIENT_NO_NUMBERS_MESSAGE = '当前暂无可用号码，请稍后重试';
 const RECIPIENT_ACQUISITION_ERROR_MESSAGE = '暂时无法获取号码，请联系发送者';
 
+const acquisitionResultLabels: Record<string, string> = {
+  'no-numbers': '无库存',
+  confirmed_absent: '对账确认未取得号码',
+  balance: '余额不足',
+  authentication: '认证失败',
+  account: '账号不可用',
+  request: '号码请求被拒绝',
+  'rate-limit': '请求过于频繁',
+  provider: '服务暂时不可用',
+  response: '响应无法识别',
+};
+
+function acquisitionResultLabel(result: NonNullable<AuthorizationDetail['candidates'][number]['recentAcquisitionResult']>): string {
+  if (result.kind === 'confirmed_absent') return acquisitionResultLabels.confirmed_absent!;
+  const label = acquisitionResultLabels[result.errorKind ?? ''] ?? '号码获取失败';
+  if (result.errorKind === 'no-numbers') return label;
+  return `⚠️ ${label}`;
+}
+
 function htmlPage(title: string, content: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -258,9 +277,9 @@ function adminShell(path: string, csrfToken: string, listPage: AuthorizationList
     ? `<nav class="pagination" aria-label="授权列表分页"><a class="pagination-previous${listPage.hasPreviousPage ? '' : ' disabled'}"${listPage.hasPreviousPage ? ` href="/${path}${listQuery({ page: listPage.page - 1 })}"` : ' aria-disabled="true"'}>上一页</a><span>第 ${listPage.page} / ${listPage.totalPages} 页</span><a class="pagination-next${listPage.hasNextPage ? '' : ' disabled'}"${listPage.hasNextPage ? ` href="/${path}${listQuery({ page: listPage.page + 1 })}"` : ' aria-disabled="true"'}>下一页</a></nav>`
     : '';
   const reconciliationMarkup = reconciliations.length === 0 ? '' : `<section class="card"><h2>号码获取对账</h2><p class="error">全局号码获取队列已暂停，处理完成后自动恢复。</p>${reconciliations.map((request) => {
-    const candidates = request.candidates.map((candidate) => `<li>激活 ID ${escapeHtml(candidate.activationId)}${candidate.countryId !== undefined ? `，地区 ${candidate.countryId}` : ''}${candidate.activationTime ? `，时间 ${escapeHtml(candidate.activationTime.toISOString())}` : ''}<form method="post" action="/${path}/acquisition-requests/${request.id}/candidates/${encodeURIComponent(candidate.activationId)}/link"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">关联此供应商激活</button></form></li>`).join('');
+    const candidates = request.candidates.map((candidate) => `<li>激活 ID ${escapeHtml(candidate.activationId)}${candidate.countryId !== undefined ? `，地区 ${candidate.countryId}` : ''}${candidate.activationTime ? `，时间 ${escapeHtml(formatDateTime(candidate.activationTime))}` : ''}<form method="post" action="/${path}/acquisition-requests/${request.id}/candidates/${encodeURIComponent(candidate.activationId)}/link"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">关联此供应商激活</button></form></li>`).join('');
     const recipient = `链接末 8 位：${request.tokenSuffix ?? '未知'}`;
-    return `<article class="authorization"><p><strong>${escapeHtml(recipient)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(request.requestedAt.toISOString())}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
+    return `<article class="authorization"><p><strong>${escapeHtml(recipient)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(formatDateTime(request.requestedAt))}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
   }).join('')}</section>`;
   const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>批量创建激活授权链接</h2><p>一次可生成 1 至 50 条授权链接。</p><form class="batch-create-form" method="post" action="/${path}/authorizations/batch/preview"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">预览批量创建</button><label>创建数量<input name="quantity" type="number" min="1" max="50" step="1" value="10" required></label></form></section><section class="card inventory-card"><h2>最近激活授权</h2>${filters}${recent}${pagination}</section></section>`;
   return adminPage('管理后台', '管理后台', path, csrfToken, `/${path}/settings`, '设置', content);
@@ -290,7 +309,13 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
     .map((activation) => `<li><strong>位置 ${activation.position} · ${escapeHtml(activation.countryName)}：</strong>${activationStatusLabel(activation.status)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt))}，激活 ID ${escapeHtml(activation.providerActivationId)}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理 ⚠️' : ''}</li>`).join('');
   const unusedPositionRows = detail.candidates
     .filter((candidate) => !candidate.used)
-    .map((candidate) => `<li><strong>位置 ${candidate.position} · ${escapeHtml(candidate.countryName)}：</strong>⬜ 未消耗</li>`).join('');
+    .map((candidate) => {
+      const result = candidate.recentAcquisitionResult;
+      const resultMarkup = result
+        ? `，${escapeHtml(acquisitionResultLabel(result))} · ${escapeHtml(formatDateTime(result.determinedAt))}`
+        : '';
+      return `<li><strong>位置 ${candidate.position} · ${escapeHtml(candidate.countryName)}：</strong>⬜ 未消耗${resultMarkup}</li>`;
+    }).join('');
   const activationListItems = [currentActivationRow, acquisitionRow, historyRows, unusedPositionRows].filter((markup) => markup !== '').join('');
   const activations = activationListItems === '' ? '<p>尚无供应商激活。</p>' : `<ul class="summary">${activationListItems}</ul>`;
   const unrecognizedSmsText = detail.activation?.unrecognizedSmsText ?? detail.unrecognizedSmsText;

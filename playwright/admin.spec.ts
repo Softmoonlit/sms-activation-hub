@@ -780,7 +780,7 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
     await mobilePage.getByRole('button', { name: '确认撤销授权' }).click();
 
     await mobilePage.goto(`${origin}/${config.adminPath}/authorizations/${authorizationId}`);
-    await expect(mobilePage.getByText('授权状态：🏁 已结束（管理员撤销 · 2026-08-01 08:00:00）')).toBeVisible();
+    await expect(mobilePage.getByText('授权状态：🏁 已结束（管理员撤销 · 08-01 08:00）')).toBeVisible();
     await expect(mobilePage.getByText('结束原因：')).toHaveCount(0);
     await expect(mobilePage.getByText('结束时间：')).toHaveCount(0);
     await expect(mobilePage.getByText('+442079460777')).toBeHidden();

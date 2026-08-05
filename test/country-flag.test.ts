@@ -41,7 +41,11 @@ test('formatCurrency converts numeric ISO currency codes to uppercase currency s
   assert.equal(formatCurrency(undefined), '');
 });
 
-test('formatDateTime converts UTC date to Beijing time (Asia/Shanghai)', () => {
-  assert.equal(formatDateTime(new Date('2026-08-01T06:09:36.000Z')), '2026-08-01 14:09:36');
+test('formatDateTime converts UTC date to compact Beijing time and restores year across years', () => {
+  const currentYear = Number(new Intl.DateTimeFormat('en', { timeZone: 'Asia/Shanghai', year: 'numeric' }).format(new Date()));
+  assert.equal(formatDateTime(new Date(`${currentYear}-08-01T06:09:36.000Z`)), '08-01 14:09');
+  assert.equal(formatDateTime(new Date(`${currentYear - 1}-08-01T06:09:36.000Z`)), `${currentYear - 1}-08-01 14:09`);
+  assert.equal(formatDateTime(new Date(`${currentYear - 1}-12-31T16:30:00.000Z`)), '01-01 00:30');
+  assert.equal(formatDateTime(new Date(`${currentYear - 1}-12-31T15:59:00.000Z`)), `${currentYear - 1}-12-31 23:59`);
   assert.equal(formatDateTime(undefined), '');
 });
