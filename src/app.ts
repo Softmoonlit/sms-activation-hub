@@ -86,7 +86,7 @@ function authorizationStatusMarkup(status: string, endedReason: string | undefin
 // 激活状态 emoji 映射：供应商激活卡片内所有状态行共用；已取消使用返回类 emoji，避免正常取消被误读为异常。
 const activationStatusEmojis: Record<string, string> = {
   获取结果确认中: '⏳', 等待短信: '📩', 取消确认中: '⏳', 已取消: '↩️', 结果待人工对账: '⚠️',
-  短信已送达: '📨', 完成确认中: '⏳', 已完成: '✅', 已超时: '⏰',
+  短信已送达: '📨', 完成确认中: '⏳', 已完成: '✅', 已超时: '⏰', 撤销收尾: '⏳',
 };
 
 function activationStatusLabel(status: string): string {
@@ -299,7 +299,7 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
       : escapeHtml(formatDateTime(detail.activation.numberExpiresAt, currentDate)))
     : '';
   const currentActivationRow = detail.activation
-    ? `<li class="activation-current"><strong>位置 ${detail.activation.position} · ${escapeHtml(detail.activation.countryName)}：</strong>${activationStatusLabel(detail.activation.status)}，号码有效至：${numberRemaining}${detail.activation.phoneNumber ? `，<strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}` : ''}${detail.activation.verificationCode ? `，<strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}` : ''}，激活 ID ${escapeHtml(detail.activation.providerActivationId)}，费用 ${detail.activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(detail.activation.currency))}</li>`
+    ? `<li class="activation-current"><strong>位置 ${detail.activation.position} · ${escapeHtml(detail.activation.countryName)}：</strong>${activationStatusLabel(detail.activation.revocationFinalizing ? '撤销收尾' : detail.activation.status)}，号码有效至：${numberRemaining}${detail.activation.phoneNumber ? `，<strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}` : ''}${detail.activation.verificationCode ? `，<strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}` : ''}，激活 ID ${escapeHtml(detail.activation.providerActivationId)}，费用 ${detail.activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(detail.activation.currency))}</li>`
     : '';
   const acquisitionRow = !detail.activation && detail.acquisition
     ? `<li><strong>位置 ${detail.acquisition.position} · ${escapeHtml(detail.acquisition.countryName)}：</strong>${activationStatusLabel(detail.acquisition.status)}</li>`
@@ -454,7 +454,7 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
 
     const guideMarkup = view.smsDelivered
       ? ''
-      : `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码并填入，同时切换对应国家代码，点击短信（从Whatsapp切换到短信），最后点击并确认；系统将自动接收并显示验证码。</p></div>`;
+      : `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码并填入，同时切换对应国家代码，点击短信（即从Whatsapp切换到短信），最后点击并确认；系统将自动接收并显示验证码。</p></div>`;
 
     let verificationMarkup = '';
     if (view.smsDelivered) {

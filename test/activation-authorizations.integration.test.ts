@@ -3344,6 +3344,9 @@ if (!databaseUrl) {
       now = new Date('2026-09-01T00:02:00.000Z');
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const id = authorizationIdFromHome(home.body, token);
+      const waitingDetail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
+      assert.match(waitingDetail.body, /📩 等待短信/);
+      assert.doesNotMatch(waitingDetail.body, /撤销收尾/);
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.equal(confirmation.statusCode, 200);
       assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
@@ -3410,6 +3413,9 @@ if (!databaseUrl) {
       assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${id}/revoke`, {})).statusCode, 303);
       assert.equal(cancelCalls, 0);
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } })).statusCode, 404);
+      const finalizingDetail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
+      assert.match(finalizingDetail.body, /⏳ 撤销收尾，号码有效至：<span data-countdown=/);
+      assert.doesNotMatch(finalizingDetail.body, /📩 等待短信/);
     } finally { await app.close(); }
 
     now = new Date('2026-09-02T00:01:59.999Z');

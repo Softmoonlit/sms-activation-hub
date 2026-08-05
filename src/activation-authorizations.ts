@@ -68,6 +68,7 @@ export interface AuthorizationDetail {
     numberExpiresAt: Date;
     /** 仅非终态（waiting_sms、cancellation_confirming、sms_delivered 等）时为 true，前端据此决定是否显示倒计时。 */
     numberExpiresAtCountdown: boolean;
+    revocationFinalizing: boolean;
     phoneNumber?: string;
     verificationCode?: string;
     unrecognizedSmsText?: string;
@@ -521,6 +522,7 @@ export class ActivationAuthorizations {
       provider_activation_id: string | null; activation_position: number | null; activation_cost: string | null; activation_currency: string | null;
       sms_code: string | null; sms_text: string | null; phone_number: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
       acquisition_country_name: string | null; acquisition_position: number | null; cancel_available_at: Date | null;
+      authorization_revocation_cancellation_pending: boolean | null;
     }>(
       `SELECT auth.id, auth.token_suffix, auth.status AS authorization_status,
               auth.created_at, auth.claimed_at,
@@ -539,7 +541,8 @@ export class ActivationAuthorizations {
               (SELECT count(*) FROM authorization_candidate_countries candidate WHERE candidate.authorization_id = auth.id AND candidate.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status, acquisition.country_name AS acquisition_country_name,
               acquisition.candidate_position AS acquisition_position,
-              activation.cancel_available_at
+              activation.cancel_available_at,
+              activation.authorization_revocation_cancellation_pending
        FROM activation_authorizations auth
        LEFT JOIN LATERAL (
          SELECT * FROM supplier_activations item WHERE item.authorization_id = auth.id ORDER BY item.acquired_at DESC LIMIT 1
@@ -663,6 +666,7 @@ export class ActivationAuthorizations {
         position: row.activation_position, providerActivationId: row.provider_activation_id,
         activationCost: Number(row.activation_cost), currency: row.activation_currency,
         numberExpiresAtCountdown: true,
+        revocationFinalizing: row.activation_status === 'waiting_sms' && row.authorization_revocation_cancellation_pending === true,
         ...(deliveryDataVisible && row.phone_number ? { phoneNumber: row.phone_number } : {}),
         ...(deliveryDataVisible && row.sms_code ? { verificationCode: row.sms_code } : {}),
         ...(!row.sms_code && deliveryDataVisible && row.sms_text ? { unrecognizedSmsText: row.sms_text } : {}),
