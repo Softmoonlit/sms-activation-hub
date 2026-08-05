@@ -1588,11 +1588,13 @@ export class ActivationAuthorizations {
   async retryPendingReplacementCancellations(): Promise<void> {
     for (;;) {
       const now = this.now();
-      // 与取消确认对账相同的 claim 模式：先持久化下一次处理时间再请求供应商，
-      // 请求异常或未收敛时期限已落库，任何入口都不会以零延迟循环或并发轰炸供应商 API。
+      // 与取消确认对账相同的 claim 模式：先持久化下一次处理时间与原子租约再请求供应商，
+      // 请求异常或未收敛时期限与租约已经落库，任何入口都不会以零延迟循环或并发轰炸供应商 API。
+      const claimToken = randomBytes(16).toString('base64url');
       const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
         `UPDATE supplier_activations activation
-         SET status = 'cancellation_confirming', cancellation_retry_after = $2
+         SET status = 'cancellation_confirming', cancellation_retry_after = $2,
+             cancellation_reconciliation_claimed_at = $3, cancellation_reconciliation_claim_token = $4
          WHERE activation.id = (
            SELECT activation.id FROM supplier_activations activation
            JOIN activation_authorizations auth ON auth.id = activation.authorization_id
@@ -1604,14 +1606,14 @@ export class ActivationAuthorizations {
              AND auth.status = 'in_progress'
            ORDER BY activation.cancellation_retry_after NULLS FIRST, activation.acquired_at LIMIT 1 FOR UPDATE SKIP LOCKED
          ) RETURNING activation.provider_activation_id`,
-        [now, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
+        [now, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS), now, claimToken],
       );
       const activation = claimed.rows[0];
       if (!activation) return;
       try {
         const cancellation = await this.heroSms.cancelActivation(activation.provider_activation_id);
         if (cancellation === 'cancelled') {
-          const confirmed = await this.confirmCancellation(activation.provider_activation_id);
+          const confirmed = await this.confirmCancellation(activation.provider_activation_id, claimToken);
           if (confirmed?.replacementAllowed) {
             await this.acquireReplacementNumber(confirmed.authorizationId);
           }
@@ -1624,8 +1626,9 @@ export class ActivationAuthorizations {
             [activation.provider_activation_id, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
           );
         }
-        // 短信冲突与不明确结果保持取消确认状态，交由供应商状态对账继续收尾。
-      } catch { /* 取消确认状态已持久化，由对账任务在期限后继续处理。 */ }
+        // 短信冲突与不明确结果保持取消确认状态：释放转态租约，交由对账按实际到期时间接管。
+        await this.releaseCancellationLease(activation.provider_activation_id, claimToken);
+      } catch { /* 取消确认状态与租约已持久化，由对账任务在期限后继续处理。 */ }
     }
   }
 

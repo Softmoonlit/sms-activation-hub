@@ -148,7 +148,10 @@ function objectEntries(value: unknown): [string, unknown][] | undefined {
 
 export function parseSupplierDate(value: unknown): Date | undefined {
   if (typeof value !== 'string' || /^0{4}-0{2}-0{2}/.test(value)) return undefined;
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(' ', 'T')}+03:00` : value;
+  // 无时区字符串（YYYY-MM-DD HH:MM:SS，供应商实际返回带毫秒变体）一律按莫斯科时区（+03:00）解释；
+  // 带时区字符串（含 Z 或 ±HH:MM）按原样解析。
+  const naive = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,3})?$/.exec(value);
+  const normalized = naive ? `${value.replace(' ', 'T')}+03:00` : value;
   const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? undefined : date;
 }

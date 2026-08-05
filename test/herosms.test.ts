@@ -317,8 +317,12 @@ test('HeroSMS adapter 按取消结果区分成功、短信冲突、过早取消�
 test('供应商时间解析：无时区按莫斯科时区解释，带时区按原样解析', () => {
   // 无时区字符串：供应商发送的莫斯科本地时间（UTC+3），按 +03:00 解释
   assert.deepEqual(parseSupplierDate('2026-08-05 03:15:00'), new Date('2026-08-05T00:15:00.000Z'));
-  // 带 +03:00 偏移的字符串：按原样解析
+  // 供应商 API 实际返回带毫秒的无时区字符串，同样按 +03:00 解释
+  assert.deepEqual(parseSupplierDate('2026-08-05 03:15:00.000'), new Date('2026-08-05T00:15:00.000Z'));
+  assert.deepEqual(parseSupplierDate('2026-08-05 03:15:00.500'), new Date('2026-08-05T00:15:00.500Z'));
+  // 带 +03:00 偏移的字符串：按原样解析（含毫秒变体）
   assert.deepEqual(parseSupplierDate('2026-08-05T03:15:00+03:00'), new Date('2026-08-05T00:15:00.000Z'));
+  assert.deepEqual(parseSupplierDate('2026-08-05T03:15:00.500+03:00'), new Date('2026-08-05T00:15:00.500Z'));
   // 带 Z 的字符串：按原样解析
   assert.deepEqual(parseSupplierDate('2026-08-05T03:15:00Z'), new Date('2026-08-05T03:15:00.000Z'));
   // 无法解析的输入返回 undefined，供 webhook 校验拒绝

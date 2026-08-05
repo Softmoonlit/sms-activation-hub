@@ -925,6 +925,10 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (!session) return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     await activationAuthorizations.cancelRevokedActivations().catch(() => undefined);
     await activationAuthorizations.reconcileCancellationConfirmations().catch(() => undefined);
+    // 对账可能把换号/结束使用或撤销来源的记录 too-early 回退并持久化新的重试期限：
+    // 重新武装专用调度器按该期限精确触发，60 秒后台扫描仅作恢复机制。
+    await scheduleNextRevocationCancellation().catch(retryRevocationCancellationScheduling);
+    await scheduleNextPendingReplacementCancellation().catch(retryPendingReplacementCancellationScheduling);
     const detail = await activationAuthorizations.detail(request.params.id);
     if (!detail) return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     cookiesForSession(reply, session.id, session.csrfToken);
