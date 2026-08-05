@@ -644,6 +644,16 @@ export async function createApp(config: AppConfig, database = new Database(confi
   let revocationCancellationTimer: NodeJS.Timeout | undefined;
   let cancellationConfirmationReconciliationTimer: NodeJS.Timeout | undefined;
   let pendingReplacementCancellationTimer: NodeJS.Timeout | undefined;
+
+  let cancellationConfirmationReconciliationSchedulingPromise: Promise<void> | undefined;
+  let cancellationConfirmationReconciliationRescheduleRequested = false;
+  let revocationCancellationSchedulingPromise: Promise<void> | undefined;
+  let revocationCancellationRescheduleRequested = false;
+  let pendingReplacementCancellationSchedulingPromise: Promise<void> | undefined;
+  let pendingReplacementCancellationRescheduleRequested = false;
+  let authorizationExpirySchedulingPromise: Promise<void> | undefined;
+  let authorizationExpiryRescheduleRequested = false;
+
   const retryCancellationConfirmationReconciliationScheduling = (): void => {
     if (closing) return;
     cancellationConfirmationReconciliationTimer = setTimeout(() => {
@@ -659,32 +669,47 @@ export async function createApp(config: AppConfig, database = new Database(confi
   };
   const scheduleNextCancellationConfirmationReconciliation = async (): Promise<void> => {
     if (closing) return;
-    if (cancellationConfirmationReconciliationTimer) clearTimeout(cancellationConfirmationReconciliationTimer);
-    cancellationConfirmationReconciliationTimer = undefined;
-    const reconcileAt = await activationAuthorizations.nextCancellationConfirmationReconciliation();
-    if (!reconcileAt) return;
-    const currentTime = dependencies.now?.() ?? new Date();
-    const delay = Math.min(Math.max(0, reconcileAt.getTime() - currentTime.getTime()), 2_147_483_647);
-    cancellationConfirmationReconciliationTimer = setTimeout(() => {
-      if (closing) return;
-      cancellationConfirmationReconciliationTimer = undefined;
-      trackPromise(
-        // 先领取授权到期产生的取消任务（waiting_sms + 到期取消标记），再对账取消确认中记录，
-        // 与 60 秒后台扫描保持同一相对顺序；完成后按数据库中最早到期时间安排下一次。
-        activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry()
-          .then(() => activationAuthorizations.reconcileCancellationConfirmations())
-          .then(async () => {
-            await scheduleNextCancellationConfirmationReconciliation();
-            // 对账返回 too-early 时会把换号/结束使用或撤销来源的记录回退到 waiting_sms
-            // 并持久化新的重试期限：换号与撤销专用调度器须按该期限精确触发，
-            // 60 秒后台扫描仅作恢复机制。
-            await scheduleNextPendingReplacementCancellation();
-            await scheduleNextRevocationCancellation();
-          })
-          .catch(retryCancellationConfirmationReconciliationScheduling),
-      );
-    }, delay);
-    cancellationConfirmationReconciliationTimer.unref();
+    if (cancellationConfirmationReconciliationSchedulingPromise) {
+      cancellationConfirmationReconciliationRescheduleRequested = true;
+      return cancellationConfirmationReconciliationSchedulingPromise;
+    }
+    cancellationConfirmationReconciliationSchedulingPromise = (async () => {
+      do {
+        cancellationConfirmationReconciliationRescheduleRequested = false;
+        const reconcileAt = await activationAuthorizations.nextCancellationConfirmationReconciliation();
+        if (closing) break;
+        if (cancellationConfirmationReconciliationTimer) {
+          clearTimeout(cancellationConfirmationReconciliationTimer);
+          cancellationConfirmationReconciliationTimer = undefined;
+        }
+        if (!reconcileAt) break;
+        const currentTime = dependencies.now?.() ?? new Date();
+        const delay = Math.min(Math.max(0, reconcileAt.getTime() - currentTime.getTime()), 2_147_483_647);
+        cancellationConfirmationReconciliationTimer = setTimeout(() => {
+          if (closing) return;
+          cancellationConfirmationReconciliationTimer = undefined;
+          trackPromise(
+            // 先领取授权到期产生的取消任务（waiting_sms + 到期取消标记），再对账取消确认中记录，
+            // 与 60 秒后台扫描保持同一相对顺序；完成后按数据库中最早到期时间安排下一次。
+            activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry()
+              .then(() => activationAuthorizations.reconcileCancellationConfirmations())
+              .then(async () => {
+                await scheduleNextCancellationConfirmationReconciliation();
+                // 对账返回 too-early 时会把换号/结束使用或撤销来源的记录回退到 waiting_sms
+                // 并持久化新的重试期限：换号与撤销专用调度器须按该期限精确触发，
+                // 60 秒后台扫描仅作恢复机制。
+                await scheduleNextPendingReplacementCancellation();
+                await scheduleNextRevocationCancellation();
+              })
+              .catch(retryCancellationConfirmationReconciliationScheduling),
+          );
+        }, delay);
+        cancellationConfirmationReconciliationTimer.unref();
+      } while (cancellationConfirmationReconciliationRescheduleRequested && !closing);
+    })().finally(() => {
+      cancellationConfirmationReconciliationSchedulingPromise = undefined;
+    });
+    return cancellationConfirmationReconciliationSchedulingPromise;
   };
   const retryRevocationCancellationScheduling = (): void => {
     if (closing) return;
@@ -696,27 +721,42 @@ export async function createApp(config: AppConfig, database = new Database(confi
   };
   const scheduleNextRevocationCancellation = async (): Promise<void> => {
     if (closing) return;
-    if (revocationCancellationTimer) clearTimeout(revocationCancellationTimer);
-    revocationCancellationTimer = undefined;
-    const cancelAt = await activationAuthorizations.nextPendingRevocationCancellation();
-    if (!cancelAt) return;
-    const currentTime = dependencies.now?.() ?? new Date();
-    const delay = Math.min(Math.max(0, cancelAt.getTime() - currentTime.getTime()), 2_147_483_647);
-    revocationCancellationTimer = setTimeout(() => {
-      if (closing) return;
-      revocationCancellationTimer = undefined;
-      trackPromise(
-        activationAuthorizations.cancelRevokedActivations()
-          .then(async () => {
-            await scheduleNextPendingReplacementCancellation();
-            await scheduleNextRevocationCancellation();
-            // 撤销取消可能把记录留在“取消确认中”（供应商请求异常等）：重新安排取消确认对账调度。
-            wakeCancellationConfirmationReconciliationScheduling();
-          })
-          .catch(retryRevocationCancellationScheduling),
-      );
-    }, delay);
-    revocationCancellationTimer.unref();
+    if (revocationCancellationSchedulingPromise) {
+      revocationCancellationRescheduleRequested = true;
+      return revocationCancellationSchedulingPromise;
+    }
+    revocationCancellationSchedulingPromise = (async () => {
+      do {
+        revocationCancellationRescheduleRequested = false;
+        const cancelAt = await activationAuthorizations.nextPendingRevocationCancellation();
+        if (closing) break;
+        if (revocationCancellationTimer) {
+          clearTimeout(revocationCancellationTimer);
+          revocationCancellationTimer = undefined;
+        }
+        if (!cancelAt) break;
+        const currentTime = dependencies.now?.() ?? new Date();
+        const delay = Math.min(Math.max(0, cancelAt.getTime() - currentTime.getTime()), 2_147_483_647);
+        revocationCancellationTimer = setTimeout(() => {
+          if (closing) return;
+          revocationCancellationTimer = undefined;
+          trackPromise(
+            activationAuthorizations.cancelRevokedActivations()
+              .then(async () => {
+                await scheduleNextPendingReplacementCancellation();
+                await scheduleNextRevocationCancellation();
+                // 撤销取消可能把记录留在“取消确认中”（供应商请求异常等）：重新安排取消确认对账调度。
+                wakeCancellationConfirmationReconciliationScheduling();
+              })
+              .catch(retryRevocationCancellationScheduling),
+          );
+        }, delay);
+        revocationCancellationTimer.unref();
+      } while (revocationCancellationRescheduleRequested && !closing);
+    })().finally(() => {
+      revocationCancellationSchedulingPromise = undefined;
+    });
+    return revocationCancellationSchedulingPromise;
   };
   const retryAuthorizationExpiryScheduling = (): void => {
     if (closing) return;
@@ -736,50 +776,80 @@ export async function createApp(config: AppConfig, database = new Database(confi
   };
   const scheduleNextPendingReplacementCancellation = async (): Promise<void> => {
     if (closing) return;
-    if (pendingReplacementCancellationTimer) clearTimeout(pendingReplacementCancellationTimer);
-    pendingReplacementCancellationTimer = undefined;
-    const cancelAt = await activationAuthorizations.nextPendingReplacementCancellation();
-    if (!cancelAt) return;
-    const currentTime = dependencies.now?.() ?? new Date();
-    const delay = Math.min(Math.max(0, cancelAt.getTime() - currentTime.getTime()), 2_147_483_647);
-    pendingReplacementCancellationTimer = setTimeout(() => {
-      if (closing) return;
-      pendingReplacementCancellationTimer = undefined;
-      trackPromise(
-        activationAuthorizations.retryPendingReplacementCancellations()
-          .then(async () => {
-            await scheduleNextPendingReplacementCancellation();
-            await scheduleNextRevocationCancellation();
-            // 换号/结束使用重试可能把记录留在“取消确认中”（供应商请求异常等）：重新安排取消确认对账调度。
-            wakeCancellationConfirmationReconciliationScheduling();
-          })
-          .catch(retryPendingReplacementCancellationScheduling),
-      );
-    }, delay);
-    pendingReplacementCancellationTimer.unref();
+    if (pendingReplacementCancellationSchedulingPromise) {
+      pendingReplacementCancellationRescheduleRequested = true;
+      return pendingReplacementCancellationSchedulingPromise;
+    }
+    pendingReplacementCancellationSchedulingPromise = (async () => {
+      do {
+        pendingReplacementCancellationRescheduleRequested = false;
+        const cancelAt = await activationAuthorizations.nextPendingReplacementCancellation();
+        if (closing) break;
+        if (pendingReplacementCancellationTimer) {
+          clearTimeout(pendingReplacementCancellationTimer);
+          pendingReplacementCancellationTimer = undefined;
+        }
+        if (!cancelAt) break;
+        const currentTime = dependencies.now?.() ?? new Date();
+        const delay = Math.min(Math.max(0, cancelAt.getTime() - currentTime.getTime()), 2_147_483_647);
+        pendingReplacementCancellationTimer = setTimeout(() => {
+          if (closing) return;
+          pendingReplacementCancellationTimer = undefined;
+          trackPromise(
+            activationAuthorizations.retryPendingReplacementCancellations()
+              .then(async () => {
+                await scheduleNextPendingReplacementCancellation();
+                await scheduleNextRevocationCancellation();
+                // 换号/结束使用重试可能把记录留在“取消确认中”（供应商请求异常等）：重新安排取消确认对账调度。
+                wakeCancellationConfirmationReconciliationScheduling();
+              })
+              .catch(retryPendingReplacementCancellationScheduling),
+          );
+        }, delay);
+        pendingReplacementCancellationTimer.unref();
+      } while (pendingReplacementCancellationRescheduleRequested && !closing);
+    })().finally(() => {
+      pendingReplacementCancellationSchedulingPromise = undefined;
+    });
+    return pendingReplacementCancellationSchedulingPromise;
   };
   const scheduleNextAuthorizationExpiry = async (): Promise<void> => {
     if (closing) return;
-    if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
-    authorizationExpiryTimer = undefined;
-    const expiresAt = await activationAuthorizations.nextRecipientAccessExpiry();
-    if (!expiresAt) return;
-    const currentTime = dependencies.now?.() ?? new Date();
-    const delay = Math.min(Math.max(0, expiresAt.getTime() - currentTime.getTime()), 2_147_483_647);
-    authorizationExpiryTimer = setTimeout(() => {
-      if (closing) return;
-      authorizationExpiryTimer = undefined;
-      trackPromise(
-        activationAuthorizations.expireDue()
-          .then(async () => {
-            await scheduleNextAuthorizationExpiry();
-            // 授权到期可能产生新的取消对账时间：重新安排取消确认对账调度。
-            wakeCancellationConfirmationReconciliationScheduling();
-          })
-          .catch(retryAuthorizationExpiryScheduling),
-      );
-    }, delay);
-    authorizationExpiryTimer.unref();
+    if (authorizationExpirySchedulingPromise) {
+      authorizationExpiryRescheduleRequested = true;
+      return authorizationExpirySchedulingPromise;
+    }
+    authorizationExpirySchedulingPromise = (async () => {
+      do {
+        authorizationExpiryRescheduleRequested = false;
+        const expiresAt = await activationAuthorizations.nextRecipientAccessExpiry();
+        if (closing) break;
+        if (authorizationExpiryTimer) {
+          clearTimeout(authorizationExpiryTimer);
+          authorizationExpiryTimer = undefined;
+        }
+        if (!expiresAt) break;
+        const currentTime = dependencies.now?.() ?? new Date();
+        const delay = Math.min(Math.max(0, expiresAt.getTime() - currentTime.getTime()), 2_147_483_647);
+        authorizationExpiryTimer = setTimeout(() => {
+          if (closing) return;
+          authorizationExpiryTimer = undefined;
+          trackPromise(
+            activationAuthorizations.expireDue()
+              .then(async () => {
+                await scheduleNextAuthorizationExpiry();
+                // 授权到期可能产生新的取消对账时间：重新安排取消确认对账调度。
+                wakeCancellationConfirmationReconciliationScheduling();
+              })
+              .catch(retryAuthorizationExpiryScheduling),
+          );
+        }, delay);
+        authorizationExpiryTimer.unref();
+      } while (authorizationExpiryRescheduleRequested && !closing);
+    })().finally(() => {
+      authorizationExpirySchedulingPromise = undefined;
+    });
+    return authorizationExpirySchedulingPromise;
   };
 
   const recipientState = async (token: string, sessionToken?: string): Promise<Awaited<ReturnType<ActivationAuthorizations['recipientState']>>> => {

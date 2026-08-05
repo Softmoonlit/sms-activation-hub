@@ -395,6 +395,8 @@ export class Database {
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_expiry_cancellation_pending BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_revocation_cancellation_pending BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS cancellation_retry_after TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS cancellation_reconciliation_claimed_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS cancellation_reconciliation_claim_token TEXT;
       -- 旧列名只描述撤销来源，重试期限现在由换号、结束使用、撤销与授权到期四种来源共用；
       -- 旧库存在旧列时迁移数据，全新库直接跳过；迁移后删除旧列，不留兼容层。
       DO $$

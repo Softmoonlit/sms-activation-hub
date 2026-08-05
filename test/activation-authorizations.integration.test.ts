@@ -7,6 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { createApp, type AppDependencies } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
+import { ActivationAuthorizations } from '../src/activation-authorizations.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsNumber } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -17,6 +18,8 @@ const config: AppConfig = {
   loginMaxAttempts: 3, loginWindowSeconds: 900, openAiServiceCode: 'openai',
   port: 3001, publicOrigin: origin, sessionSecret: 'test-session-secret-that-is-at-least-32-characters', trustedProxy: false,
 };
+
+const tokenHash = (token: string): string => createHash('sha256').update(token).digest('hex');
 
 function scriptedHeroSms(overrides: Partial<{
   balance: number | HeroSms['balance'];
@@ -71,13 +74,14 @@ async function login(app: FastifyInstance): Promise<{ cookie: string; csrf: stri
 }
 async function openApplication(heroSms = scriptedHeroSms(), now?: () => Date, extraDependencies: Omit<AppDependencies, 'heroSms' | 'now'> = {}) {
   const database = new Database(databaseUrl!);
+  const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, now, extraDependencies.tokenGenerator);
   const app = await createApp({ ...config, sessionSecret: `${config.sessionSecret}-${randomUUID()}` }, database, { heroSms, now, ...extraDependencies });
   await database.replaceDefaultCandidateLocations([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
   ]);
-  return { app, database };
+  return { app, database, activationAuthorizations };
 }
 async function post(app: FastifyInstance, session: { cookie: string; csrf: string }, url: string, fields: Record<string, string>) {
   return app.inject({ method: 'POST', url, headers: { cookie: session.cookie, 'content-type': 'application/x-www-form-urlencoded', origin }, payload: new URLSearchParams({ csrf: session.csrf, ...fields }).toString() });
@@ -131,13 +135,27 @@ function listArticles(body: string): ListArticle[] {
 async function resetAuthorizationTables(database: Database): Promise<void> {
   // 集成测试共享同一个隔离数据库，列表断言需要从干净状态开始。
   await database.transaction(async (client) => {
-    await client.query('DELETE FROM lifecycle_events');
-    await client.query('DELETE FROM supplier_activation_refunds');
-    await client.query('DELETE FROM supplier_activations');
-    await client.query('DELETE FROM number_acquisition_candidates');
-    await client.query('DELETE FROM number_acquisition_requests');
-    await client.query('DELETE FROM authorization_candidate_countries');
-    await client.query('DELETE FROM activation_authorizations');
+    await client.query(`
+      DO $$
+      DECLARE
+        t text;
+      BEGIN
+        FOR t IN SELECT unnest(ARRAY[
+          'lifecycle_events',
+          'supplier_activation_refunds',
+          'supplier_activations',
+          'number_acquisition_candidates',
+          'number_acquisition_requests',
+          'authorization_candidate_countries',
+          'activation_authorizations'
+        ])
+        LOOP
+          IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = t) THEN
+            EXECUTE 'DELETE FROM ' || quote_ident(t);
+          END IF;
+        END LOOP;
+      END $$;
+    `);
   });
 }
 
@@ -5951,6 +5969,295 @@ if (!databaseUrl) {
       now = new Date('2026-08-30T22:02:10.000Z');
       await new Promise((resolve) => setTimeout(resolve, 2_500));
       assert.equal(activationStatusCalls, 1, '关闭后悬挂 timer 不得继续对账');
+    } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('两个并发对账入口针对同一激活时，只发生一次 activationStatus/cancelActivation 调用序列', async () => {
+    let now = new Date('2026-08-31T10:00:00.000Z');
+    const activationId = `concurrent-reconcile-${randomUUID()}`;
+    let statusCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => {
+        statusCalls += 1;
+        return { delivered: false, providerStatus: 'cancelled' };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database, activationAuthorizations } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+
+      // 手动将激活置为 cancellation_confirming，且重试期限与租约置空
+      await database.pool.query(
+        `UPDATE supplier_activations SET status = 'cancellation_confirming', cancellation_retry_after = NULL,
+         cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL
+         WHERE provider_activation_id = $1`,
+        [activationId],
+      );
+
+      // 两个并发对账入口针对同一激活同时对账
+      await Promise.all([
+        activationAuthorizations.reconcileCancellationConfirmations(),
+        activationAuthorizations.reconcileCancellationConfirmations(),
+      ]);
+
+      assert.equal(statusCalls, 1, '只发生一次 activationStatus 调用');
+    } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('两个应用实例共享数据库同时对账时，同一激活只被一个实例 claim', async () => {
+    let now = new Date('2026-08-31T11:00:00.000Z');
+    const activationId = `multi-instance-claim-${randomUUID()}`;
+    let instance1Calls = 0;
+    let instance2Calls = 0;
+
+    const heroSms1 = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => { throw new HeroSmsResponseError('uncertain'); },
+      activationStatus: async () => {
+        instance1Calls += 1;
+        return { delivered: false, providerStatus: 'cancelled' };
+      },
+    });
+
+    const heroSms2 = scriptedHeroSms({
+      activationStatus: async () => {
+        instance2Calls += 1;
+        return { delivered: false, providerStatus: 'cancelled' };
+      },
+    });
+
+    await resetTablesBeforeApplication();
+    const { app: app1, database, activationAuthorizations: auth1 } = await openApplication(heroSms1, () => now);
+    const { app: app2, activationAuthorizations: auth2 } = await openApplication(heroSms2, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app1);
+      const created = await createAuthorization(app1, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app1.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+
+      now = new Date('2026-08-31T11:02:00.000Z');
+      const replacing = await app1.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replacing.statusCode, 202);
+
+      // 将重试期限与租约置空，以便两实例竞争 claim
+      await database.pool.query(
+        `UPDATE supplier_activations SET cancellation_retry_after = NULL,
+         cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL
+         WHERE provider_activation_id = $1`,
+        [activationId],
+      );
+
+      await Promise.all([
+        auth1.reconcileCancellationConfirmations(),
+        auth2.reconcileCancellationConfirmations(),
+      ]);
+
+      assert.equal(instance1Calls + instance2Calls, 1, '同一激活只被一个实例 claim 并调用供应商');
+    } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app1.close().catch(() => undefined);
+      await app2.close().catch(() => undefined);
+    }
+  });
+
+  test('执行者在供应商调用或数据库收尾前异常后，租约到期可由后续执行者恢复', async () => {
+    let now = new Date('2026-08-31T12:00:00.000Z');
+    const expiredLeaseId = `lease-expired-${randomUUID()}`;
+    const activeLeaseId = `lease-active-${randomUUID()}`;
+    let getNumberCalls = 0;
+    let reconciledIds: string[] = [];
+
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: getNumberCalls === 1 ? expiredLeaseId : activeLeaseId,
+          phoneNumber: getNumberCalls === 1 ? '+14155550123' : '+14155550124',
+          activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      activationStatus: async (id) => {
+        reconciledIds.push(id);
+        return { delivered: false, providerStatus: 'cancelled' };
+      },
+    });
+
+    await resetTablesBeforeApplication();
+    const { app, database, activationAuthorizations } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created1 = await createAuthorization(app, session);
+      const token1 = created1.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token1);
+      const claimed1 = await app.inject({ method: 'POST', url: `/a/${token1}/numbers` });
+      assert.equal(claimed1.statusCode, 303);
+
+      const created2 = await createAuthorization(app, session);
+      const token2 = created2.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token2);
+      const claimed2 = await app.inject({ method: 'POST', url: `/a/${token2}/numbers` });
+      assert.equal(claimed2.statusCode, 303);
+
+      // 手动将第 1 个激活置为“已过期的租约”（cancellation_confirming，claimed_at 6 分钟前，cancellation_retry_after 为空）
+      await database.pool.query(
+        `UPDATE supplier_activations
+         SET status = 'cancellation_confirming',
+             cancellation_reconciliation_claimed_at = $2, cancellation_reconciliation_claim_token = 'old-token',
+             cancellation_retry_after = NULL
+         WHERE provider_activation_id = $1`,
+        [expiredLeaseId, new Date(now.getTime() - 6 * 60 * 1000)],
+      );
+
+      // 手动将第 2 个激活置为“未过期的租约”（cancellation_confirming，claimed_at 1 分钟前，cancellation_retry_after 为空）
+      await database.pool.query(
+        `UPDATE supplier_activations
+         SET status = 'cancellation_confirming',
+             cancellation_reconciliation_claimed_at = $2, cancellation_reconciliation_claim_token = 'active-token',
+             cancellation_retry_after = NULL
+         WHERE provider_activation_id = $1`,
+        [activeLeaseId, new Date(now.getTime() - 1 * 60 * 1000)],
+      );
+
+      await activationAuthorizations.reconcileCancellationConfirmations();
+
+      assert.deepEqual(reconciledIds, [expiredLeaseId], '已过期的租约被恢复对账，未过期的租约被跳过');
+    } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('重复确认取消不会重复获取后继号码、重复结束授权或覆盖已送达短信事实', async () => {
+    let now = new Date('2026-08-31T13:00:00.000Z');
+    const activationId = `repeat-confirm-${randomUUID()}`;
+    let getNumberCalls = 0;
+
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: getNumberCalls === 1 ? activationId : `next-${randomUUID()}`,
+          phoneNumber: getNumberCalls === 1 ? '+14155550123' : '+14155550124',
+          activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => 'cancelled',
+    });
+
+    await resetTablesBeforeApplication();
+    const { app, database, activationAuthorizations } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+
+      now = new Date('2026-08-31T13:02:00.000Z');
+      // 换号确认
+      const replacing = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replacing.statusCode, 303);
+      assert.equal(getNumberCalls, 2, '首次确认换号获取了第 2 个号码');
+
+      // 对已经取消收尾的 activationId 重复触发 reconcileCancellationConfirmations
+      await activationAuthorizations.reconcileCancellationConfirmations();
+      await activationAuthorizations.reconcileCancellationConfirmations();
+
+      assert.equal(getNumberCalls, 2, '重复确认取消不会重复获取后继号码');
+    } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('调度函数并发调用时最多保留一个受管理 timer，最早到期任务不被丢失', async () => {
+    let now = new Date('2026-08-31T14:00:00.000Z');
+    const activationId1 = `timer-guard-1-${randomUUID()}`;
+    const statusCalls: string[] = [];
+
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId: activationId1, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => { throw new HeroSmsResponseError('uncertain'); },
+      activationStatus: async (id) => {
+        statusCalls.push(id);
+        throw new HeroSmsResponseError('uncertain');
+      },
+    });
+
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+
+      now = new Date('2026-08-31T14:02:00.000Z');
+      await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      // 将取消确认重试期限设为 2 秒后
+      await database.pool.query(
+        `UPDATE supplier_activations SET cancellation_retry_after = $2
+         WHERE provider_activation_id = $1`,
+        [activationId1, new Date(now.getTime() + 2_000)],
+      );
+
+      // 并发调用 5 次 GET /a/token（触发 recipientState -> 调度逻辑）
+      await Promise.all([
+        app.inject({ method: 'GET', url: `/a/${token}` }),
+        app.inject({ method: 'GET', url: `/a/${token}` }),
+        app.inject({ method: 'GET', url: `/a/${token}` }),
+        app.inject({ method: 'GET', url: `/a/${token}` }),
+        app.inject({ method: 'GET', url: `/a/${token}` }),
+      ]);
+
+      // 推进时间越过 2 秒
+      now = new Date('2026-08-31T14:02:03.000Z');
+      await waitFor(() => statusCalls.includes(activationId1), 3_000);
+
+      assert.ok(statusCalls.includes(activationId1), '最早到期的任务没有丢失');
     } finally {
       await resetAuthorizationTables(database).catch(() => undefined);
       await app.close().catch(() => undefined);

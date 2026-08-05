@@ -12,6 +12,7 @@ const RESULT_VIEW_ENDED_REASON = 'result_view_expired';
 const QUOTA_EXHAUSTED_ENDED_REASON = 'quota_exhausted';
 /** 取消请求返回 too-early 后的重试间隔，也是对账 claim 时持久化的下一次处理时间。 */
 const CANCELLATION_RETRY_DELAY_MS = 60_000;
+const CANCELLATION_RECONCILIATION_LEASE_MS = 5 * 60 * 1000;
 const MAX_NUMBERS_PER_AUTHORIZATION = 3;
 
 export interface CreatedAuthorization {
@@ -812,6 +813,7 @@ export class ActivationAuthorizations {
                replacement_pending = false, end_use_pending = false, authorization_expiry_cancellation_pending = false,
                authorization_revocation_cancellation_pending = false,
                cancellation_retry_after = NULL,
+               cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL,
                refund_reconciliation_status = CASE WHEN status = 'manual_reconciliation' THEN 'resolved' ELSE refund_reconciliation_status END,
                timeout_reconciliation_claimed_at = NULL, timeout_reconciliation_claim_token = NULL
            WHERE id = $1 AND status IN ('waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'timed_out', 'cancelled')`,
@@ -1034,6 +1036,7 @@ export class ActivationAuthorizations {
              authorization_expiry_cancellation_pending = false,
              authorization_revocation_cancellation_pending = false,
              cancellation_retry_after = NULL,
+             cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL,
              sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
          WHERE id IN (
            SELECT id FROM supplier_activations
@@ -1421,28 +1424,33 @@ export class ActivationAuthorizations {
   async reconcileCancellationConfirmations(): Promise<void> {
     // 取消确认对账的资格判断只有这一处权威实现：所有入口（管理员详情刷新、启动对账、
     // 后台扫描、专用定时器、撤销立即对账）都调用本方法，共享同一条持久化规则——
-    // 只有 cancellation_retry_after 为空或已到期的记录才被处理。
-    // claim 先持久化下一次处理时间再请求供应商：期限写入失败则本轮跳过该记录；
-    // 供应商请求异常或未收敛时期限已经落库，任何入口都不会以零延迟循环轰炸供应商 API。
+    // 只有 cancellation_retry_after 为空或已到期，且未被租约锁定的记录才被处理。
+    // claim 先持久化下一次处理时间与原子租约再请求供应商：期限写入失败则本轮跳过该记录；
+    // 供应商请求异常或未收敛时期限与租约已经落库，任何入口都不会以零延迟循环轰炸供应商 API。
     for (;;) {
       const now = this.now();
+      const claimToken = randomBytes(16).toString('base64url');
+      const leaseThreshold = new Date(now.getTime() - CANCELLATION_RECONCILIATION_LEASE_MS);
       const claimed = await this.database.pool.query<{ provider_activation_id: string; country_id: number }>(
         `UPDATE supplier_activations activation
-         SET cancellation_retry_after = $2
+         SET cancellation_retry_after = $2,
+             cancellation_reconciliation_claimed_at = $1,
+             cancellation_reconciliation_claim_token = $3
          WHERE activation.id = (
            SELECT activation.id FROM supplier_activations activation
            WHERE activation.status = 'cancellation_confirming'
              AND (activation.cancellation_retry_after IS NULL OR activation.cancellation_retry_after <= $1)
+             AND (activation.cancellation_reconciliation_claimed_at IS NULL OR activation.cancellation_reconciliation_claimed_at <= $4)
            ORDER BY activation.acquired_at LIMIT 1 FOR UPDATE SKIP LOCKED
          ) RETURNING activation.provider_activation_id, activation.country_id`,
-        [now, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
+        [now, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS), claimToken, leaseThreshold],
       );
       const activation = claimed.rows[0];
       if (!activation) return;
       try {
         const status = await this.heroSms.activationStatus(activation.provider_activation_id);
         if (status.providerStatus === 'cancelled') {
-          const confirmed = await this.confirmCancellation(activation.provider_activation_id);
+          const confirmed = await this.confirmCancellation(activation.provider_activation_id, claimToken);
           if (confirmed?.replacementAllowed) {
             await this.acquireReplacementNumber(confirmed.authorizationId);
           }
@@ -1458,7 +1466,7 @@ export class ActivationAuthorizations {
         } else {
           const cancellation = await this.heroSms.cancelActivation(activation.provider_activation_id);
           if (cancellation === 'cancelled') {
-            const confirmed = await this.confirmCancellation(activation.provider_activation_id);
+            const confirmed = await this.confirmCancellation(activation.provider_activation_id, claimToken);
             if (confirmed?.replacementAllowed) {
               await this.acquireReplacementNumber(confirmed.authorizationId);
             }
@@ -1478,15 +1486,23 @@ export class ActivationAuthorizations {
             // 保留换号/结束使用/撤销意图并持久化重试期限：回退等待短信后由对应后台任务在期限后自动重发取消。
             await this.database.pool.query(
               `UPDATE supplier_activations
-               SET status = 'waiting_sms', cancellation_retry_after = $2
-               WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
-              [activation.provider_activation_id, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
+               SET status = 'waiting_sms', cancellation_retry_after = $2,
+                   cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL
+               WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'
+                 AND cancellation_reconciliation_claim_token = $3`,
+              [activation.provider_activation_id, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS), claimToken],
             );
           }
         }
       } catch {
-        // 供应商请求异常：保持取消确认状态；下一次处理时间已在 claim 时持久化，
+        // 供应商请求异常：保持取消确认状态；释放租约 token，保留 cancellation_retry_after 重试期限，
         // 由专用定时器在期限到达后继续对账，不会以零延迟重试。
+        await this.database.pool.query(
+          `UPDATE supplier_activations
+           SET cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL
+           WHERE provider_activation_id = $1 AND cancellation_reconciliation_claim_token = $2`,
+          [activation.provider_activation_id, claimToken],
+        ).catch(() => undefined);
       }
     }
   }
@@ -1632,18 +1648,19 @@ export class ActivationAuthorizations {
     for (const replacement of pending.rows) await this.acquireReplacementNumber(replacement.authorization_id);
   }
 
-  private async confirmCancellation(providerActivationId: string): Promise<{ authorizationId: string; replacementAllowed: boolean; ended: boolean } | undefined> {
+  private async confirmCancellation(providerActivationId: string, claimToken?: string): Promise<{ authorizationId: string; replacementAllowed: boolean; ended: boolean } | undefined> {
     return this.database.transaction(async (client) => {
       const identity = await client.query<{ authorization_id: string }>(
         `SELECT activation.authorization_id
          FROM supplier_activations activation
          JOIN activation_authorizations auth ON auth.id = activation.authorization_id
            WHERE activation.provider_activation_id = $1 AND activation.status = 'cancellation_confirming'
+             AND ($3::text IS NULL OR activation.cancellation_reconciliation_claim_token IS NULL OR activation.cancellation_reconciliation_claim_token = $3)
              AND (
                activation.expires_at > $2
                OR auth.status = 'ended' AND auth.ended_reason = 'admin_revoked'
              )`,
-        [providerActivationId, this.now()],
+        [providerActivationId, this.now(), claimToken ?? null],
       );
       const authorizationId = identity.rows[0]?.authorization_id;
       if (!authorizationId) return undefined;
@@ -1660,12 +1677,13 @@ export class ActivationAuthorizations {
          FROM supplier_activations activation
          JOIN activation_authorizations auth ON auth.id = activation.authorization_id
          WHERE activation.provider_activation_id = $1 AND activation.status = 'cancellation_confirming'
+           AND ($3::text IS NULL OR activation.cancellation_reconciliation_claim_token IS NULL OR activation.cancellation_reconciliation_claim_token = $3)
            AND (
              activation.expires_at > $2
              OR auth.status = 'ended' AND auth.ended_reason = 'admin_revoked'
            )
          FOR UPDATE OF activation`,
-        [providerActivationId, this.now()],
+        [providerActivationId, this.now(), claimToken ?? null],
       );
       const activation = result.rows[0];
       if (!activation) return undefined;
@@ -1683,6 +1701,8 @@ export class ActivationAuthorizations {
              replacement_pending = $3, end_use_pending = false, authorization_expiry_cancellation_pending = false,
              authorization_revocation_cancellation_pending = false,
              cancellation_retry_after = NULL,
+             cancellation_reconciliation_claimed_at = NULL,
+             cancellation_reconciliation_claim_token = NULL,
              refund_reconciliation_status = 'resolved',
              timeout_reconciliation_claimed_at = NULL, timeout_reconciliation_claim_token = NULL
          WHERE id = $1`,
