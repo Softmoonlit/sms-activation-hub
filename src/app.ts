@@ -623,6 +623,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   await activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry();
   await activationAuthorizations.reconcileTimedOutActivations();
   await activationAuthorizations.cancelRevokedActivations();
+  await activationAuthorizations.retryPendingReplacementCancellations();
   await activationAuthorizations.reconcileCancellationConfirmations();
   await activationAuthorizations.runPendingReplacementAcquisitions();
   await activationAuthorizations.pollWaitingActivations();
@@ -642,6 +643,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   let authorizationExpiryTimer: NodeJS.Timeout | undefined;
   let revocationCancellationTimer: NodeJS.Timeout | undefined;
   let cancellationConfirmationReconciliationTimer: NodeJS.Timeout | undefined;
+  let pendingReplacementCancellationTimer: NodeJS.Timeout | undefined;
   const retryCancellationConfirmationReconciliationScheduling = (): void => {
     if (closing) return;
     cancellationConfirmationReconciliationTimer = setTimeout(() => {
@@ -701,6 +703,32 @@ export async function createApp(config: AppConfig, database = new Database(confi
       trackPromise(scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling));
     }, 1_000);
     authorizationExpiryTimer.unref();
+  };
+  const retryPendingReplacementCancellationScheduling = (): void => {
+    if (closing) return;
+    pendingReplacementCancellationTimer = setTimeout(() => {
+      pendingReplacementCancellationTimer = undefined;
+      trackPromise(scheduleNextPendingReplacementCancellation().catch(retryPendingReplacementCancellationScheduling));
+    }, 1_000);
+    pendingReplacementCancellationTimer.unref();
+  };
+  const scheduleNextPendingReplacementCancellation = async (): Promise<void> => {
+    if (closing) return;
+    if (pendingReplacementCancellationTimer) clearTimeout(pendingReplacementCancellationTimer);
+    pendingReplacementCancellationTimer = undefined;
+    const cancelAt = await activationAuthorizations.nextPendingReplacementCancellation();
+    if (!cancelAt) return;
+    const currentTime = dependencies.now?.() ?? new Date();
+    const delay = Math.min(Math.max(0, cancelAt.getTime() - currentTime.getTime()), 2_147_483_647);
+    pendingReplacementCancellationTimer = setTimeout(() => {
+      pendingReplacementCancellationTimer = undefined;
+      trackPromise(
+        activationAuthorizations.retryPendingReplacementCancellations()
+          .then(scheduleNextPendingReplacementCancellation)
+          .catch(retryPendingReplacementCancellationScheduling),
+      );
+    }, delay);
+    pendingReplacementCancellationTimer.unref();
   };
   const scheduleNextAuthorizationExpiry = async (): Promise<void> => {
     if (closing) return;
@@ -963,6 +991,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
       : result.state === 'no-numbers'
         ? RECIPIENT_NO_NUMBERS_MESSAGE
         : RECIPIENT_ACQUISITION_ERROR_MESSAGE;
+    // 换号请求后重新计算换号/结束使用取消重试调度：too-early 或挂起时由后台在期限后自动继续。
+    void scheduleNextPendingReplacementCancellation().catch(retryPendingReplacementCancellationScheduling);
     return reply.code(result.state === 'too-early' || result.state === 'no-numbers' ? 409 : 503)
       .type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, message));
   });
@@ -1064,6 +1094,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     // 超时收尾必须先于取消对账，避免刚到二十分钟的取消确认自动创建后继激活。
     await activationAuthorizations.reconcileTimedOutActivations();
     await activationAuthorizations.cancelRevokedActivations();
+    await activationAuthorizations.retryPendingReplacementCancellations();
     await activationAuthorizations.reconcileCancellationConfirmations();
     await activationAuthorizations.runPendingReplacementAcquisitions();
     await activationAuthorizations.pollWaitingActivations();
@@ -1083,6 +1114,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   await scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
   await scheduleNextRevocationCancellation().catch(retryRevocationCancellationScheduling);
   await scheduleNextCancellationConfirmationReconciliation().catch(retryCancellationConfirmationReconciliationScheduling);
+  await scheduleNextPendingReplacementCancellation().catch(retryPendingReplacementCancellationScheduling);
 
   app.setNotFoundHandler(async (_request, reply) => reply.code(404).type('text/plain; charset=utf-8').send('Not Found'));
   app.addHook('onClose', async () => {
@@ -1091,6 +1123,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
     if (revocationCancellationTimer) clearTimeout(revocationCancellationTimer);
     if (cancellationConfirmationReconciliationTimer) clearTimeout(cancellationConfirmationReconciliationTimer);
+    if (pendingReplacementCancellationTimer) clearTimeout(pendingReplacementCancellationTimer);
     await Promise.all(pendingFinishTasks);
     await database.close();
   });

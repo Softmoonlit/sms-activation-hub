@@ -394,7 +394,22 @@ export class Database {
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS timeout_reconciliation_claim_token TEXT;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_expiry_cancellation_pending BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_revocation_cancellation_pending BOOLEAN NOT NULL DEFAULT false;
-      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS authorization_revocation_cancellation_retry_after TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS cancellation_retry_after TIMESTAMPTZ;
+      -- 旧列名只描述撤销来源，重试期限现在由换号、结束使用、撤销与授权到期四种来源共用；
+      -- 旧库存在旧列时迁移数据，全新库直接跳过；迁移后删除旧列，不留兼容层。
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'supplier_activations'
+            AND column_name = 'authorization_revocation_cancellation_retry_after'
+        ) THEN
+          UPDATE supplier_activations
+            SET cancellation_retry_after = authorization_revocation_cancellation_retry_after
+            WHERE cancellation_retry_after IS NULL AND authorization_revocation_cancellation_retry_after IS NOT NULL;
+        END IF;
+      END $$;
+      ALTER TABLE supplier_activations DROP COLUMN IF EXISTS authorization_revocation_cancellation_retry_after;
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_refund_reconciliation_status_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_refund_reconciliation_status_check
         CHECK (refund_reconciliation_status IN ('pending', 'resolved'));

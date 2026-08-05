@@ -10,6 +10,8 @@ const RESULT_VIEW_LIFETIME_MS = 5 * 60 * 1000;
 const END_PROMPT_LIFETIME_MS = 2 * 60 * 1000;
 const RESULT_VIEW_ENDED_REASON = 'result_view_expired';
 const QUOTA_EXHAUSTED_ENDED_REASON = 'quota_exhausted';
+/** 取消请求返回 too-early 后的重试间隔，也是对账 claim 时持久化的下一次处理时间。 */
+const CANCELLATION_RETRY_DELAY_MS = 60_000;
 const MAX_NUMBERS_PER_AUTHORIZATION = 3;
 
 export interface CreatedAuthorization {
@@ -328,7 +330,7 @@ export class ActivationAuthorizations {
   async nextPendingRevocationCancellation(): Promise<Date | undefined> {
     const now = this.now();
     const result = await this.database.pool.query<{ cancel_available_at: Date | null }>(
-      `SELECT min(GREATEST(activation.cancel_available_at, COALESCE(activation.authorization_revocation_cancellation_retry_after, activation.cancel_available_at))) AS cancel_available_at
+      `SELECT min(GREATEST(activation.cancel_available_at, COALESCE(activation.cancellation_retry_after, activation.cancel_available_at))) AS cancel_available_at
        FROM supplier_activations activation
        JOIN activation_authorizations auth ON auth.id = activation.authorization_id
        WHERE activation.status IN ('waiting_sms', 'manual_reconciliation')
@@ -464,9 +466,9 @@ export class ActivationAuthorizations {
       } else if (result === 'too-early') {
         await this.database.pool.query(
           `UPDATE supplier_activations SET status = 'waiting_sms', authorization_revocation_cancellation_pending = true,
-             authorization_revocation_cancellation_retry_after = $2
+             cancellation_retry_after = $2
            WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
-          [providerActivationId, new Date(this.now().getTime() + 60_000)],
+          [providerActivationId, new Date(this.now().getTime() + CANCELLATION_RETRY_DELAY_MS)],
         );
       } else {
         await this.reconcileCancellationConfirmations();
@@ -807,7 +809,7 @@ export class ActivationAuthorizations {
            SET status = 'completion_confirming', sms_code = $2, sms_text = $3, sms_received_at = $4, sms_poll_after = NULL,
                replacement_pending = false, end_use_pending = false, authorization_expiry_cancellation_pending = false,
                authorization_revocation_cancellation_pending = false,
-               authorization_revocation_cancellation_retry_after = NULL,
+               cancellation_retry_after = NULL,
                refund_reconciliation_status = CASE WHEN status = 'manual_reconciliation' THEN 'resolved' ELSE refund_reconciliation_status END,
                timeout_reconciliation_claimed_at = NULL, timeout_reconciliation_claim_token = NULL
            WHERE id = $1 AND status IN ('waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'timed_out', 'cancelled')`,
@@ -1029,7 +1031,7 @@ export class ActivationAuthorizations {
              timeout_reconciliation_claim_token = NULL, replacement_pending = false, end_use_pending = false,
              authorization_expiry_cancellation_pending = false,
              authorization_revocation_cancellation_pending = false,
-             authorization_revocation_cancellation_retry_after = NULL,
+             cancellation_retry_after = NULL,
              sms_code = NULL, sms_text = NULL, sms_poll_after = NULL
          WHERE id IN (
            SELECT id FROM supplier_activations
@@ -1358,13 +1360,15 @@ export class ActivationAuthorizations {
         [authorization.id],
       );
       const endingUse = acquisitionExpiresAt <= now || Number(used.rows[0]?.count) >= MAX_NUMBERS_PER_AUTHORIZATION;
-      const currentResult = await client.query<{ provider_activation_id: string; cancel_available_at: Date }>(
-        `SELECT provider_activation_id, cancel_available_at FROM supplier_activations
+      const currentResult = await client.query<{ provider_activation_id: string; cancel_available_at: Date; cancellation_retry_after: Date | null }>(
+        `SELECT provider_activation_id, cancel_available_at, cancellation_retry_after FROM supplier_activations
          WHERE authorization_id = $1 AND status = 'waiting_sms' FOR UPDATE`,
         [authorization.id],
       );
       const current = currentResult.rows[0];
-      if (!current || current.cancel_available_at > now) return { kind: 'too-early' };
+      // 重试期限未到（上次取消返回 too-early 后）的重复提交不得提前请求供应商，
+      // 也不得覆盖已持久化的操作意图：直接返回 too-early，由后台在期限后自动重试。
+      if (!current || current.cancel_available_at > now || (current.cancellation_retry_after !== null && current.cancellation_retry_after > now)) return { kind: 'too-early' };
       const updated = await client.query(
         `UPDATE supplier_activations
          SET status = 'cancellation_confirming', replacement_pending = $2, end_use_pending = $3
@@ -1378,9 +1382,11 @@ export class ActivationAuthorizations {
     try {
       const cancellation = await this.heroSms.cancelActivation(transition.activationId);
       if (cancellation === 'too-early') {
+        // 保留换号/结束使用意图并持久化 60 秒重试期限，由后台任务在期限后自动重发取消。
         await this.database.pool.query(
-          "UPDATE supplier_activations SET status = 'waiting_sms', replacement_pending = false, end_use_pending = false WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'",
-          [transition.activationId],
+          `UPDATE supplier_activations SET status = 'waiting_sms', cancellation_retry_after = $2
+           WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
+          [transition.activationId, new Date(this.now().getTime() + CANCELLATION_RETRY_DELAY_MS)],
         );
         return { state: 'too-early' };
       }
@@ -1400,7 +1406,7 @@ export class ActivationAuthorizations {
 
   async nextCancellationConfirmationReconciliation(): Promise<Date | undefined> {
     const result = await this.database.pool.query<{ reconcile_at: Date | null }>(
-      `SELECT min(GREATEST(activation.cancel_available_at, COALESCE(activation.authorization_revocation_cancellation_retry_after, activation.cancel_available_at))) AS reconcile_at
+      `SELECT min(GREATEST(activation.cancel_available_at, COALESCE(activation.cancellation_retry_after, activation.cancel_available_at))) AS reconcile_at
        FROM supplier_activations activation
        WHERE activation.status = 'cancellation_confirming'`,
     );
@@ -1410,21 +1416,21 @@ export class ActivationAuthorizations {
   async reconcileCancellationConfirmations(): Promise<void> {
     // 取消确认对账的资格判断只有这一处权威实现：所有入口（管理员详情刷新、启动对账、
     // 后台扫描、专用定时器、撤销立即对账）都调用本方法，共享同一条持久化规则——
-    // 只有 authorization_revocation_cancellation_retry_after 为空或已到期的记录才被处理。
+    // 只有 cancellation_retry_after 为空或已到期的记录才被处理。
     // claim 先持久化下一次处理时间再请求供应商：期限写入失败则本轮跳过该记录；
     // 供应商请求异常或未收敛时期限已经落库，任何入口都不会以零延迟循环轰炸供应商 API。
     for (;;) {
       const now = this.now();
       const claimed = await this.database.pool.query<{ provider_activation_id: string; country_id: number }>(
         `UPDATE supplier_activations activation
-         SET authorization_revocation_cancellation_retry_after = $2
+         SET cancellation_retry_after = $2
          WHERE activation.id = (
            SELECT activation.id FROM supplier_activations activation
            WHERE activation.status = 'cancellation_confirming'
-             AND (activation.authorization_revocation_cancellation_retry_after IS NULL OR activation.authorization_revocation_cancellation_retry_after <= $1)
+             AND (activation.cancellation_retry_after IS NULL OR activation.cancellation_retry_after <= $1)
            ORDER BY activation.acquired_at LIMIT 1 FOR UPDATE SKIP LOCKED
          ) RETURNING activation.provider_activation_id, activation.country_id`,
-        [now, new Date(now.getTime() + 60_000)],
+        [now, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
       );
       const activation = claimed.rows[0];
       if (!activation) return;
@@ -1464,12 +1470,12 @@ export class ActivationAuthorizations {
               });
             }
           } else if (cancellation === 'too-early') {
+            // 保留换号/结束使用/撤销意图并持久化重试期限：回退等待短信后由对应后台任务在期限后自动重发取消。
             await this.database.pool.query(
               `UPDATE supplier_activations
-               SET status = 'waiting_sms', replacement_pending = false, end_use_pending = false,
-                   authorization_revocation_cancellation_retry_after = $2
+               SET status = 'waiting_sms', cancellation_retry_after = $2
                WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
-              [activation.provider_activation_id, new Date(now.getTime() + 60_000)],
+              [activation.provider_activation_id, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
             );
           }
         }
@@ -1488,7 +1494,7 @@ export class ActivationAuthorizations {
            SELECT activation.id FROM supplier_activations activation
            JOIN activation_authorizations auth ON auth.id = activation.authorization_id
            WHERE activation.status IN ('waiting_sms', 'manual_reconciliation') AND activation.authorization_revocation_cancellation_pending AND activation.cancel_available_at <= $1
-             AND (activation.authorization_revocation_cancellation_retry_after IS NULL OR activation.authorization_revocation_cancellation_retry_after <= $1)
+             AND (activation.cancellation_retry_after IS NULL OR activation.cancellation_retry_after <= $1)
              AND (auth.status <> 'in_progress' OR auth.number_acquisition_expires_at > $1 OR auth.ended_reason = 'admin_revoked')
            ORDER BY activation.cancel_available_at LIMIT 1 FOR UPDATE SKIP LOCKED
          ) RETURNING activation.provider_activation_id`,
@@ -1500,16 +1506,81 @@ export class ActivationAuthorizations {
     }
   }
 
+  /** 下一个需要自动重发取消的换号/结束使用激活：查询最早可取消时间与重试期限的较大者。 */
+  async nextPendingReplacementCancellation(): Promise<Date | undefined> {
+    const result = await this.database.pool.query<{ retry_at: Date | null }>(
+      `SELECT min(GREATEST(activation.cancel_available_at, COALESCE(activation.cancellation_retry_after, activation.cancel_available_at))) AS retry_at
+       FROM supplier_activations activation
+       JOIN activation_authorizations auth ON auth.id = activation.authorization_id
+       WHERE activation.status = 'waiting_sms'
+         AND (activation.replacement_pending OR activation.end_use_pending)
+         AND activation.expires_at > $1
+         AND auth.status = 'in_progress'`,
+      [this.now()],
+    );
+    return result.rows[0]?.retry_at || undefined;
+  }
+
+  /** 换号/结束使用意图在取消返回 too-early 回退等待短信后的自动重试入口：
+   *  只处理号码窗口内且重试期限已到的记录，转入取消确认后重发取消；
+   *  撤销与授权到期来源分别由 cancelRevokedActivations 与 cancelAcquisitionsConfirmedAfterAuthorizationExpiry 负责。
+   *  领取截止后的结束使用单同样重试：确认取消后不创建后继号码，由授权过期收尾。 */
+  async retryPendingReplacementCancellations(): Promise<void> {
+    for (;;) {
+      const now = this.now();
+      // 与取消确认对账相同的 claim 模式：先持久化下一次处理时间再请求供应商，
+      // 请求异常或未收敛时期限已落库，任何入口都不会以零延迟循环或并发轰炸供应商 API。
+      const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
+        `UPDATE supplier_activations activation
+         SET status = 'cancellation_confirming', cancellation_retry_after = $2
+         WHERE activation.id = (
+           SELECT activation.id FROM supplier_activations activation
+           JOIN activation_authorizations auth ON auth.id = activation.authorization_id
+           WHERE activation.status = 'waiting_sms'
+             AND (activation.replacement_pending OR activation.end_use_pending)
+             AND activation.cancel_available_at <= $1
+             AND activation.expires_at > $1
+             AND (activation.cancellation_retry_after IS NULL OR activation.cancellation_retry_after <= $1)
+             AND auth.status = 'in_progress'
+           ORDER BY activation.cancellation_retry_after NULLS FIRST, activation.acquired_at LIMIT 1 FOR UPDATE SKIP LOCKED
+         ) RETURNING activation.provider_activation_id`,
+        [now, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
+      );
+      const activation = claimed.rows[0];
+      if (!activation) return;
+      try {
+        const cancellation = await this.heroSms.cancelActivation(activation.provider_activation_id);
+        if (cancellation === 'cancelled') {
+          const confirmed = await this.confirmCancellation(activation.provider_activation_id);
+          if (confirmed?.replacementAllowed) {
+            await this.acquireReplacementNumber(confirmed.authorizationId);
+          }
+        } else if (cancellation === 'too-early') {
+          // 保留换号/结束使用意图，再次持久化 60 秒重试期限。
+          await this.database.pool.query(
+            `UPDATE supplier_activations
+             SET status = 'waiting_sms', cancellation_retry_after = $2
+             WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
+            [activation.provider_activation_id, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
+          );
+        }
+        // 短信冲突与不明确结果保持取消确认状态，交由供应商状态对账继续收尾。
+      } catch { /* 取消确认状态已持久化，由对账任务在期限后继续处理。 */ }
+    }
+  }
+
   async cancelAcquisitionsConfirmedAfterAuthorizationExpiry(): Promise<void> {
     for (;;) {
+      const now = this.now();
       const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
         `UPDATE supplier_activations SET status = 'cancellation_confirming', authorization_expiry_cancellation_pending = false
          WHERE id = (
            SELECT id FROM supplier_activations
            WHERE status = 'waiting_sms' AND authorization_expiry_cancellation_pending AND cancel_available_at <= $1
+             AND (cancellation_retry_after IS NULL OR cancellation_retry_after <= $1)
            ORDER BY cancel_available_at LIMIT 1 FOR UPDATE SKIP LOCKED
          ) RETURNING provider_activation_id`,
-        [this.now()],
+        [now],
       );
       const activation = claimed.rows[0];
       if (!activation) return;
@@ -1520,11 +1591,13 @@ export class ActivationAuthorizations {
           continue;
         }
         if (cancellation === 'too-early') {
+          // 保留授权到期 pending 标记并持久化 60 秒重试期限，避免回退后零延迟循环请求供应商。
           await this.database.pool.query(
             `UPDATE supplier_activations
-             SET status = 'waiting_sms', authorization_expiry_cancellation_pending = true
+             SET status = 'waiting_sms', authorization_expiry_cancellation_pending = true,
+                 cancellation_retry_after = $2
              WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
-            [activation.provider_activation_id],
+            [activation.provider_activation_id, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
           );
         }
         // 短信冲突和不明确结果均保留取消确认状态，交由供应商状态对账。
@@ -1602,7 +1675,7 @@ export class ActivationAuthorizations {
              phone_number = NULL, sms_code = NULL, sms_text = NULL, sms_poll_after = NULL,
              replacement_pending = $3, end_use_pending = false, authorization_expiry_cancellation_pending = false,
              authorization_revocation_cancellation_pending = false,
-             authorization_revocation_cancellation_retry_after = NULL,
+             cancellation_retry_after = NULL,
              refund_reconciliation_status = 'resolved',
              timeout_reconciliation_claimed_at = NULL, timeout_reconciliation_claim_token = NULL
          WHERE id = $1`,
