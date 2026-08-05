@@ -42,10 +42,16 @@ test('formatCurrency converts numeric ISO currency codes to uppercase currency s
 });
 
 test('formatDateTime converts UTC date to compact Beijing time and restores year across years', () => {
-  const currentYear = Number(new Intl.DateTimeFormat('en', { timeZone: 'Asia/Shanghai', year: 'numeric' }).format(new Date()));
-  assert.equal(formatDateTime(new Date(`${currentYear}-08-01T06:09:36.000Z`)), '08-01 14:09');
-  assert.equal(formatDateTime(new Date(`${currentYear - 1}-08-01T06:09:36.000Z`)), `${currentYear - 1}-08-01 14:09`);
-  assert.equal(formatDateTime(new Date(`${currentYear - 1}-12-31T16:30:00.000Z`)), '01-01 00:30');
-  assert.equal(formatDateTime(new Date(`${currentYear - 1}-12-31T15:59:00.000Z`)), `${currentYear - 1}-12-31 23:59`);
+  const currentDate = new Date('2026-08-06T00:00:00.000Z');
+  assert.equal(formatDateTime(new Date('2026-08-01T06:09:36.000Z'), currentDate), '08-01 14:09');
+  assert.equal(formatDateTime(new Date('2025-08-01T06:09:36.000Z'), currentDate), '2025-08-01 14:09');
+  assert.equal(formatDateTime(new Date('2025-12-31T16:30:00.000Z'), currentDate), '01-01 00:30');
+  assert.equal(formatDateTime(new Date('2025-12-31T15:59:00.000Z'), currentDate), '2025-12-31 23:59');
   assert.equal(formatDateTime(undefined), '');
+});
+
+test('formatDateTime uses the Beijing year at the UTC/Beijing New Year boundary', () => {
+  const beijingNewYear = new Date('2026-12-31T16:30:00.000Z');
+  assert.equal(formatDateTime(new Date('2026-12-31T16:30:00.000Z'), beijingNewYear), '01-01 00:30');
+  assert.equal(formatDateTime(new Date('2026-12-31T15:59:00.000Z'), beijingNewYear), '2026-12-31 23:59');
 });

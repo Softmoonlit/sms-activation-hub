@@ -156,7 +156,7 @@ export function formatCurrency(currency?: string): string {
   return CURRENCY_DISPLAY_MAP[trimmed] ?? trimmed;
 }
 
-export function formatDateTime(date?: Date): string {
+export function formatDateTime(date?: Date, currentDate: Date = new Date()): string {
   if (!date || Number.isNaN(date.getTime())) return '';
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai',
@@ -168,7 +168,7 @@ export function formatDateTime(date?: Date): string {
     hour12: false,
   });
   const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
-  const currentYear = new Intl.DateTimeFormat('en', { timeZone: 'Asia/Shanghai', year: 'numeric' }).format(new Date());
+  const currentYear = new Intl.DateTimeFormat('en', { timeZone: 'Asia/Shanghai', year: 'numeric' }).format(currentDate);
   const dateWithoutYear = `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
   return parts.year === currentYear ? dateWithoutYear : `${parts.year}-${dateWithoutYear}`;
 }
