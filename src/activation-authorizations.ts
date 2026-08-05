@@ -118,7 +118,7 @@ export type ReplacementResult =
 
 type ReplacementTransition =
   | { kind: 'not-found' | 'unavailable' | 'too-early' | 'no-numbers' }
-  | { kind: 'cancel'; activationId: string };
+  | { kind: 'cancel'; activationId: string; claimToken: string };
 
 type NumberAcquisitionOutcome =
   | 'acquired'
@@ -443,15 +443,21 @@ export class ActivationAuthorizations {
         );
         return null;
       }
+      // 转态时即写入对账租约：请求供应商期间，并发对账或另一实例不会抢 claim 同一激活；
+      // 撤销路由的同步取消完成后释放租约，由对账按实际到期时间接管。
+      const claimToken = randomBytes(16).toString('base64url');
       await client.query(
-        "UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = false, end_use_pending = false, authorization_revocation_cancellation_pending = true WHERE provider_activation_id = $1",
-        [activation.provider_activation_id],
+        `UPDATE supplier_activations SET status = 'cancellation_confirming', replacement_pending = false, end_use_pending = false,
+           authorization_revocation_cancellation_pending = true,
+           cancellation_reconciliation_claimed_at = $2, cancellation_reconciliation_claim_token = $3
+         WHERE provider_activation_id = $1`,
+        [activation.provider_activation_id, now, claimToken],
       );
-      return activation.provider_activation_id;
+      return { providerActivationId: activation.provider_activation_id, claimToken };
     });
     if (cancellation === undefined) return false;
     if (cancellation) {
-      await this.cancelRevokedActivation(cancellation);
+      await this.cancelRevokedActivation(cancellation.providerActivationId, cancellation.claimToken);
     } else {
       // 撤销时激活已处于“取消确认中”：打标记后立即对账一次，不再干等周期任务。
       await this.reconcileCancellationConfirmations().catch(() => undefined);
@@ -459,7 +465,19 @@ export class ActivationAuthorizations {
     return true;
   }
 
-  private async cancelRevokedActivation(providerActivationId: string): Promise<void> {
+  /** 释放转态入口持有的对账租约：仅清除本执行者（claim_token 匹配）设置的租约字段。
+   *  转态时写入租约用于堵住并发对账抢 claim，调用结束（含异常）后释放，
+   *  让对账按实际到期时间接管并在 claim 时重新持久化 60 秒重试期限。 */
+  private async releaseCancellationLease(providerActivationId: string, claimToken: string): Promise<void> {
+    await this.database.pool.query(
+      `UPDATE supplier_activations
+       SET cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL
+       WHERE provider_activation_id = $1 AND cancellation_reconciliation_claim_token = $2`,
+      [providerActivationId, claimToken],
+    ).catch(() => undefined);
+  }
+
+  private async cancelRevokedActivation(providerActivationId: string, claimToken: string): Promise<void> {
     try {
       const result = await this.heroSms.cancelActivation(providerActivationId);
       if (result === 'cancelled') {
@@ -471,10 +489,17 @@ export class ActivationAuthorizations {
            WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
           [providerActivationId, new Date(this.now().getTime() + CANCELLATION_RETRY_DELAY_MS)],
         );
+        await this.releaseCancellationLease(providerActivationId, claimToken);
       } else {
+        // 短信已送达（或供应商返回其它非取消结果）：撤销后不再请求取消，改为查询状态按完成收尾。
+        // 释放转态租约，让立即对账马上接管，不等待租约到期。
+        await this.releaseCancellationLease(providerActivationId, claimToken);
         await this.reconcileCancellationConfirmations();
       }
-    } catch { /* 保留取消确认状态，由持久任务继续供应商对账。 */ }
+    } catch {
+      // 请求结果不明确：释放转态租约，由对账按实际到期时间接管（claim 时重新持久化重试期限）。
+      await this.releaseCancellationLease(providerActivationId, claimToken);
+    }
   }
 
   async detail(id: string): Promise<AuthorizationDetail | undefined> {
@@ -1374,13 +1399,19 @@ export class ActivationAuthorizations {
       // 重试期限未到（上次取消返回 too-early 后）的重复提交不得提前请求供应商，
       // 也不得覆盖已持久化的操作意图：直接返回 too-early，由后台在期限后自动重试。
       if (!current || current.cancel_available_at > now || (current.cancellation_retry_after !== null && current.cancellation_retry_after > now)) return { kind: 'too-early' };
+      // 转态时即写入对账租约：事务提交后请求供应商期间，并发对账不会抢 claim 同一激活；
+      // 换号/结束使用调用完成后释放租约，由对账按实际到期时间接管。
+      const claimToken = randomBytes(16).toString('base64url');
       const updated = await client.query(
         `UPDATE supplier_activations
-         SET status = 'cancellation_confirming', replacement_pending = $2, end_use_pending = $3
+         SET status = 'cancellation_confirming', replacement_pending = $2, end_use_pending = $3,
+             cancellation_reconciliation_claimed_at = $4, cancellation_reconciliation_claim_token = $5
          WHERE authorization_id = $1 AND status = 'waiting_sms'`,
-        [authorization.id, !endingUse, endingUse],
+        [authorization.id, !endingUse, endingUse, now, claimToken],
       );
-      return updated.rowCount === 1 ? { kind: 'cancel', activationId: current.provider_activation_id } : { kind: 'unavailable' };
+      return updated.rowCount === 1
+        ? { kind: 'cancel', activationId: current.provider_activation_id, claimToken }
+        : { kind: 'unavailable' };
     });
     if (transition.kind !== 'cancel') return { state: transition.kind };
 
@@ -1393,9 +1424,12 @@ export class ActivationAuthorizations {
            WHERE provider_activation_id = $1 AND status = 'cancellation_confirming'`,
           [transition.activationId, new Date(this.now().getTime() + CANCELLATION_RETRY_DELAY_MS)],
         );
+        await this.releaseCancellationLease(transition.activationId, transition.claimToken);
         return { state: 'too-early' };
       }
       if (cancellation === 'sms-delivered') {
+        // 短信已送达：释放转态租约，让立即对账马上接管交付收尾，不等待租约到期。
+        await this.releaseCancellationLease(transition.activationId, transition.claimToken);
         await this.reconcileCancellationConfirmations();
         return { state: 'confirming' };
       }
@@ -1404,7 +1438,8 @@ export class ActivationAuthorizations {
       if (confirmed.replacementAllowed) return this.acquireReplacementNumber(confirmed.authorizationId);
       return confirmed.ended ? { state: 'ended' } : { state: 'confirming' };
     } catch {
-      // 请求结果不明确时必须保留取消确认状态，等待供应商状态对账。
+      // 请求结果不明确时必须保留取消确认状态：释放转态租约，由对账按实际到期时间接管。
+      await this.releaseCancellationLease(transition.activationId, transition.claimToken);
       return { state: 'confirming' };
     }
   }
@@ -1509,8 +1544,12 @@ export class ActivationAuthorizations {
 
   async cancelRevokedActivations(): Promise<void> {
     for (;;) {
+      const now = this.now();
+      const claimToken = randomBytes(16).toString('base64url');
       const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
-        `UPDATE supplier_activations activation SET status = 'cancellation_confirming', replacement_pending = false, end_use_pending = false
+        // 转态时即写入对账租约：请求供应商期间其他执行者（并发对账、另一实例）不会抢 claim 同一激活。
+        `UPDATE supplier_activations activation SET status = 'cancellation_confirming', replacement_pending = false, end_use_pending = false,
+                cancellation_reconciliation_claimed_at = $2, cancellation_reconciliation_claim_token = $3
          WHERE activation.id = (
            SELECT activation.id FROM supplier_activations activation
            JOIN activation_authorizations auth ON auth.id = activation.authorization_id
@@ -1519,11 +1558,11 @@ export class ActivationAuthorizations {
              AND (auth.status <> 'in_progress' OR auth.number_acquisition_expires_at > $1 OR auth.ended_reason = 'admin_revoked')
            ORDER BY activation.cancel_available_at LIMIT 1 FOR UPDATE SKIP LOCKED
          ) RETURNING activation.provider_activation_id`,
-        [this.now()],
+        [now, now, claimToken],
       );
       const activation = claimed.rows[0];
       if (!activation) return;
-      await this.cancelRevokedActivation(activation.provider_activation_id);
+      await this.cancelRevokedActivation(activation.provider_activation_id, claimToken);
     }
   }
 
@@ -1593,17 +1632,20 @@ export class ActivationAuthorizations {
   async cancelAcquisitionsConfirmedAfterAuthorizationExpiry(): Promise<void> {
     for (;;) {
       const now = this.now();
+      const claimToken = randomBytes(16).toString('base64url');
       const claimed = await this.database.pool.query<{ provider_activation_id: string }>(
         // 到期取消标记是授权到期来源标记，跨取消确认状态保留：
         // 对账返回 too-early 回退等待短信后仍被对账调度器按重试期限覆盖，不会滞留。
-        `UPDATE supplier_activations SET status = 'cancellation_confirming'
+        // 转态时即写入对账租约，请求供应商期间并发对账不会抢 claim 同一激活。
+        `UPDATE supplier_activations SET status = 'cancellation_confirming',
+                cancellation_reconciliation_claimed_at = $2, cancellation_reconciliation_claim_token = $3
          WHERE id = (
            SELECT id FROM supplier_activations
            WHERE status = 'waiting_sms' AND authorization_expiry_cancellation_pending AND cancel_available_at <= $1
              AND (cancellation_retry_after IS NULL OR cancellation_retry_after <= $1)
            ORDER BY cancel_available_at LIMIT 1 FOR UPDATE SKIP LOCKED
          ) RETURNING provider_activation_id`,
-        [now],
+        [now, now, claimToken],
       );
       const activation = claimed.rows[0];
       if (!activation) return;
@@ -1623,8 +1665,12 @@ export class ActivationAuthorizations {
             [activation.provider_activation_id, new Date(now.getTime() + CANCELLATION_RETRY_DELAY_MS)],
           );
         }
-        // 短信冲突和不明确结果均保留取消确认状态，交由供应商状态对账。
-      } catch { /* 持久状态已记录，后续任务继续供应商对账。 */ }
+        // 短信冲突和不明确结果均保留取消确认状态：释放转态租约，交由对账按实际到期时间接管。
+        await this.releaseCancellationLease(activation.provider_activation_id, claimToken);
+      } catch {
+        // 请求结果不明确：释放转态租约，由对账按实际到期时间接管（claim 时重新持久化重试期限）。
+        await this.releaseCancellationLease(activation.provider_activation_id, claimToken);
+      }
     }
   }
 

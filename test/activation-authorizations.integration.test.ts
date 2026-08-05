@@ -178,6 +178,16 @@ async function waitFor(condition: () => boolean, timeoutMs: number, intervalMs =
   }
 }
 
+/** 等待条件成立或预算耗尽，均不抛错；用于断言“修复前会发生、修复后不应发生”的竞态窗口。 */
+async function waitOrTimeout(condition: () => boolean, timeoutMs: number, intervalMs = 20): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return true;
+}
+
 if (!databaseUrl) {
   test('激活授权集成测试需要 TEST_DATABASE_URL', () => {
     throw new Error('未设置 TEST_DATABASE_URL；请通过 npm test 运行完整测试');
@@ -6259,6 +6269,224 @@ if (!databaseUrl) {
 
       assert.ok(statusCalls.includes(activationId1), '最早到期的任务没有丢失');
     } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('授权到期取消任务请求供应商期间，并发对账不得 claim 同一激活', async () => {
+    let now = new Date('2026-08-31T15:00:00.000Z');
+    const activationId = `expiry-vs-reconcile-${randomUUID()}`;
+    let cancelCalls = 0;
+    let statusCalls = 0;
+    let releaseCancel: (() => void) | undefined;
+    let releaseStatus: (() => void) | undefined;
+    const cancelGate = new Promise<void>((resolve) => { releaseCancel = resolve; });
+    const statusGate = new Promise<void>((resolve) => { releaseStatus = resolve; });
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        await cancelGate;
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async () => {
+        statusCalls += 1;
+        await statusGate;
+        return { delivered: false };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database, activationAuthorizations } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      // 授权跨截止确认产生到期取消任务：等待短信 + 到期标记 + 已允许取消
+      await database.pool.query(
+        `UPDATE supplier_activations SET authorization_expiry_cancellation_pending = true, cancel_available_at = $2,
+           cancellation_retry_after = NULL,
+           cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL
+         WHERE provider_activation_id = $1`,
+        [activationId, now],
+      );
+      const expiryTask = activationAuthorizations.cancelAcquisitionsConfirmedAfterAuthorizationExpiry();
+      await waitFor(() => cancelCalls === 1, 2_000);
+      // 到期取消任务正挂起在供应商取消请求上，并发对账同时启动
+      const reconcileTask = activationAuthorizations.reconcileCancellationConfirmations();
+      const raced = await waitOrTimeout(() => statusCalls === 1, 300);
+      releaseStatus?.();
+      releaseCancel?.();
+      await Promise.all([expiryTask, reconcileTask]);
+      assert.equal(cancelCalls, 1, '到期取消任务只调用一次供应商取消');
+      assert.equal(raced, false, '并发对账不得在到期取消任务请求供应商期间 claim 同一激活');
+    } finally {
+      releaseCancel?.();
+      releaseStatus?.();
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('管理员撤销请求供应商期间，并发对账不得 claim 同一激活', async () => {
+    let now = new Date('2026-08-31T16:00:00.000Z');
+    const activationId = `revoke-vs-reconcile-${randomUUID()}`;
+    let cancelCalls = 0;
+    let statusCalls = 0;
+    let releaseCancel: (() => void) | undefined;
+    const cancelGate = new Promise<void>((resolve) => { releaseCancel = resolve; });
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        await cancelGate;
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async () => {
+        statusCalls += 1;
+        return { delivered: false };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database, activationAuthorizations } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const id = authorizationIdFromHome(home.body, token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      // 推进到允许取消时间后撤销：转态取消确认中并同步请求供应商取消
+      now = new Date('2026-08-31T16:02:05.000Z');
+      const revokeTask = activationAuthorizations.revoke(id);
+      await waitFor(() => cancelCalls === 1, 2_000);
+      const reconcileTask = activationAuthorizations.reconcileCancellationConfirmations();
+      const raced = await waitOrTimeout(() => statusCalls === 1, 300);
+      releaseCancel?.();
+      await Promise.all([revokeTask, reconcileTask]);
+      assert.equal(cancelCalls, 1, '撤销只调用一次供应商取消');
+      assert.equal(raced, false, '并发对账不得在撤销请求供应商期间 claim 同一激活');
+    } finally {
+      releaseCancel?.();
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('撤销取消后台任务请求供应商期间，并发对账不得 claim 同一激活', async () => {
+    let now = new Date('2026-08-31T17:00:00.000Z');
+    const activationId = `revoke-task-vs-reconcile-${randomUUID()}`;
+    let cancelCalls = 0;
+    let statusCalls = 0;
+    let releaseCancel: (() => void) | undefined;
+    const cancelGate = new Promise<void>((resolve) => { releaseCancel = resolve; });
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        await cancelGate;
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async () => {
+        statusCalls += 1;
+        return { delivered: false };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database, activationAuthorizations } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      // 撤销取消后台任务的待处理记录：等待短信 + 撤销标记 + 已允许取消
+      await database.pool.query(
+        `UPDATE supplier_activations SET authorization_revocation_cancellation_pending = true, cancel_available_at = $2,
+           cancellation_retry_after = NULL,
+           cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL
+         WHERE provider_activation_id = $1`,
+        [activationId, now],
+      );
+      const revocationTask = activationAuthorizations.cancelRevokedActivations();
+      await waitFor(() => cancelCalls === 1, 2_000);
+      const reconcileTask = activationAuthorizations.reconcileCancellationConfirmations();
+      const raced = await waitOrTimeout(() => statusCalls === 1, 300);
+      releaseCancel?.();
+      await Promise.all([revocationTask, reconcileTask]);
+      assert.equal(cancelCalls, 1, '撤销取消任务只调用一次供应商取消');
+      assert.equal(raced, false, '并发对账不得在撤销取消任务请求供应商期间 claim 同一激活');
+    } finally {
+      releaseCancel?.();
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('换号请求供应商期间，并发对账不得 claim 同一激活', async () => {
+    let now = new Date('2026-08-31T18:00:00.000Z');
+    const activationId = `replacement-vs-reconcile-${randomUUID()}`;
+    let cancelCalls = 0;
+    let statusCalls = 0;
+    let releaseCancel: (() => void) | undefined;
+    const cancelGate = new Promise<void>((resolve) => { releaseCancel = resolve; });
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        await cancelGate;
+        throw new HeroSmsResponseError('uncertain');
+      },
+      activationStatus: async () => {
+        statusCalls += 1;
+        return { delivered: false };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database, activationAuthorizations } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+      now = new Date('2026-08-31T18:02:05.000Z');
+      // 换号路由同步请求供应商取消：请求挂起期间并发对账同时启动。
+      // 释放租约后路由唤醒的调度会合法地重发取消（既有对账语义），不计入竞态窗口。
+      const replacementTask = app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      await waitFor(() => cancelCalls === 1, 2_000);
+      const reconcileTask = activationAuthorizations.reconcileCancellationConfirmations();
+      const raced = await waitOrTimeout(() => statusCalls === 1 || cancelCalls === 2, 300);
+      releaseCancel?.();
+      await Promise.all([replacementTask, reconcileTask]);
+      assert.equal(raced, false, '并发对账不得在换号请求供应商期间 claim 同一激活');
+      assert.ok(cancelCalls >= 1, '换号至少调用一次供应商取消');
+    } finally {
+      releaseCancel?.();
       await resetAuthorizationTables(database).catch(() => undefined);
       await app.close().catch(() => undefined);
     }
