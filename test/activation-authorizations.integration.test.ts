@@ -353,12 +353,14 @@ if (!databaseUrl) {
       assert.equal(preview.statusCode, 200);
       assert.match(preview.body, /<h1>OpenAI<\/h1>/);
       assert.match(preview.body, /获取号码/);
-      assert.doesNotMatch(preview.body, /链接剩余时间|候选地区|价格|库存|HeroSMS|供应商|期限|授权/);
+      assert.match(preview.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
+      assert.doesNotMatch(preview.body.replace('实际能否获取取决于供应商库存', ''), /链接剩余时间|候选地区|价格|库存|HeroSMS|供应商|期限|授权/);
 
       const claim = await app.inject({ method: 'POST', url: `/a/${token}` + '/numbers', headers: { cookie: 'recipient_session=stale-client-value' } });
       assert.equal(claim.statusCode, 503);
       assert.match(claim.body, /暂时无法获取号码，请联系发送者/);
       assert.match(claim.body, /获取号码后，请在 24 小时内使用/);
+      assert.match(claim.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
       assert.doesNotMatch(claim.body, /链接剩余时间/);
       assert.doesNotMatch(claim.body, /授权/);
       const recipientCookie = cookieValue(claim, 'recipient_session');
@@ -722,7 +724,7 @@ if (!databaseUrl) {
 
       assert.deepEqual(acquiredCountries, [1, 1, 1]);
       const recipientPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(recipientPage.body, /剩余可用号码次数：0/);
+      assert.match(recipientPage.body, /剩余号码获取额度：0/);
       assert.doesNotMatch(recipientPage.body, /更换号码/);
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
@@ -793,7 +795,8 @@ if (!databaseUrl) {
       const initial = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(initial.body, /OpenAI/);
       assert.match(initial.body, /获取号码/);
-      assert.doesNotMatch(initial.body, /美国|英国|法国|HeroSMS|价格|库存/);
+      assert.match(initial.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
+      assert.doesNotMatch(initial.body, /美国|英国|法国|HeroSMS|价格/);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(claimed.statusCode, 303);
       assert.deepEqual(attemptedCountries, [1, 2], '应按候选位置顺序尝试，不能按实时价格排序');
@@ -804,9 +807,9 @@ if (!databaseUrl) {
       assert.match(numberPage.body, /英国 <span class="calling-code">\(\+44\)<\/span>/);
       assert.match(numberPage.body, /20 7946 0123/);
       assert.match(numberPage.body, /data-copy-value="2079460123"/);
-      assert.match(numberPage.body, /号码有效至|可换号时间|剩余可用号码次数：2/);
+      assert.match(numberPage.body, /号码有效至|可换号时间|剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
       assert.doesNotMatch(numberPage.body, /获取号码后，请在 24 小时内使用|链接剩余时间/);
-      assert.doesNotMatch(numberPage.body, new RegExp(`${activationId}|HeroSMS|价格|库存`));
+      assert.doesNotMatch(numberPage.body, new RegExp(`${activationId}|HeroSMS|价格`));
 
       const lostCookie = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(lostCookie.body, /此链接已被领取，当前浏览器无法访问，请联系发送者/);
@@ -922,7 +925,7 @@ if (!databaseUrl) {
       });
       assert.equal(confirming.statusCode, 202);
       assert.match(confirming.body, /正在确认号码获取结果，请稍候/);
-      assert.doesNotMatch(confirming.body, /获取号码后，请在 24 小时内使用|链接剩余时间/);
+      assert.doesNotMatch(confirming.body, /<section class="section-action"|剩余号码获取额度|获取号码后，请在 24 小时内使用|链接剩余时间/);
       assert.equal(getNumberCalls, 2);
 
       const retry = await opened.app.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
@@ -1056,7 +1059,13 @@ if (!databaseUrl) {
       assert.equal(response.statusCode, 409);
       assert.match(response.body, /当前暂无可用号码，请稍后重试/);
       assert.match(response.body, /获取号码/);
+      assert.match(response.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
       assert.doesNotMatch(response.body, /请联系发送者/);
+      const refreshed = await app.inject({
+        method: 'GET', url: `/a/${token}`,
+        headers: { cookie: `recipient_session=${cookieValue(response, 'recipient_session')}` },
+      });
+      assert.match(refreshed.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
       assert.deepEqual(attemptedCountries, []);
       const candidates = await database.pool.query<{ used_at: Date | null }>(
         `SELECT candidate.used_at FROM authorization_candidate_countries candidate
@@ -1189,7 +1198,10 @@ if (!databaseUrl) {
         const failed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
         assert.equal(failed.statusCode, 503);
         assert.match(failed.body, /暂时无法获取号码，请联系发送者/);
+        assert.match(failed.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
         const recipientCookie = `recipient_session=${cookieValue(failed, 'recipient_session')}`;
+        const refreshed = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+        assert.match(refreshed.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
         const unused = await database.pool.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM authorization_candidate_countries
            WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
@@ -1261,7 +1273,7 @@ if (!databaseUrl) {
       assert.equal(uncertain.statusCode, 202);
       assert.match(uncertain.body, /号码状态待发送者处理/);
       assert.match(uncertain.body, /获取号码后，请在 24 小时内使用/);
-      assert.doesNotMatch(uncertain.body, /链接剩余时间/);
+      assert.doesNotMatch(uncertain.body, /<section class="section-action"|剩余号码获取额度|链接剩余时间/);
       const firstCookie = `recipient_session=${cookieValue(uncertain, 'recipient_session')}`;
 
       const paused = await app.inject({ method: 'POST', url: `/a/${secondToken}/numbers` });
@@ -1482,9 +1494,7 @@ if (!databaseUrl) {
       assert.equal(page.statusCode, 200);
       assert.match(page.body, /美国 <span class="calling-code">\(\+1\)<\/span>|415 555 0123|复制号码/);
       assert.match(page.body, /使用说明|482913|复制验证码|验证码可查看至/);
-      assert.match(page.body, /剩余可用号码次数/);
-      assert.match(page.body, /已收到验证码/);
-      assert.doesNotMatch(page.body, /更换号码|结束使用|可换号时间|可结束时间|正在监听短信验证码/);
+      assert.doesNotMatch(page.body, /剩余号码获取额度|已收到验证码|更换号码|结束使用|可换号时间|可结束时间|正在监听短信验证码/);
       const state = await database.pool.query<{ authorization_status: string; result_view_until: Date | null; phone_number: string | null; sms_code: string | null }>(
         `SELECT auth.status AS authorization_status, auth.result_view_until, activation.phone_number, activation.sms_code
          FROM activation_authorizations auth
@@ -1754,8 +1764,7 @@ if (!databaseUrl) {
         const recipient = await recovered.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
         assert.match(recipient.body, /短信已收到，暂时无法显示验证码，请联系发送者/);
         assert.match(recipient.body, /验证码可查看至：/);
-        assert.match(recipient.body, /剩余可用号码次数：2/);
-        assert.match(recipient.body, /<button[^>]*disabled[^>]*>已收到验证码<\/button>/);
+        assert.doesNotMatch(recipient.body, /剩余号码获取额度|已收到验证码/);
         assert.match(recipient.body, /location\.reload/);
         assert.doesNotMatch(recipient.body, /OpenAI unusual delivery body/);
 
@@ -1818,8 +1827,7 @@ if (!databaseUrl) {
       assert.match(page.body, /短信已收到，暂时无法显示验证码，请联系发送者/);
       assert.match(page.body, /415 555 0123|复制号码/);
       assert.match(page.body, /验证码可查看至：/);
-      assert.match(page.body, /剩余可用号码次数：2/);
-      assert.match(page.body, /<button[^>]*disabled[^>]*>已收到验证码<\/button>/);
+      assert.doesNotMatch(page.body, /剩余号码获取额度|已收到验证码/);
       assert.doesNotMatch(page.body, /可换号时间/);
     } finally { await recovered.app.close(); }
 
@@ -1944,7 +1952,7 @@ if (!databaseUrl) {
 
       const replacement = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(replacement.body, /20 7946 0123/);
-      assert.match(replacement.body, /剩余可用号码次数：1/);
+      assert.match(replacement.body, /剩余号码获取额度：1 · 实际能否获取取决于供应商库存/);
       const oldData = await database.pool.query<{ status: string; phone_number: string | null; sms_code: string | null; sms_text: string | null }>(
         'SELECT status, phone_number, sms_code, sms_text FROM supplier_activations WHERE provider_activation_id = $1', [cancelledActivationId],
       );
@@ -2121,7 +2129,8 @@ if (!databaseUrl) {
 
       const raced = await replacement;
       assert.equal(raced.statusCode, 202);
-      assert.match(raced.body, /验证码|482913|已收到验证码/);
+      assert.match(raced.body, /验证码|482913/);
+      assert.doesNotMatch(raced.body, /剩余号码获取额度|已收到验证码/);
       assert.equal(getNumberCalls, 1, '短信送达后不得创建后继号码');
       const state = await database.pool.query<{ authorization_status: string; activation_count: string; sms_code: string | null }>(
         `SELECT auth.status AS authorization_status, count(*) OVER ()::text AS activation_count, activation.sms_code
@@ -2225,7 +2234,7 @@ if (!databaseUrl) {
       const ending = await opened.app.inject({ method: 'POST', url: `/a/${token}/replacement/confirm`, headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'replacement=confirm' });
       assert.equal(ending.statusCode, 202);
       assert.match(ending.body, /正在结束使用/);
-      assert.doesNotMatch(ending.body, /可用号码次数已用尽|获取下一个号码/);
+      assert.doesNotMatch(ending.body, /<section class="section-action"|剩余号码获取额度|可用号码次数已用尽|获取下一个号码/);
       assert.equal(getNumberCalls, 3, '取消结果不明确前不得显示终局或获取第四个号码');
     } finally { await opened.app.close(); }
 
@@ -2238,6 +2247,7 @@ if (!databaseUrl) {
       const page = await restarted.app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.equal(page.statusCode, 200);
       assert.match(page.body, /可用号码次数已用尽，请联系发送者/);
+      assert.doesNotMatch(page.body, /<section class="section-action"|剩余号码获取额度/);
       assert.equal(getNumberCalls, 3, '重启确认取消后仍不得获取第四个号码');
     } finally { await restarted.app.close(); }
   });
@@ -2269,6 +2279,7 @@ if (!databaseUrl) {
       const replacing = await opened.app.inject({ method: 'POST', url: `/a/${token}/replacement/confirm`, headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: 'replacement=confirm' });
       assert.equal(replacing.statusCode, 202);
       assert.match(replacing.body, /正在更换号码/);
+      assert.doesNotMatch(replacing.body, /<section class="section-action"|剩余号码获取额度/);
       assert.equal(getNumberCalls, 1, '取消结果不明确前不得获取后继号码');
     } finally { await opened.app.close(); }
 
@@ -2388,7 +2399,7 @@ if (!databaseUrl) {
       assert.equal(getNumberCalls, 1, '激活超时不得在接收者离开页面后自动获取后继号码');
       const page = await timedOut.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /号码已过期/);
-      assert.match(page.body, /剩余可用号码次数：2/);
+      assert.match(page.body, /剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
       assert.match(page.body, /获取下一个号码/);
       assert.doesNotMatch(page.body, /415 555 0123/);
       const next = await timedOut.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
@@ -2592,7 +2603,7 @@ if (!databaseUrl) {
     try {
       const page = await restarted.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
       assert.match(page.body, /正在确认号码状态/);
-      assert.doesNotMatch(page.body, /获取下一个号码|获取号码/);
+      assert.doesNotMatch(page.body, /<section class="section-action"|剩余号码获取额度|获取下一个号码|获取号码/);
 
       const session = await login(restarted);
       const home = await restarted.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
@@ -4231,14 +4242,14 @@ if (!databaseUrl) {
       assert.match(pageStateA.body, /💡 使用说明/);
       assert.match(pageStateA.body, /aria-label="验证码"/);
       assert.match(pageStateA.body, /正在监听短信验证码.../);
-      assert.match(pageStateA.body, /剩余可用号码次数：2/);
+      assert.match(pageStateA.body, /剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
       assert.match(pageStateA.body, /后可换号/);
       assert.match(pageStateA.body, /<button[^>]*disabled[^>]*>更换号码<\/button>/);
 
       // 2. 达到允许取消时间，处于前两个号码可操作状态（状态 B：可以换号）
       now = new Date('2026-08-04T14:32:00.000Z');
       const pageStateB = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(pageStateB.body, /剩余可用号码次数：2/);
+      assert.match(pageStateB.body, /剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
       assert.match(pageStateB.body, /长时间未收到验证码，可点击更换号码/);
       assert.match(pageStateB.body, /<form[^>]*action="\/a\/[^\/]+\/replacement"/);
       assert.match(pageStateB.body, /<button[^>]*type="submit"[^>]*>更换号码<\/button>/);
@@ -4251,14 +4262,16 @@ if (!databaseUrl) {
       // 3. 第三个号码等待状态（状态 C：等待结束使用）
       now = new Date('2026-08-04T14:34:00.000Z');
       const pageStateC = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(pageStateC.body, /剩余可用号码次数：0/);
+      assert.match(pageStateC.body, /剩余号码获取额度：0/);
+      assert.doesNotMatch(pageStateC.body, /供应商库存/);
       assert.match(pageStateC.body, /再等/);
       assert.match(pageStateC.body, /<button[^>]*disabled[^>]*>结束使用<\/button>/);
 
       // 4. 第三个号码可操作状态（状态 D：可以结束使用）
       now = new Date('2026-08-04T14:36:00.000Z');
       const pageStateD = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
-      assert.match(pageStateD.body, /剩余可用号码次数：0/);
+      assert.match(pageStateD.body, /剩余号码获取额度：0/);
+      assert.doesNotMatch(pageStateD.body, /供应商库存/);
       assert.match(pageStateD.body, /仍长时间未收到验证码，可点击结束使用并联系管理员/);
       assert.match(pageStateD.body, /<button[^>]*type="submit"[^>]*>结束使用<\/button>/);
 
@@ -4275,13 +4288,12 @@ if (!databaseUrl) {
       assert.match(pageResultAvailable.body, /aria-label="当前号码"/);
       assert.match(pageResultAvailable.body, /142 278 186/);
       assert.match(pageResultAvailable.body, /法国 <span class="calling-code">\(\+33\)<\/span>/);
-      assert.match(pageResultAvailable.body, /号码有效至：还剩/);
+      assert.doesNotMatch(pageResultAvailable.body, /<p class="number-expiry"|号码有效至|<div class="steps-guide"|💡 使用说明/);
       assert.match(pageResultAvailable.body, /aria-label="验证码"/);
       assert.match(pageResultAvailable.body, /987654/);
       assert.match(pageResultAvailable.body, /复制验证码/);
       assert.match(pageResultAvailable.body, /验证码可查看至：/);
-      assert.match(pageResultAvailable.body, /剩余可用号码次数：0/);
-      assert.match(pageResultAvailable.body, /<button[^>]*disabled[^>]*>已收到验证码<\/button>/);
+      assert.doesNotMatch(pageResultAvailable.body, /<section class="section-action"|剩余号码获取额度|已收到验证码/);
 
       // 6. 后端拒绝短信送达后的换号或结束使用提交
       const forbiddenAction = await app.inject({ method: 'POST', url: `/a/${token}/replacement`, headers: { cookie: recipientCookie } });

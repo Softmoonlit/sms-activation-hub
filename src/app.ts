@@ -390,8 +390,12 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   const firstFlowHint = !view.hasAcquiredNumber ? '<p>获取号码后，请在 24 小时内使用</p>' : '';
   const countdownScript = COUNTDOWN_SCRIPT;
   const acquisitionForm = (label = '获取号码') => `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">${label}</button></form>`;
+  const quotaMarkup = (remainingNumberCount?: number) => {
+    if (remainingNumberCount === undefined) throw new Error('可操作的接收者页面缺少剩余号码获取额度');
+    return `<p class="quota-info">剩余号码获取额度：${remainingNumberCount}${remainingNumberCount > 0 ? ' · 实际能否获取取决于供应商库存' : ''}</p>`;
+  };
   if (view.state === 'available') {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${firstFlowHint}${errorMarkup}${acquisitionForm()}</section></main>`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${firstFlowHint}${errorMarkup}${quotaMarkup(view.remainingNumberCount)}${acquisitionForm()}</section></main>`);
   }
   if (view.state === 'claimed' && view.quotaExhaustedPromptUntil) {
     const promptUntil = view.quotaExhaustedPromptUntil.toISOString();
@@ -417,13 +421,15 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
         : `<p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
       : '';
     const numberExpiryIso = view.numberExpiresAt?.toISOString();
-    const numberExpiryMarkup = numberExpiryIso
+    const numberExpiryMarkup = !view.smsDelivered && numberExpiryIso
       ? `<p class="number-expiry">号码有效至：还剩 <span data-countdown="${escapeHtml(numberExpiryIso)}" data-format="clock" data-expired-text="00:00（号码已过期）">${escapeHtml(numberExpiryIso)}</span></p>`
       : '';
 
     const currentNumberSection = `<section class="section-current-number" aria-label="当前号码">${countryMarkup}${numberMarkup}${numberExpiryMarkup}</section>`;
 
-    const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码，填到验证界面并确认；系统将自动接收并显示验证码。</p></div>`;
+    const guideMarkup = view.smsDelivered
+      ? ''
+      : `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码并填入，同时切换对应国家代码，点击短信（从Whatsapp切换到短信），最后点击并确认；系统将自动接收并显示验证码。</p></div>`;
 
     let verificationMarkup = '';
     if (view.smsDelivered) {
@@ -443,9 +449,7 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     let actionPrompt = '';
     let actionButton = '';
 
-    if (view.smsDelivered) {
-      actionButton = '<button type="button" disabled>已收到验证码</button>';
-    } else {
+    if (!view.smsDelivered) {
       const currentNumberAction = view.currentNumberAction;
       const cancelAvailableIso = view.cancelAvailableAt?.toISOString();
       if (currentNumberAction === 'replace') {
@@ -467,7 +471,9 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
       }
     }
 
-    const actionSection = `<section class="section-action"><p class="quota-info">剩余可用号码次数：${view.remainingNumberCount}</p>${actionPrompt}${actionButton}</section>`;
+    const actionSection = view.smsDelivered
+      ? ''
+      : `<section class="section-action">${quotaMarkup(view.remainingNumberCount)}${actionPrompt}${actionButton}</section>`;
 
     const refreshDelay = view.resultViewRemainingMs;
     const refreshScript = view.smsDelivered && refreshDelay !== undefined
@@ -486,8 +492,8 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   const terminalMessage = view.remainingNumberCount === 0
     ? '<p>可用号码次数已用尽，请联系发送者</p>'
     : view.nextNumberAvailable
-      ? `<p>号码已过期</p><p>剩余可用号码次数：${view.remainingNumberCount}</p>` + acquisitionForm('获取下一个号码')
-      : `${firstFlowHint}${acquisitionForm()}`;
+      ? `<p>号码已过期</p>${quotaMarkup(view.remainingNumberCount)}` + acquisitionForm('获取下一个号码')
+      : `${firstFlowHint}${quotaMarkup(view.remainingNumberCount)}${acquisitionForm()}`;
   return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}${terminalMessage}</section></main>`);
 }
 

@@ -434,20 +434,17 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
     await page.reload();
     await expect(page.getByText('654321', { exact: true })).toBeVisible();
     await expect(page.getByText(/^验证码可查看至：05:00$/)).toBeVisible();
-    await expect(page.getByRole('button', { name: '已收到验证码' })).toBeDisabled();
+    await expect(page.locator('.section-action')).toHaveCount(0);
+    await expect(page.getByText(/剩余号码获取额度/)).toHaveCount(0);
+    await expect(page.locator('.steps-guide')).toHaveCount(0);
+    await expect(page.locator('.number-expiry')).toHaveCount(0);
     const resultOrder = await Promise.all([
       page.locator('.section-current-number').boundingBox(),
-      page.getByText('💡 使用说明', { exact: true }).boundingBox(),
       page.locator('.section-verification-result').boundingBox(),
-      page.getByText('剩余可用号码次数：2', { exact: true }).boundingBox(),
-      page.getByRole('button', { name: '已收到验证码' }).boundingBox(),
     ]);
     assert.ok(resultOrder.every((box) => box !== null));
-    const [numberHeading, guideHeading, resultHeading, quota, resultButton] = resultOrder;
-    assert.ok(numberHeading!.y + numberHeading!.height <= guideHeading!.y);
-    assert.ok(guideHeading!.y + guideHeading!.height <= resultHeading!.y);
-    assert.ok(resultHeading!.y + resultHeading!.height <= quota!.y);
-    assert.ok(quota!.y + quota!.height <= resultButton!.y, '结果页额度文案不得与禁用按钮重叠');
+    const [numberHeading, resultHeading] = resultOrder;
+    assert.ok(numberHeading!.y + numberHeading!.height <= resultHeading!.y);
     await assertNoOverflow(page, '验证码显示状态');
 
     await context.close();
@@ -543,6 +540,7 @@ test('浏览器网络和应用日志不包含 token、Cookie、号码、验证�
 // ---- 辅助断言函数 ----
 
 function assertNoSensitiveAdminInfo(html: string, context: string): void {
+  const checkedHtml = html.replaceAll('实际能否获取取决于供应商库存', '');
   const forbidden = [
     { pattern: /HeroSMS/i, label: 'HeroSMS 字样' },
     { pattern: /库存/u, label: '库存信息' },
@@ -553,7 +551,7 @@ function assertNoSensitiveAdminInfo(html: string, context: string): void {
     { pattern: /供应商/u, label: '供应商字样' },
   ];
   for (const { pattern, label } of forbidden) {
-    assert.ok(!pattern.test(html), `${context} 不应包含「${label}」：匹配到 ${pattern}`);
+    assert.ok(!pattern.test(checkedHtml), `${context} 不应包含「${label}」：匹配到 ${pattern}`);
   }
 }
 

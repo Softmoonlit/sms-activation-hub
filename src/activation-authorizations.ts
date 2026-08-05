@@ -734,7 +734,13 @@ export class ActivationAuthorizations {
     }
     const expiresAt = optionalDate(authorizationAcquisitionDeadline(authorization));
     const hasAcquiredNumber = Number(authorization.used_count) > 0;
-    if (authorization.status === 'unclaimed') return { state: 'available', hasAcquiredNumber, ...(expiresAt ? { expiresAt } : {}) };
+    if (authorization.status === 'unclaimed') {
+      return {
+        state: 'available', hasAcquiredNumber,
+        remainingNumberCount: MAX_NUMBERS_PER_AUTHORIZATION,
+        ...(expiresAt ? { expiresAt } : {}),
+      };
+    }
     if (!sessionToken || !authorization.recipient_session_hash || tokenHash(sessionToken) !== authorization.recipient_session_hash) {
       return authorization.status === 'in_progress' || authorization.status === 'result_available'
         ? { state: 'browser-mismatch', hasAcquiredNumber, ...(expiresAt ? { expiresAt } : {}) }
