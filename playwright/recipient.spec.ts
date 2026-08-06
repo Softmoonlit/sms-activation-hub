@@ -20,6 +20,7 @@ const config: AppConfig = {
 let latestActivationId = '';
 let latestCountryId = 0;
 let acquisitionCount = 0;
+let cancelCount = 0;
 const phoneNumberByCountry: Record<number, string> = { 1: '+14155550123', 2: '+442079460123', 3: '+33142278186' };
 const heroSms: HeroSms = {
   balance: async () => 10,
@@ -38,12 +39,16 @@ const heroSms: HeroSms = {
   activeActivations: async () => [],
   activationHistory: async () => [],
   activationStatus: async () => ({ delivered: false }),
-  cancelActivation: async () => 'cancelled',
+  cancelActivation: async () => {
+    cancelCount += 1;
+    return 'cancelled';
+  },
   finishActivation: async () => undefined,
 };
 
-test('移动视口完成领取、三次号码操作和结束使用确认', async ({ browser }) => {
+test('三个独立浏览器通过同一授权链接完成领取、换号和结束使用确认', async ({ browser }) => {
   acquisitionCount = 0;
+  cancelCount = 0;
   let now = new Date('2026-08-01T00:00:00.000Z');
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => now });
@@ -67,14 +72,35 @@ test('移动视口完成领取、三次号码操作和结束使用确认', async
     assert.equal(created.statusCode, 201);
     const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
-    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['clipboard-read', 'clipboard-write'] });
-    const page = await context.newPage();
+    // 浏览器 A：仅打开授权链接并看到获取号码操作，不触发领取或号码获取。
+    const openingContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const openingPage = await openingContext.newPage();
+    await openingPage.clock.setFixedTime(now);
+    await openingPage.goto(`${origin}/a/${token}`);
+    await expect(openingPage.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
+    await expect(openingPage.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
+    await expect(openingPage.getByRole('button', { name: '获取号码' })).toBeVisible();
+    await expect(openingPage.getByText(/剩余号码获取额度/)).toHaveCount(0);
+    await openingContext.close();
+
+    // 浏览器 B：使用同一授权链接领取并看到首个号码。
+    const claimingContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const claimingPage = await claimingContext.newPage();
+    await claimingPage.clock.setFixedTime(now);
+    await claimingPage.goto(`${origin}/a/${token}`);
+    await claimingPage.getByRole('button', { name: '获取号码' }).click();
+    await expect(claimingPage.getByText('415 555 0123', { exact: true })).toBeVisible();
+    await expect(claimingPage.getByText('(+1)', { exact: true })).toBeVisible();
+    await expect(claimingPage.getByText('剩余号码获取额度：2 · 实际能否获取取决于供应商库存')).toBeVisible();
+    await expect(claimingPage.getByText(/^02:00 后可换号$/)).toBeVisible();
+    await expect(claimingPage.getByRole('button', { name: '更换号码' })).toBeDisabled();
+    await claimingContext.close();
+
+    // 浏览器 C：独立上下文且不复制任何接收者 Cookie，通过同一授权链接查看浏览器 B 领取的当前号码并继续换号。
+    const continuingContext = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['clipboard-read', 'clipboard-write'] });
+    const page = await continuingContext.newPage();
     await page.clock.setFixedTime(now);
     await page.goto(`${origin}/a/${token}`);
-    await expect(page.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
-    await expect(page.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
-    await expect(page.getByText(/剩余号码获取额度/)).toHaveCount(0);
-    await page.getByRole('button', { name: '获取号码' }).click();
     await expect(page.getByText('415 555 0123', { exact: true })).toBeVisible();
     await expect(page.getByText('(+1)', { exact: true })).toBeVisible();
     await expect(page.locator('.section-current-number')).toBeVisible();
@@ -99,6 +125,7 @@ test('移动视口完成领取、三次号码操作和结束使用确认', async
     await page.getByRole('button', { name: '复制号码' }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('4155550123');
 
+    // 可控服务端时间和页面时间在领取后推进两分钟，使浏览器 C 能进入并确认换号流程。
     now = new Date('2026-08-01T00:02:00.000Z');
     await page.clock.setFixedTime(now);
     await page.reload();
@@ -112,6 +139,10 @@ test('移动视口完成领取、三次号码操作和结束使用确认', async
     await page.getByRole('button', { name: '确认更换号码' }).click();
     await expect(page.getByText('20 7946 0123', { exact: true })).toBeVisible();
     await expect(page.getByText('(+44)', { exact: true })).toBeVisible();
+    await expect(page.getByText('剩余号码获取额度：1 · 实际能否获取取决于供应商库存')).toBeVisible();
+    // 跨浏览器换号只取消一次当前号码；号码获取累计两次（浏览器 B 领取一次 + 浏览器 C 换号一次）。
+    assert.equal(cancelCount, 1);
+    assert.equal(acquisitionCount, 2);
     await page.getByRole('button', { name: '复制号码' }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('2079460123');
 
@@ -141,6 +172,7 @@ test('移动视口完成领取、三次号码操作和结束使用确认', async
     await expect(page.locator('.number')).toHaveCount(0);
     await expect(page.getByText('美国')).toHaveCount(0);
     assert.equal(acquisitionCount, 3);
+    assert.equal(cancelCount, 3);
 
     const otherContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const otherPage = await otherContext.newPage();
@@ -148,7 +180,7 @@ test('移动视口完成领取、三次号码操作和结束使用确认', async
     await expect(otherPage.getByText('可用号码次数已用尽，请联系发送者')).toBeVisible();
     await expect(otherPage.getByText('此链接不可用，请联系发送者')).toHaveCount(0);
     await otherContext.close();
-    await context.close();
+    await continuingContext.close();
   } finally {
     await app.close();
   }
