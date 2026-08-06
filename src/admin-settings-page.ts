@@ -25,7 +25,7 @@ export function candidateLocationSettingsContent(
 ): string {
   // 只把当前 HeroSMS 可查询数据嵌入页面；报价和库存不会写入默认配置。
   const locationsJson = jsonForScript(settings.locations.map((location) => {
-    const quote = location.price === undefined || location.stock === undefined ? '暂无报价' : `价格 ${location.price.toString()}，库存 ${location.stock}`;
+    const quote = location.defaultPrice === undefined || location.budgetStock === undefined ? '暂无报价' : `默认价 ${location.defaultPrice.toString()}，预算内可取 ${location.budgetStock}`;
     return [location.id, `${location.name}，${quote}`];
   }));
   const configuredByPosition = new Map(settings.configuredLocations.map((location) => [location.position, location]));
@@ -35,7 +35,7 @@ export function candidateLocationSettingsContent(
   const initialLabels = configuredPositions.map((configured) => {
     const selectedLocation = configured ? settings.locations.find((location) => location.id === configured.countryId) : undefined;
     return configured?.countryName
-      ? `${configured.countryName}${selectedLocation ? `，${selectedLocation.price === undefined || selectedLocation.stock === undefined ? '暂无报价' : `价格 ${selectedLocation.price.toString()}，库存 ${selectedLocation.stock}`}` : `，地区 ID ${configured.countryId}`}`
+      ? `${configured.countryName}${selectedLocation ? `，${selectedLocation.defaultPrice === undefined || selectedLocation.budgetStock === undefined ? '暂无报价' : `默认价 ${selectedLocation.defaultPrice.toString()}，预算内可取 ${selectedLocation.budgetStock}`}` : `，地区 ID ${configured.countryId}`}`
       : '';
   });
   const initialLabelsJson = jsonForScript(initialLabels);

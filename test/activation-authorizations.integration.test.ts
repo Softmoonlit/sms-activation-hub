@@ -8,7 +8,7 @@ import { createApp, type AppDependencies } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
 import { ActivationAuthorizations } from '../src/activation-authorizations.js';
-import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsNumber } from '../src/herosms.js';
+import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsNumber, type HeroSmsOffer } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const origin = 'https://test.example';
@@ -45,7 +45,11 @@ function scriptedHeroSms(overrides: Partial<{
       { countryId: 2, price: 1.2, stock: 2 },
       { countryId: 3, price: 1.5, stock: 1 },
     ]),
-    offers: overrides.offers ?? (async () => []),
+    offers: overrides.offers ?? (async (): Promise<HeroSmsOffer[]> => [
+      { serviceCode: 'openai', countryId: 1, defaultPrice: 0.8, totalStock: overrides.stock ?? 3, map: { '0.8': overrides.stock ?? 3 } },
+      { serviceCode: 'openai', countryId: 2, defaultPrice: 1.2, totalStock: 2, map: { '1.2': 2 } },
+      { serviceCode: 'openai', countryId: 3, defaultPrice: 1.5, totalStock: 1, map: { '1.5': 1 } },
+    ]),
     getNumber: overrides.getNumber ?? (async (_serviceCode, countryId): Promise<HeroSmsNumber> => ({
       activationId: `activation-${countryId}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
       activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),

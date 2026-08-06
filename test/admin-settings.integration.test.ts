@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { createApp } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
-import type { HeroSms } from '../src/herosms.js';
+import type { HeroSms, HeroSmsOffer } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const origin = 'https://test.example';
@@ -43,7 +43,14 @@ const heroSms: HeroSms = {
     { countryId: 3, price: 0.2, stock: 3 },
     { countryId: 4, price: 0.22, stock: 5 },
   ],
-  offers: async () => [],
+  // 价格分布为"价格上限 → 累计可获取数量"的稀疏档位：中国最低档 0.1234 超默认
+  // 每号最高价 0.11（预算内 0 但总库存 9）；美国 0.11 档累计 2、0.18 档累计 4。
+  offers: async (): Promise<HeroSmsOffer[]> => [
+    { serviceCode: 'openai', countryId: 1, defaultPrice: 0.1234, totalStock: 9, map: { '0.1234': 9 } },
+    { serviceCode: 'openai', countryId: 2, defaultPrice: 0.18, totalStock: 4, map: { '0.11': 2, '0.18': 4 } },
+    { serviceCode: 'openai', countryId: 3, defaultPrice: 0.2, totalStock: 3, map: { '0.2': 3 } },
+    { serviceCode: 'openai', countryId: 4, defaultPrice: 0.22, totalStock: 5, map: { '0.22': 5 } },
+  ],
   getNumber: async () => { throw new Error('设置测试不应获取号码'); },
   activeActivations: async () => [],
   activationHistory: async () => [],
@@ -246,8 +253,8 @@ if (!databaseUrl) {
       assert.match(settings.body, /HeroSMS 已连接/);
       assert.match(settings.body, /12\.50/);
       assert.match(settings.body, /中国/);
-      assert.match(settings.body, /库存 0/);
-      assert.match(settings.body, /价格 0\.1234/);
+      assert.match(settings.body, /中国，默认价 0\.1234，预算内可取 0/);
+      assert.match(settings.body, /美国，默认价 0\.18，预算内可取 2/);
       const locationsScriptStart = settings.body.indexOf('const LOCS=');
       const locationsScriptEnd = settings.body.indexOf(';const INIT=', locationsScriptStart);
       assert.ok(locationsScriptStart >= 0 && locationsScriptEnd > locationsScriptStart, '设置页应包含地区数据脚本');
@@ -281,6 +288,55 @@ if (!databaseUrl) {
         { position: 2, countryId: 2, countryName: '美国' },
         { position: 3, countryId: 3, countryName: '英国' },
       ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('候选地区列表显示默认价与预算内可取库存，有总库存但预算内为 0 的地区明确显示 0', async () => {
+    const { app } = await openApplication();
+    try {
+      const session = await login(app);
+      const settings = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
+      assert.equal(settings.statusCode, 200);
+      // 默认每号最高价 0.11：美国 0.11 档累计可取 2；中国总库存 9 但最低档 0.1234 超预算，明确显示 0；总库存不再作为显示口径。
+      assert.match(settings.body, /美国，默认价 0\.18，预算内可取 2/);
+      assert.match(settings.body, /中国，默认价 0\.1234，预算内可取 0/);
+      assert.match(settings.body, /英国，默认价 0\.2，预算内可取 0/);
+      assert.doesNotMatch(settings.body, /库存 \d/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('修改每号最高价后重新加载设置页，预算内可取库存与已配置标签按新上限变化', async () => {
+    const { app, database } = await openApplication();
+    try {
+      await database.saveCandidateSettings([
+        { countryId: 1, countryName: '中国' },
+        { countryId: 2, countryName: '美国' },
+        { countryId: 3, countryName: '英国' },
+      ], 0.11);
+      const session = await login(app);
+      const saved = await app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/settings`,
+        headers: { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin },
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.19&candidate1=1&candidate2=2&candidate3=3`,
+      });
+      assert.equal(saved.statusCode, 303);
+
+      const reloaded = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
+      assert.equal(reloaded.statusCode, 200);
+      // 每号最高价 0.19 下：中国 0.1234 档累计 9、美国 0.18 档累计 4；英国最低档 0.2 仍超预算显示 0。
+      assert.match(reloaded.body, /中国，默认价 0\.1234，预算内可取 9/);
+      assert.match(reloaded.body, /美国，默认价 0\.18，预算内可取 4/);
+      assert.match(reloaded.body, /英国，默认价 0\.2，预算内可取 0/);
+      // 已配置候选位置标签采用与列表相同的显示口径（隐藏域为 ID 1，搜索文本框显示带有最新预算内库存的标签）。
+      assert.match(reloaded.body, /name="candidate1" value="1"/);
+      assert.match(reloaded.body, /value="中国，默认价 0\.1234，预算内可取 9"/);
+      assert.match(reloaded.body, /name="candidate3" value="3"/);
+      assert.match(reloaded.body, /value="英国，默认价 0\.2，预算内可取 0"/);
     } finally {
       await app.close();
     }
@@ -402,6 +458,9 @@ if (!databaseUrl) {
       assert.match(settings.body, /name="candidate1" value="1"/);
       assert.match(settings.body, /name="candidate2" value="2"/);
       assert.match(settings.body, /name="candidate3" value="1"/);
+      // 报价数据不可用时只降级提示，不显示任何过期或误导性库存数字。
+      assert.doesNotMatch(settings.body, /预算内可取/);
+      assert.doesNotMatch(settings.body, /库存/);
 
       const rejected = await unavailable.app.inject({
         method: 'POST',

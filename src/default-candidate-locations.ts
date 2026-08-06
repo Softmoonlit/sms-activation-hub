@@ -1,12 +1,12 @@
 import { Database, type DefaultCandidateLocation } from './database.js';
 import { MAX_CANDIDATE_POSITION_COUNT, MIN_CANDIDATE_POSITION_COUNT } from './candidate-position.js';
-import type { HeroSms, HeroSmsCountry, HeroSmsQuote } from './herosms.js';
+import { budgetStockAtPrice, type HeroSms, type HeroSmsCountry, type HeroSmsOffer } from './herosms.js';
 
 export interface CandidateLocation {
   id: number;
   name: string;
-  price?: number;
-  stock?: number;
+  defaultPrice?: number;
+  budgetStock?: number;
 }
 
 export interface ConfiguredCandidateLocation {
@@ -50,17 +50,17 @@ function completeConfiguration(locations: DefaultCandidateLocation[]): boolean {
   ));
 }
 
-function queryableLocation(location: CandidateLocation | undefined): location is CandidateLocation & { price: number; stock: number } {
+function queryableLocation(location: CandidateLocation | undefined): location is CandidateLocation & { defaultPrice: number; budgetStock: number } {
   return Boolean(
     location
     && location.name.trim()
-    && location.price !== undefined
-    && Number.isFinite(location.price)
-    && location.price >= 0
-    && location.stock !== undefined
-    && Number.isFinite(location.stock)
-    && Number.isInteger(location.stock)
-    && location.stock >= 0,
+    && location.defaultPrice !== undefined
+    && Number.isFinite(location.defaultPrice)
+    && location.defaultPrice >= 0
+    && location.budgetStock !== undefined
+    && Number.isFinite(location.budgetStock)
+    && Number.isInteger(location.budgetStock)
+    && location.budgetStock >= 0,
   );
 }
 
@@ -83,7 +83,7 @@ export class DefaultCandidateLocations {
       maxPricePerNumber,
     };
     try {
-      const remote = await this.remoteSettings();
+      const remote = await this.remoteSettings(maxPricePerNumber);
       return { ...base, ...remote, heroSmsAvailable: true };
     } catch {
       return { ...base, heroSmsAvailable: false, locations: [] };
@@ -99,7 +99,7 @@ export class DefaultCandidateLocations {
     }
     let completeSelected: { countryId: number; countryName: string }[];
     try {
-      completeSelected = await this.completeSelectedLocations(countryIds);
+      completeSelected = await this.completeSelectedLocations(countryIds, maxPricePerNumber);
     } catch (error) {
       // 供应商报价接口不可用时仍允许保存每号最高价：提交的候选地区必须与库中
       // 已保存配置逐位一致，地区名称沿用库中值，不引入未经验证的新地区。
@@ -113,8 +113,8 @@ export class DefaultCandidateLocations {
     await this.database.saveCandidateSettings(completeSelected, maxPricePerNumber);
   }
 
-  private async completeSelectedLocations(countryIds: number[]): Promise<{ countryId: number; countryName: string }[]> {
-    const remote = await this.remoteSettings();
+  private async completeSelectedLocations(countryIds: number[], maxPricePerNumber: number): Promise<{ countryId: number; countryName: string }[]> {
+    const remote = await this.remoteSettings(maxPricePerNumber);
     const locationById = new Map(remote.locations.map((location) => [location.id, location]));
     const selected = countryIds.map((countryId) => locationById.get(countryId));
     return selected.map((location) => {
@@ -123,27 +123,37 @@ export class DefaultCandidateLocations {
     });
   }
 
-  private async remoteSettings(): Promise<RemoteCandidateLocationSettings> {
-    const [balance, services, countries, quotes] = await Promise.all([
+  private async remoteSettings(maxPricePerNumber: number): Promise<RemoteCandidateLocationSettings> {
+    const [balance, services, countries, offers] = await Promise.all([
       this.heroSms.balance(),
       this.heroSms.services(),
       this.heroSms.countries(),
-      this.heroSms.quotes(this.openAiServiceCode),
+      this.heroSms.offers(),
     ]);
     if (!services.some((service) => service.code === this.openAiServiceCode)) {
       throw new CandidateLocationValidationError();
     }
 
-    const locations = this.locationsWithQuotes(countries, quotes);
+    const locations = this.locationsWithOffers(countries, offers, maxPricePerNumber);
     return { balance, locations };
   }
 
-  private locationsWithQuotes(countries: HeroSmsCountry[], quotes: HeroSmsQuote[]): CandidateLocation[] {
-    const quotesByCountry = new Map(quotes.map((quote) => [quote.countryId, quote]));
+  private locationsWithOffers(
+    countries: HeroSmsCountry[],
+    offers: HeroSmsOffer[],
+    maxPricePerNumber: number,
+  ): CandidateLocation[] {
+    const offersByCountry = new Map(
+      offers
+        .filter((offer) => offer.serviceCode === this.openAiServiceCode)
+        .map((offer) => [offer.countryId, offer]),
+    );
     return countries
       .map((country) => {
-        const quote = quotesByCountry.get(country.id);
-        return quote ? { ...country, price: quote.price, stock: quote.stock } : country;
+        const offer = offersByCountry.get(country.id);
+        return offer
+          ? { ...country, defaultPrice: offer.defaultPrice, budgetStock: budgetStockAtPrice(offer.map, maxPricePerNumber) }
+          : country;
       })
       .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN') || a.id - b.id);
   }
