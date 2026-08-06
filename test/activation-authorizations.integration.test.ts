@@ -27,6 +27,7 @@ function scriptedHeroSms(overrides: Partial<{
   services: HeroSms['services'];
   countries: HeroSms['countries'];
   quotes: HeroSms['quotes'];
+  offers: HeroSms['offers'];
   getNumber: HeroSms['getNumber'];
   activeActivations: HeroSms['activeActivations'];
   activationHistory: HeroSms['activationHistory'];
@@ -44,6 +45,7 @@ function scriptedHeroSms(overrides: Partial<{
       { countryId: 2, price: 1.2, stock: 2 },
       { countryId: 3, price: 1.5, stock: 1 },
     ]),
+    offers: overrides.offers ?? (async () => []),
     getNumber: overrides.getNumber ?? (async (_serviceCode, countryId): Promise<HeroSmsNumber> => ({
       activationId: `activation-${countryId}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
       activationTime: new Date('2026-08-01T00:00:00.000Z'), activationEndTime: new Date('2026-08-01T00:20:00.000Z'),

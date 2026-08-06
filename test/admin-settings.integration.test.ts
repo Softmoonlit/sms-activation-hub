@@ -43,6 +43,7 @@ const heroSms: HeroSms = {
     { countryId: 3, price: 0.2, stock: 3 },
     { countryId: 4, price: 0.22, stock: 5 },
   ],
+  offers: async () => [],
   getNumber: async () => { throw new Error('设置测试不应获取号码'); },
   activeActivations: async () => [],
   activationHistory: async () => [],

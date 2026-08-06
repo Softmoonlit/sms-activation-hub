@@ -31,6 +31,14 @@ export interface HeroSmsQuote {
   stock: number;
 }
 
+export interface HeroSmsOffer {
+  serviceCode: string;
+  countryId: number;
+  defaultPrice: number;
+  totalStock: number;
+  map: Record<string, number>;
+}
+
 export interface HeroSmsNumber {
   activationId: string;
   phoneNumber?: string;
@@ -66,7 +74,8 @@ export interface HeroSms {
   services(): Promise<HeroSmsService[]>;
   countries(): Promise<HeroSmsCountry[]>;
   quotes(serviceCode: string): Promise<HeroSmsQuote[]>;
-  getNumber(serviceCode: string, countryId: number): Promise<HeroSmsNumber>;
+  offers(): Promise<HeroSmsOffer[]>;
+  getNumber(serviceCode: string, countryId: number, maxPrice?: number): Promise<HeroSmsNumber>;
   activeActivations(): Promise<HeroSmsActivationRecord[]>;
   activationHistory(start: Date, end: Date): Promise<HeroSmsActivationRecord[]>;
   activationStatus(activationId: string): Promise<HeroSmsActivationStatus>;
@@ -122,7 +131,7 @@ function errorKind(value: unknown): HeroSmsErrorKind | undefined {
   const code = errorCode(value);
   if (code === 'NO_NUMBERS') return 'no-numbers';
   if (code === 'NO_BALANCE') return 'balance';
-  if (code === 'NO_KEY' || code === 'BAD_KEY') return 'authentication';
+  if (code === 'NO_KEY' || code === 'BAD_KEY' || code === 'BAD_API_KEY') return 'authentication';
   if (code === 'ACCOUNT_INACTIVE' || code === 'CHANNELS_LIMIT') return 'account';
   if (code === 'RATE_LIMIT') return 'rate-limit';
   if (code === 'SERVER_ERROR' || code === 'ERROR_SQL') return 'provider';
@@ -144,6 +153,62 @@ function parseBody(text: string): unknown {
 
 function objectEntries(value: unknown): [string, unknown][] | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : undefined;
+}
+
+function offerRecords(value: unknown): { serviceCode?: unknown; countryId?: unknown; value: unknown }[] | undefined {
+  const entries = objectEntries(value);
+  const dataEntries = entries ? objectEntries(Object.fromEntries(entries).data) : undefined;
+  if (!dataEntries) return undefined;
+  const records: { serviceCode: string; countryId: string; value: unknown }[] = [];
+  for (const [serviceCode, countries] of dataEntries) {
+    const countryEntries = objectEntries(countries);
+    if (!countryEntries || !serviceCode.trim()) return undefined;
+    for (const [countryId, offer] of countryEntries) {
+      records.push({ serviceCode, countryId, value: offer });
+    }
+  }
+  return records;
+}
+
+function heroSmsOffer(value: unknown, serviceCode?: unknown, keyedCountryId?: unknown): HeroSmsOffer | undefined {
+  const entries = objectEntries(value);
+  if (!entries) return undefined;
+  const fields = Object.fromEntries(entries);
+  const countryIdValue = keyedCountryId ?? fields.countryId ?? fields.country_id ?? fields.country;
+  const countryId = nonNegativeNumber(typeof countryIdValue === 'string' ? Number(countryIdValue) : countryIdValue);
+  const normalizedServiceCode = nonEmptyString(serviceCode ?? fields.serviceCode);
+  const priceFields = objectEntries(fields.prices);
+  const countFields = objectEntries(fields.counts);
+  const mapEntries = objectEntries(fields.map);
+  const defaultPrice = priceFields ? nonNegativeNumber(Object.fromEntries(priceFields).default) : undefined;
+  const totalStock = countFields ? nonNegativeNumber(Object.fromEntries(countFields).total) : undefined;
+  if (!normalizedServiceCode || countryId === undefined || !Number.isInteger(countryId) || defaultPrice === undefined
+    || totalStock === undefined || !Number.isInteger(totalStock) || !mapEntries) return undefined;
+
+  const map: Record<string, number> = {};
+  for (const [priceText, stock] of mapEntries) {
+    const price = Number(priceText);
+    const stockValue = nonNegativeNumber(stock);
+    if (!priceText.trim() || !Number.isFinite(price) || price < 0
+      || stockValue === undefined || !Number.isInteger(stockValue)) return undefined;
+    map[priceText] = stockValue;
+  }
+  return { serviceCode: normalizedServiceCode, countryId, defaultPrice, totalStock, map };
+}
+
+export function budgetStockAtPrice(priceMap: Readonly<Record<string, number>>, maxPrice: number): number {
+  if (!Number.isFinite(maxPrice) || maxPrice < 0) return 0;
+  let selectedPrice = -1;
+  let selectedStock = 0;
+  for (const [priceText, stock] of Object.entries(priceMap)) {
+    const price = Number(priceText);
+    if (!Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) continue;
+    if (price <= maxPrice && price > selectedPrice) {
+      selectedPrice = price;
+      selectedStock = stock;
+    }
+  }
+  return selectedStock;
 }
 
 export function parseSupplierDate(value: unknown): Date | undefined {
@@ -274,10 +339,25 @@ export class HeroSmsHttpAdapter implements HeroSms {
     return quotes;
   }
 
-  async getNumber(serviceCode: string, countryId: number): Promise<HeroSmsNumber> {
+  async offers(): Promise<HeroSmsOffer[]> {
+    const value = await this.requestUrl(new URL('/api/v1/activations/offers', this.options.baseUrl), 'offers', {
+      Authorization: `ApiKey ${this.options.apiKey}`,
+    });
+    const records = offerRecords(value);
+    if (!records) throw new HeroSmsResponseError('response');
+    const offers = records.map((record) => heroSmsOffer(record.value, record.serviceCode, record.countryId));
+    if (offers.some((offer) => !offer)) throw new HeroSmsResponseError('response');
+    return offers as HeroSmsOffer[];
+  }
+
+  async getNumber(serviceCode: string, countryId: number, maxPrice?: number): Promise<HeroSmsNumber> {
     let value: unknown;
     try {
-      value = await this.request('getNumberV2', { service: serviceCode, country: countryId.toString() });
+      value = await this.request('getNumberV2', {
+        service: serviceCode,
+        country: countryId.toString(),
+        ...(maxPrice !== undefined ? { maxPrice: maxPrice.toString() } : {}),
+      });
     } catch (error) {
       if (error instanceof HeroSmsResponseError && error.kind === 'response') throw new HeroSmsResponseError('uncertain');
       throw error;
@@ -384,12 +464,22 @@ export class HeroSmsHttpAdapter implements HeroSms {
     const url = new URL(this.options.baseUrl);
     url.search = new URLSearchParams({ action, api_key: this.options.apiKey, ...parameters }).toString();
 
+    return this.requestUrl(url, action, undefined, emptySuccessStatuses, acceptedResponse);
+  }
+
+  private async requestUrl(
+    url: URL,
+    action: string,
+    headers?: Record<string, string>,
+    emptySuccessStatuses: number[] = [],
+    acceptedResponse?: (value: unknown, status: number) => unknown | undefined,
+  ): Promise<unknown> {
     let response: Response;
     let text: string;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.requestTimeoutMs ?? 15_000);
     try {
-      response = await this.fetch(url, { signal: controller.signal });
+      response = await this.fetch(url, { method: 'GET', signal: controller.signal, ...(headers ? { headers } : {}) });
       text = await response.text();
     } catch {
       throw new HeroSmsResponseError('uncertain');

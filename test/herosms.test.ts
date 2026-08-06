@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { HeroSmsHttpAdapter, HeroSmsResponseError, parseSupplierDate } from '../src/herosms.js';
+import { budgetStockAtPrice, HeroSmsHttpAdapter, HeroSmsResponseError, parseSupplierDate } from '../src/herosms.js';
 
 type HeroSmsOpenApi = { components: { examples: Record<string, { value: unknown }> } };
 type RequestedUrl = URL;
@@ -16,6 +16,92 @@ function example<Value>(name: string): Value {
 function response(body: string, status = 200): Response {
   return new Response(body, { status, headers: { 'content-type': 'application/json' } });
 }
+
+test('HeroSMS 计算不超过每号最高价的累计可取库存', () => {
+  assert.equal(budgetStockAtPrice({ '0.08': 0, '0.1': 2, '0.15': 7 }, 0.11), 2);
+  assert.equal(budgetStockAtPrice({ '0.15': 7 }, 0.11), 0);
+  assert.equal(budgetStockAtPrice({ '0.08': 0, '0.1': 2, '0.15': 7 }, 0.15), 7);
+});
+
+test('HeroSMS adapter 通过 ApiKey 读取候选地区报价分布', async () => {
+  const adapter = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key',
+    baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async (input, init) => {
+      const url = new URL(input.toString());
+      assert.equal(init?.method, 'GET');
+      assert.equal(url.toString(), 'https://hero-sms.test/api/v1/activations/offers');
+      assert.equal(url.search, '');
+      assert.equal(new Headers(init?.headers).get('authorization'), 'ApiKey test-api-key');
+      return response(JSON.stringify({ data: {
+        openai: {
+          1: {
+            prices: { default: 0.11 }, counts: { total: 12 },
+            map: { '0.08': 2, '0.11': 5, '0.2': 12 },
+          },
+          2: {
+            prices: { default: 0.18 }, counts: { total: 4 },
+            map: { '0.18': 4 },
+          },
+        },
+      }}));
+    },
+  });
+
+  assert.deepEqual(await adapter.offers(), [
+    { serviceCode: 'openai', countryId: 1, defaultPrice: 0.11, totalStock: 12, map: { '0.08': 2, '0.11': 5, '0.2': 12 } },
+    { serviceCode: 'openai', countryId: 2, defaultPrice: 0.18, totalStock: 4, map: { '0.18': 4 } },
+  ]);
+});
+
+test('HeroSMS adapter 只在传入时向 getNumberV2 透传每号最高价', async () => {
+  const requestedMaxPrices: (string | null)[] = [];
+  const adapter = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key',
+    baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async (input) => {
+      const url = new URL(input.toString());
+      assert.equal(url.searchParams.get('action'), 'getNumberV2');
+      requestedMaxPrices.push(url.searchParams.get('maxPrice'));
+      assert.equal(url.searchParams.get('fixedPrice'), null);
+      return response('ACCESS_NUMBER:activation-42:+14155550123');
+    },
+  });
+
+  await adapter.getNumber('openai', 1, 0.11);
+  await adapter.getNumber('openai', 1);
+  assert.deepEqual(requestedMaxPrices, ['0.11', null]);
+});
+
+test('HeroSMS adapter 将新报价接口的认证、供应商和不确定错误分类', async () => {
+  const cases = [
+    [JSON.stringify({ title: 'BAD_API_KEY' }), 401, 'authentication'],
+    [JSON.stringify({ title: 'SERVER_ERROR' }), 503, 'provider'],
+    ['<html>upstream timeout</html>', 200, 'response'],
+  ] as const;
+  for (const [body, status, kind] of cases) {
+    const adapter = new HeroSmsHttpAdapter({
+      apiKey: 'secret-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+      fetch: async () => response(body, status),
+    });
+    await assert.rejects(adapter.offers(), (error: unknown) => {
+      assert.ok(error instanceof HeroSmsResponseError);
+      assert.equal(error.kind, kind);
+      assert.doesNotMatch(error.message, /secret-key|hero-sms\.test/);
+      return true;
+    });
+  }
+
+  const disconnected = new HeroSmsHttpAdapter({
+    apiKey: 'secret-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => { throw new TypeError('connection reset'); },
+  });
+  await assert.rejects(disconnected.offers(), (error: unknown) => {
+    assert.ok(error instanceof HeroSmsResponseError);
+    assert.equal(error.kind, 'uncertain');
+    return true;
+  });
+});
 
 test('HeroSMS adapter 查询余额、服务、地区和 OpenAI 报价', async () => {
   const requests: RequestedUrl[] = [];
