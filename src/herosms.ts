@@ -209,6 +209,24 @@ export function budgetStockAtPrice(priceMap: Readonly<Record<string, number>>, m
   return selectedStock;
 }
 
+/** getStatusV2 响应中单个短信来源（sms/call）的正文解析结果。 */
+type ActivationBody = { text: string; code?: string; receivedAt?: Date } | 'malformed' | undefined;
+
+/** 解析 sms/call 中的可用验证码正文：
+ *  - 返回正文对象：该来源含可用验证码正文（text 非空），可判定短信送达；
+ *  - 返回 'malformed'：该来源有内容但缺正文（结构破坏，维持格式错误语义）；
+ *  - 返回 undefined：空对象、null、字段缺失或非对象形态，一律归一为等待短信。 */
+function activationBody(value: unknown): ActivationBody {
+  const entries = objectEntries(value);
+  if (!entries || entries.length === 0) return undefined;
+  const fields = Object.fromEntries(entries);
+  const text = nonEmptyString(fields.text);
+  if (!text) return 'malformed';
+  const code = nonEmptyString(fields.code);
+  const receivedAt = parseSupplierDate(fields.dateTime);
+  return { text, ...(code ? { code } : {}), ...(receivedAt ? { receivedAt } : {}) };
+}
+
 export function parseSupplierDate(value: unknown): Date | undefined {
   if (typeof value !== 'string' || /^0{4}-0{2}-0{2}/.test(value)) return undefined;
   // 无时区字符串（YYYY-MM-DD HH:MM:SS，供应商实际返回带毫秒变体）一律按莫斯科时区（+03:00）解释；
@@ -368,16 +386,19 @@ export class HeroSmsHttpAdapter implements HeroSms {
 
   async activationStatus(activationId: string): Promise<HeroSmsActivationStatus> {
     const value = await this.request('getStatusV2', { id: activationId });
-    if (value === 'STATUS_WAIT_CODE') return { delivered: false };
+    if (value === 'STATUS_WAIT_CODE' || value === 'STATUS_WAIT_RETRY' || value === 'STATUS_WAIT_RESEND') return { delivered: false };
     if (value === 'STATUS_CANCEL') return { delivered: false, providerStatus: 'cancelled' };
     const fields = objectEntries(value) ? Object.fromEntries(objectEntries(value)!) : undefined;
-    const smsFields = fields && objectEntries(fields.sms) ? Object.fromEntries(objectEntries(fields.sms)!) : undefined;
-    if (!smsFields) throw new HeroSmsResponseError('response');
-    const code = nonEmptyString(smsFields.code);
-    const text = nonEmptyString(smsFields.text);
-    const receivedAt = parseSupplierDate(smsFields.dateTime);
-    if (!text) throw new HeroSmsResponseError('response');
-    return { delivered: true, text, ...(code ? { code } : {}), ...(receivedAt ? { receivedAt } : {}) };
+    if (!fields) throw new HeroSmsResponseError('response');
+    // 以 sms/call 中是否存在可用验证码正文判定送达；verificationType 官方未定义语义，不参与判定。
+    const smsBody = activationBody(fields.sms);
+    const callBody = activationBody(fields.call);
+    // 任一来源含可用验证码正文即判定送达，另一来源畸形不否决已送达。
+    if (smsBody !== 'malformed' && smsBody !== undefined) return { delivered: true, ...smsBody };
+    if (callBody !== 'malformed' && callBody !== undefined) return { delivered: true, ...callBody };
+    // 无可用正文时，来源有内容但缺正文是结构破坏，不得伪装成等待短信。
+    if (smsBody === 'malformed' || callBody === 'malformed') throw new HeroSmsResponseError('response');
+    return { delivered: false };
   }
 
   async cancelActivation(activationId: string): Promise<HeroSmsCancellationResult> {

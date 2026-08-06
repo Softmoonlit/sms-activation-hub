@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { createApp, type AppDependencies } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
-import { ActivationAuthorizations } from '../src/activation-authorizations.js';
+import { ActivationAuthorizations, type HeroSmsWebhookEvent } from '../src/activation-authorizations.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsNumber, type HeroSmsOffer } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -186,6 +186,21 @@ async function waitOrTimeout(condition: () => boolean, timeoutMs: number, interv
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   return true;
+}
+
+/** 捕获 run 执行期间的 stdout 输出（含直接写入 process.stdout 的极简日志），用于断言日志级别与去向。 */
+async function withCapturedStdout<T>(run: () => Promise<T>): Promise<{ value: T; output: string }> {
+  const chunks: string[] = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    return { value: await run(), output: chunks.join('') };
+  } finally {
+    process.stdout.write = originalWrite;
+  }
 }
 
 if (!databaseUrl) {
@@ -2134,7 +2149,219 @@ if (!databaseUrl) {
       assert.match(page.body, /731904|复制验证码/);
       assert.match(page.body, /data-countdown="2026-08-10T00:24:00.000Z"/);
     } finally { await structured.app.close(); }
-  });  test('供应商完成失败会持久重试，应用重启后继续且不影响验证码展示', async () => {
+  });
+
+  test('轮询遇对象形式等待响应：静默推进约 60 秒下次轮询，不告警、不触发 webhook', async () => {
+    let now = new Date('2026-08-15T00:00:00.000Z');
+    const activationId = `poll-object-waiting-${randomUUID()}`;
+    let activationStatusCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => {
+        activationStatusCalls += 1;
+        // 生产观察的真实等待响应形态：verificationType=0、sms={}、call={}（适配器归一为 delivered:false）。
+        return { delivered: false };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const seeding = await openApplication(heroSms, () => now);
+    let token = '';
+    try {
+      await resetAuthorizationTables(seeding.database);
+      const session = await login(seeding.app);
+      const created = await createAuthorization(seeding.app, session);
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      await seeding.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+    } finally { await seeding.app.close(); }
+
+    const { value: polled, output } = await withCapturedStdout(() => openApplication(heroSms, () => now));
+    try {
+      assert.equal(activationStatusCalls, 1, '重启轮询只查询一次供应商状态');
+      assert.doesNotMatch(output, /\[herosms\]\[(warn|error)\]/, '等待短信不产生告警日志');
+      const state = await polled.database.pool.query<{ status: string; sms_code: string | null; sms_poll_after: Date | null }>(
+        'SELECT status, sms_code, sms_poll_after FROM supplier_activations WHERE provider_activation_id = $1',
+        [activationId],
+      );
+      assert.equal(state.rows[0]?.status, 'waiting_sms', '等待响应不改变激活状态');
+      assert.equal(state.rows[0]?.sms_code, null, '等待响应不触发 webhook 交付');
+      const pollAfter = state.rows[0]?.sms_poll_after;
+      assert.ok(pollAfter);
+      assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '下一次轮询按约 60 秒推进');
+      const authorization = await polled.database.pool.query<{ status: string }>(
+        'SELECT status FROM activation_authorizations WHERE token_hash = $1',
+        [tokenHash(token)],
+      );
+      assert.equal(authorization.rows[0]?.status, 'in_progress', '轮询不触发状态变更');
+    } finally { await polled.app.close(); }
+  });
+
+  test('轮询遇格式错误响应：记录 error 级日志且下一次轮询调度不受影响', async () => {
+    let now = new Date('2026-08-15T01:00:00.000Z');
+    const activationId = `poll-response-error-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => { throw new HeroSmsResponseError('response'); },
+    });
+    await resetTablesBeforeApplication();
+    const seeding = await openApplication(heroSms, () => now);
+    let token = '';
+    try {
+      await resetAuthorizationTables(seeding.database);
+      const session = await login(seeding.app);
+      const created = await createAuthorization(seeding.app, session);
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      await seeding.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+    } finally { await seeding.app.close(); }
+
+    const { value: polled, output } = await withCapturedStdout(() => openApplication(heroSms, () => now));
+    try {
+      assert.match(output, /\[herosms\]\[error\]/, '格式错误记录 error 级日志');
+      assert.doesNotMatch(output, /\[herosms\]\[warn\]/, '格式错误不伪装成网络错误');
+      const state = await polled.database.pool.query<{ status: string; sms_poll_after: Date | null }>(
+        'SELECT status, sms_poll_after FROM supplier_activations WHERE provider_activation_id = $1',
+        [activationId],
+      );
+      assert.equal(state.rows[0]?.status, 'waiting_sms', '格式错误不改变激活状态');
+      const pollAfter = state.rows[0]?.sms_poll_after;
+      assert.ok(pollAfter);
+      assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '格式错误不影响下一次轮询调度');
+    } finally { await polled.app.close(); }
+  });
+
+  test('轮询遇网络错误：记录 warn 级日志且不影响下一次轮询调度', async () => {
+    let now = new Date('2026-08-15T02:00:00.000Z');
+    const activationId = `poll-uncertain-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => { throw new HeroSmsResponseError('uncertain'); },
+    });
+    await resetTablesBeforeApplication();
+    const seeding = await openApplication(heroSms, () => now);
+    let token = '';
+    try {
+      await resetAuthorizationTables(seeding.database);
+      const session = await login(seeding.app);
+      const created = await createAuthorization(seeding.app, session);
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      await seeding.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+    } finally { await seeding.app.close(); }
+
+    const { value: polled, output } = await withCapturedStdout(() => openApplication(heroSms, () => now));
+    try {
+      assert.match(output, /\[herosms\]\[warn\]/, '网络错误记录 warn 级日志');
+      assert.doesNotMatch(output, /\[herosms\]\[error\]/, '网络错误不伪装成格式错误');
+      const state = await polled.database.pool.query<{ status: string; sms_poll_after: Date | null }>(
+        'SELECT status, sms_poll_after FROM supplier_activations WHERE provider_activation_id = $1',
+        [activationId],
+      );
+      assert.equal(state.rows[0]?.status, 'waiting_sms', '网络错误不改变激活状态');
+      const pollAfter = state.rows[0]?.sms_poll_after;
+      assert.ok(pollAfter);
+      assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '网络错误不影响下一次轮询调度');
+    } finally { await polled.app.close(); }
+  });
+
+  test('轮询遇供应商取消：记录 info 级日志，只记录不处理', async () => {
+    let now = new Date('2026-08-15T03:00:00.000Z');
+    const activationId = `poll-cancelled-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => ({ delivered: false, providerStatus: 'cancelled' }),
+    });
+    await resetTablesBeforeApplication();
+    const seeding = await openApplication(heroSms, () => now);
+    let token = '';
+    try {
+      await resetAuthorizationTables(seeding.database);
+      const session = await login(seeding.app);
+      const created = await createAuthorization(seeding.app, session);
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      await seeding.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+    } finally { await seeding.app.close(); }
+
+    const { value: polled, output } = await withCapturedStdout(() => openApplication(heroSms, () => now));
+    try {
+      assert.match(output, /\[herosms\]\[info\]/, '供应商取消记录 info 级日志');
+      assert.doesNotMatch(output, /\[herosms\]\[(warn|error)\]/, '供应商取消不产生告警');
+      const state = await polled.database.pool.query<{ status: string; sms_code: string | null; sms_poll_after: Date | null }>(
+        'SELECT status, sms_code, sms_poll_after FROM supplier_activations WHERE provider_activation_id = $1',
+        [activationId],
+      );
+      assert.equal(state.rows[0]?.status, 'waiting_sms', '轮询对供应商取消只记录、不改变激活状态');
+      assert.equal(state.rows[0]?.sms_code, null, '供应商取消不触发 webhook 交付');
+      const pollAfter = state.rows[0]?.sms_poll_after;
+      assert.ok(pollAfter);
+      assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '供应商取消不阻断下一次轮询调度');
+      const authorization = await polled.database.pool.query<{ status: string }>(
+        'SELECT status FROM activation_authorizations WHERE token_hash = $1',
+        [tokenHash(token)],
+      );
+      assert.equal(authorization.rows[0]?.status, 'in_progress', '轮询不触发状态变更');
+    } finally { await polled.app.close(); }
+  });
+
+  test('轮询中短信落库失败只跳过本条激活，不中断轮询且不告警', async () => {
+    let now = new Date('2026-08-15T04:00:00.000Z');
+    const activationId = `poll-webhook-failure-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => ({
+        delivered: true, code: '482913', text: 'Your code is 482913',
+        receivedAt: new Date('2026-08-15T04:00:30.000Z'),
+      }),
+    });
+    await resetTablesBeforeApplication();
+    const seeding = await openApplication(heroSms, () => now);
+    let token = '';
+    try {
+      await resetAuthorizationTables(seeding.database);
+      const session = await login(seeding.app);
+      const created = await createAuthorization(seeding.app, session);
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      await seeding.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+    } finally { await seeding.app.close(); }
+
+    // 模拟轮询把短信交给 webhook 落库时失败（如数据库抖动）：轮询是 Webhook 的恢复机制，
+    // 失败只跳过本条激活留待下次任务，不得中断本轮轮询（进而中断后台任务链）或产生告警。
+    const originalWebhook = ActivationAuthorizations.prototype.receiveHeroSmsWebhook;
+    ActivationAuthorizations.prototype.receiveHeroSmsWebhook = async function (this: ActivationAuthorizations, _event: HeroSmsWebhookEvent) {
+      throw new Error('模拟短信落库失败');
+    };
+    try {
+      const { value: polled, output } = await withCapturedStdout(() => openApplication(heroSms, () => now));
+      try {
+        assert.doesNotMatch(output, /\[herosms\]\[(warn|error)\]/, '短信落库失败不产生告警日志');
+        const state = await polled.database.pool.query<{ status: string; sms_code: string | null; sms_poll_after: Date | null }>(
+          'SELECT status, sms_code, sms_poll_after FROM supplier_activations WHERE provider_activation_id = $1',
+          [activationId],
+        );
+        assert.equal(state.rows[0]?.status, 'waiting_sms', '落库失败保持等待状态留待下次轮询');
+        assert.equal(state.rows[0]?.sms_code, null, '短信未交付');
+        const pollAfter = state.rows[0]?.sms_poll_after;
+        assert.ok(pollAfter);
+        assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '失败不阻断下一次轮询调度');
+      } finally { await polled.app.close(); }
+    } finally {
+      ActivationAuthorizations.prototype.receiveHeroSmsWebhook = originalWebhook;
+    }
+  });
+
+  test('供应商完成失败会持久重试，应用重启后继续且不影响验证码展示', async () => {
     const now = new Date('2026-08-11T00:00:00.000Z');
     const activationId = `finish-retry-${randomUUID()}`;
     let finishCalls = 0;
@@ -2870,19 +3097,21 @@ if (!databaseUrl) {
     } finally { await initial.close(); }
 
     now = new Date('2026-08-16T06:20:00.000Z');
-    const { app: restarted } = await openApplication(heroSms, () => now);
+    const { value: restarted, output } = await withCapturedStdout(() => openApplication(heroSms, () => now));
     try {
-      const page = await restarted.inject({ method: 'GET', url: `/a/${token}` });
+      // 回归锚：超时对账遇对象形式等待响应 → 释放并继续对账，等待静默不产生告警。
+      assert.doesNotMatch(output, /\[herosms\]\[(warn|error)\]/, '超时对账遇等待响应不产生告警日志');
+      const page = await restarted.app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(page.body, /正在确认号码状态/);
       assert.doesNotMatch(page.body, /<section class="section-action"|剩余号码获取额度|获取下一个号码|获取号码/);
 
-      const session = await login(restarted);
-      const home = await restarted.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const session = await login(restarted.app);
+      const home = await restarted.app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const detailPath = home.body.match(/href="(\/control7\/authorizations\/[0-9a-f-]{36})"/)?.[1]; assert.ok(detailPath);
-      const detail = await restarted.inject({ method: 'GET', url: detailPath, headers: { cookie: session.cookie } });
+      const detail = await restarted.app.inject({ method: 'GET', url: detailPath, headers: { cookie: session.cookie } });
       assert.match(detail.body, /结果待人工对账/);
       assert.doesNotMatch(detail.body, /timed_out/);
-    } finally { await restarted.close(); }
+    } finally { await restarted.app.close(); }
 
     delivered = true;
     now = new Date('2026-08-16T06:21:00.000Z');
@@ -4879,6 +5108,93 @@ if (!databaseUrl) {
       assert.ok(state.rows[0]?.cancellation_retry_after);
       assert.equal(state.rows[0]?.cancellation_retry_after.getTime(), now.getTime() + 60_000);
     } finally { await app.close(); }
+  });
+
+  test('取消对账遇等待短信重发取消返回 sms-delivered → 读取最新状态 → 按短信送达收尾并交付验证码', async () => {
+    let now = new Date('2026-08-20T11:30:00.000Z');
+    const activationId = `reconcile-resend-sms-delivered-${randomUUID()}`;
+    let statusCalls = 0;
+    let cancelCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123',
+        activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        // 换号确认时的首次取消结果不明确 → 进入取消确认中；对账重发取消时短信恰好送达。
+        if (cancelCalls === 1) throw new HeroSmsResponseError('uncertain');
+        return 'sms-delivered';
+      },
+      activationStatus: async () => {
+        statusCalls += 1;
+        // 对账先读到等待短信（归一化后的对象形式等待响应），重发取消返回 sms-delivered 后重新读取最新状态。
+        if (statusCalls === 1) return { delivered: false };
+        return {
+          delivered: true, code: '654321', text: 'Your code is 654321',
+          receivedAt: new Date('2026-08-20T11:31:00.000Z'),
+        };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+
+      now = new Date('2026-08-20T11:32:05.000Z');
+      // 换号/结束使用路由会把取消确认调度器按数据库中最早到期时间重排：
+      // 重试期限为空时以 0 延迟触发对账，读到等待短信 → 重发取消 → sms-delivered → 读取最新状态 → webhook 交付。
+      const { output } = await withCapturedStdout(async () => {
+        const replacing = await app.inject({
+          method: 'POST', url: `/a/${token}/replacement/confirm`,
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          payload: 'replacement=confirm',
+        });
+        assert.equal(replacing.statusCode, 202);
+        // 等到 webhook 交付事务落库（completion_confirming）再断言，
+        // 避免只等到重发取消开始就对账尚未收尾时执行断言造成竞态。
+        let deliveredStatus: string | undefined;
+        await waitFor(() => {
+          void database.pool.query<{ status: string }>(
+            'SELECT status FROM supplier_activations WHERE provider_activation_id = $1',
+            [activationId],
+          ).then((result) => { deliveredStatus = result.rows[0]?.status; });
+          return deliveredStatus === 'completion_confirming';
+        }, 3_000);
+      });
+      assert.doesNotMatch(output, /\[herosms\]\[(warn|error)\]/, '等待短信与送达收尾不产生告警日志');
+
+      assert.equal(statusCalls, 2, '对账先读等待状态，重发取消返回 sms-delivered 后重新读取最新状态');
+      assert.equal(cancelCalls, 2, '等待短信触发一次重发取消');
+
+      const state = await database.pool.query<{
+        status: string; sms_code: string | null; sms_text: string | null; sms_received_at: Date | null;
+      }>(
+        'SELECT status, sms_code, sms_text, sms_received_at FROM supplier_activations WHERE provider_activation_id = $1',
+        [activationId],
+      );
+      assert.equal(state.rows[0]?.status, 'completion_confirming', '短信送达后按完成收尾');
+      assert.equal(state.rows[0]?.sms_code, '654321');
+      assert.equal(state.rows[0]?.sms_text, 'Your code is 654321');
+      assert.equal(state.rows[0]?.sms_received_at?.toISOString(), '2026-08-20T11:31:00.000Z');
+
+      const authorization = await database.pool.query<{ status: string }>(
+        'SELECT status FROM activation_authorizations WHERE id = (SELECT authorization_id FROM supplier_activations WHERE provider_activation_id = $1)',
+        [activationId],
+      );
+      assert.equal(authorization.rows[0]?.status, 'result_available', 'webhook 交付把授权推进到结果可查看');
+
+      // 接收者视角：验证码已交付可查看，且不再提供换号/结束使用操作。
+      const recipientPage = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(recipientPage.statusCode, 200);
+      assert.match(recipientPage.body, /654321/);
+      assert.doesNotMatch(recipientPage.body, /更换号码|结束使用/);
+    } finally { await resetAuthorizationTables(database); await app.close(); }
   });
 
   test('对账发现短信已送达且时间落在号码窗口内 → 复用短信接收逻辑交付或完成收尾', async () => {

@@ -346,6 +346,68 @@ test('HeroSMS adapter 解析已结束状态并分类轮询与完成错误响应'
   });
 });
 
+test('HeroSMS adapter 将对象等待短信响应归一为等待状态', async () => {
+  const cases = [
+    // 生产观察形态：verificationType=0 伴随空 sms/call（YK8H2968 事件）
+    JSON.stringify({ verificationType: 0, sms: {}, call: {} }),
+    // sms/call 字段缺失，不依赖官方未定义语义的 verificationType
+    JSON.stringify({ verificationType: 2 }),
+    // sms/call 为 null（未证实形态，无害降级为等待）
+    JSON.stringify({ verificationType: 0, sms: null, call: null }),
+    // sms 直接为字符串（未证实形态，同样降级为等待并继续轮询）
+    JSON.stringify({ verificationType: 0, sms: '123456', call: {} }),
+  ] as const;
+
+  for (const body of cases) {
+    const adapter = new HeroSmsHttpAdapter({
+      apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+      fetch: async () => response(body),
+    });
+    assert.deepEqual(await adapter.activationStatus('activation-42'), { delivered: false }, body);
+  }
+});
+
+test('HeroSMS adapter 将 V1 等待字符串统一识别为等待状态', async () => {
+  for (const waiting of ['STATUS_WAIT_CODE', 'STATUS_WAIT_RETRY', 'STATUS_WAIT_RESEND']) {
+    const adapter = new HeroSmsHttpAdapter({
+      apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+      fetch: async () => response(waiting),
+    });
+    assert.deepEqual(await adapter.activationStatus('activation-42'), { delivered: false }, waiting);
+  }
+});
+
+test('HeroSMS adapter 以 sms/call 中任一可用验证码正文判定送达', async () => {
+  // 语音验证码正文位于 call 中
+  const callDelivery = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response(JSON.stringify({ verificationType: 1, sms: {}, call: { dateTime: '2026-08-05 03:15:00', code: '12345', text: 'Your voice code is 12345' } })),
+  });
+  assert.deepEqual(await callDelivery.activationStatus('activation-42'), {
+    delivered: true, receivedAt: new Date('2026-08-05T00:15:00.000Z'), code: '12345', text: 'Your voice code is 12345',
+  });
+
+  // sms 已含可用正文时，另一来源（call）畸形不否决送达
+  const smsDeliveredWithMalformedCall = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response(JSON.stringify({ verificationType: 2, sms: { dateTime: '2026-08-05 03:15:00', code: '482913', text: 'Your code is 482913' }, call: { from: 'phone', url: 'voice file url' } })),
+  });
+  assert.deepEqual(await smsDeliveredWithMalformedCall.activationStatus('activation-42'), {
+    delivered: true, receivedAt: new Date('2026-08-05T00:15:00.000Z'), code: '482913', text: 'Your code is 482913',
+  });
+
+  // 两个来源均无可用正文时，来源有内容但缺 text 维持格式错误
+  const malformedCall = new HeroSmsHttpAdapter({
+    apiKey: 'test-api-key', baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
+    fetch: async () => response(JSON.stringify({ sms: {}, call: { from: 'phone', url: 'voice file url' } })),
+  });
+  await assert.rejects(malformedCall.activationStatus('activation-42'), (error: unknown) => {
+    assert.ok(error instanceof HeroSmsResponseError);
+    assert.equal(error.kind, 'response');
+    return true;
+  });
+});
+
 test('HeroSMS adapter 按取消结果区分成功、短信冲突、过早取消与异常响应', async () => {
   const requests: URL[] = [];
   const responses = [
