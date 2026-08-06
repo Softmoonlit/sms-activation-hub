@@ -16,6 +16,7 @@ import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
 import { HeroSmsHttpAdapter, parseSupplierDate, type HeroSms } from './herosms.js';
 import { escapeHtml } from './html.js';
+import { loadSelfCheckIllustrations } from './static-assets.js';
 
 const ADMIN_COOKIE = 'admin_session';
 const CSRF_COOKIE = 'admin_csrf';
@@ -209,6 +210,9 @@ function htmlPage(title: string, content: string): string {
     button:disabled { background: #b0bec5; cursor: not-allowed; opacity: 0.85; }
     [data-countdown] { display: inline-block; min-width: 5ch; font-variant-numeric: tabular-nums; }
     .steps-guide { background: #f0f7f5; border: 1px solid #c2e0d8; border-radius: 6px; padding: 14px 16px; margin: 16px 0; text-align: left; }
+    .self-check-figure { margin: 0 0 18px; }
+    .self-check-figure img { display: block; width: 100%; height: auto; border: 1px solid #d7dde1; border-radius: 6px; background: #fff; }
+    .self-check-figure figcaption { margin: 6px 0 0; font-size: 13px; color: #53616c; line-height: 1.5; text-align: center; }
     .guide-title { font-weight: 600; color: #0f6655; margin: 0 0 6px; font-size: 14px; }
     .guide-copy { margin: 0; font-size: 13px; color: #334155; line-height: 1.6; }
     .status-waiting { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; color: #0f6655; margin: 12px 0 16px; font-weight: 500; }
@@ -436,14 +440,27 @@ function recipientQuotaMarkup(remainingNumberCount?: number): string {
   return `<p class="quota-info">剩余号码获取额度：${remainingNumberCount}${remainingNumberCount > 0 ? ' · 实际能否获取取决于供应商库存' : ''}</p>`;
 }
 
-// 自检页：待领取授权链接的入口步骤。自检确认门落地前，本函数暂承载现有获取号码页内容。
-function selfCheckStepPage(token: string, view: RecipientAuthorizationView, message?: string): string {
-  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${recipientFirstFlowHint(view.hasAcquiredNumber)}${recipientErrorMarkup(message)}${recipientAcquisitionForm(token)}</section></main>`);
+// 自检页：待领取且未自检确认的授权链接入口步骤。展示三张静态情况示意图占位与文案，
+// 只有一个“下一步”提交自检确认动作；不提供“我不适用”等额外按钮。
+// 图元数据与文案占位：图片素材与图示内容由后续单独提供，此处只维护占位路径与文案描述。
+const SELF_CHECK_FIGURES = [
+  { image: '/static/self-check/situation-1.svg', alt: '情况一示意图', caption: '情况一：符合情况一，可点击下一步开始' },
+  { image: '/static/self-check/situation-2.svg', alt: '情况二示意图', caption: '情况二：不建议继续，请直接关闭页面' },
+  { image: '/static/self-check/situation-3.svg', alt: '情况三示意图', caption: '情况三：不建议继续，请直接关闭页面' },
+];
+function selfCheckStepPage(token: string, _view: RecipientAuthorizationView, message?: string): string {
+  const figures = SELF_CHECK_FIGURES
+    .map(({ image, alt, caption }) => `<figure class="self-check-figure"><img src="${image}" alt="${alt}"><figcaption>${caption}</figcaption></figure>`)
+    .join('');
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${recipientErrorMarkup(message)}${figures}<p class="action-prompt">符合情况一，请点击下一步；情况二、三不建议继续，请直接关闭页面。</p><form method="post" action="/a/${encodeURIComponent(token)}/self-check"><button type="submit">下一步</button></form></section></main>`);
 }
 
-// 号码页：承载号码获取相关的状态与操作。取号对账过渡态归属本步骤，
-// 尚未内联为加载提示前，暂按现有独立状态页渲染。
-function numberStepPage(view: RecipientAuthorizationView): string {
+// 号码页：承载号码获取相关的状态与操作。待领取且已自检确认的授权渲染取号表单；
+// 取号对账过渡态归属本步骤，尚未内联为加载提示前，暂按现有独立状态页渲染。
+function numberStepPage(token: string, view: RecipientAuthorizationView, message?: string): string {
+  if (view.state === 'available') {
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${recipientFirstFlowHint(view.hasAcquiredNumber)}${recipientErrorMarkup(message)}${recipientAcquisitionForm(token)}</section></main>`);
+  }
   const status = view.acquisitionState === 'manual' ? '号码状态待发送者处理' : '正在确认号码获取结果，请稍候';
   return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${recipientFirstFlowHint(view.hasAcquiredNumber)}<p>${status}</p></section></main>`);
 }
@@ -551,10 +568,11 @@ function boundaryStepPage(token: string, view: RecipientAuthorizationView, messa
 }
 
 // 现有 recipientState 视图到步骤类型的调度。分支顺序即优先级，与重构前的页面分支顺序保持一致：
-// 待领取映射自检页；已领取且额度用尽占面、动作确认中、超时确认中映射边界简页；
-// 已领取且有当前号码或短信已送达映射接码页；取号对账过渡态归属号码页；其余终态映射边界简页。
+// 待领取且未自检确认映射自检页，待领取且已自检确认映射号码页；已领取且额度用尽占面、动作确认中、
+// 超时确认中映射边界简页；已领取且有当前号码或短信已送达映射接码页；取号对账过渡态归属号码页；
+// 其余终态映射边界简页。
 function recipientStepType(view: RecipientAuthorizationView): RecipientStepType {
-  if (view.state === 'available') return 'self-check';
+  if (view.state === 'available') return view.selfCheckConfirmed ? 'number' : 'self-check';
   if (view.state === 'claimed' && view.quotaExhaustedPromptUntil) return 'boundary';
   if (view.state === 'claimed' && view.currentNumberActionInProgress) return 'boundary';
   if (view.state === 'claimed' && view.activationTimeoutInProgress) return 'boundary';
@@ -567,7 +585,7 @@ function recipientStepType(view: RecipientAuthorizationView): RecipientStepType 
 function recipientPage(token: string, view: RecipientAuthorizationView, message?: string): string {
   switch (recipientStepType(view)) {
     case 'self-check': return selfCheckStepPage(token, view, message);
-    case 'number': return numberStepPage(view);
+    case 'number': return numberStepPage(token, view, message);
     case 'code': return codeStepPage(token, view, message);
     case 'boundary': return boundaryStepPage(token, view, message);
   }
@@ -691,6 +709,14 @@ export async function createApp(config: AppConfig, database = new Database(confi
   const app = Fastify({ logger: false, trustProxy: config.trustedProxy });
   await app.register(cookie);
   await app.register(formbody);
+
+  // 自检页情况示意图静态资源：启动时读入内存，按文件名白名单提供，未知文件一律 404。
+  const selfCheckIllustrations = await loadSelfCheckIllustrations();
+  app.get<{ Params: { file: string } }>('/static/self-check/:file', async (request, reply) => {
+    const asset = selfCheckIllustrations.get(request.params.file);
+    if (!asset) return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    return reply.type(asset.contentType).send(asset.content);
+  });
 
   let closing = false;
   const pendingFinishTasks = new Set<Promise<void>>();
@@ -1099,6 +1125,13 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage());
     return reply.type('text/html; charset=utf-8').send(recipientPage(request.params.token, result));
+  });
+
+  app.post<{ Params: { token: string } }>('/a/:token/self-check', async (request, reply) => {
+    const result = await activationAuthorizations.confirmSelfCheck(request.params.token);
+    if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    // 已确认或非待领取态幂等忽略：无论本次是否写入，都回链接渲染当前应显示的页面。
+    return reply.redirect(`/a/${request.params.token}`, 303);
   });
 
   app.post<{ Params: { token: string } }>('/a/:token/numbers', async (request, reply) => {

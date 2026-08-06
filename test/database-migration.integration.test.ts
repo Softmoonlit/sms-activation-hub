@@ -395,4 +395,65 @@ if (!databaseUrl) {
       await adminDatabase.close();
     }
   });
+
+  test('自检确认时间列以 ADD COLUMN IF NOT EXISTS 可达：新建库与存在表两种起点均不丢失既有数据', async () => {
+    const schemaName = `self_check_column_${randomUUID().replaceAll('-', '')}`;
+    const adminDatabase = new Database(databaseUrl);
+    await adminDatabase.pool.query(`CREATE SCHEMA ${schemaName}`);
+
+    const scopedUrl = new URL(databaseUrl);
+    scopedUrl.searchParams.set('options', `-csearch_path=${schemaName}`);
+    const database = new Database(scopedUrl.toString());
+    const createdAt = new Date('2026-08-01T00:00:00.000Z');
+    const legacyAuthorizationId = randomUUID();
+
+    try {
+      // 起点一：全新库初始化即包含自检确认时间列。
+      await database.initialize();
+      const freshColumns = await database.pool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'activation_authorizations'`,
+        [schemaName],
+      );
+      assert.ok(freshColumns.rows.some((row) => row.column_name === 'self_check_confirmed_at'), '新建库应包含自检确认时间列');
+
+      // 模拟旧部署形态：存在表但缺少自检确认列，且已有业务数据。
+      await database.pool.query('ALTER TABLE activation_authorizations DROP COLUMN self_check_confirmed_at');
+      await database.pool.query(
+        `INSERT INTO activation_authorizations
+          (id, token_hash, token_suffix, status, created_at, last_activity_at)
+         VALUES ($1, 'legacy-self-check-token-hash', 'SELFCH01', 'unclaimed', $2, $2)`,
+        [legacyAuthorizationId, createdAt],
+      );
+
+      // 起点二：存在表重新初始化，列以 ADD COLUMN IF NOT EXISTS 补齐且既有数据不丢失。
+      await database.initialize();
+      const upgradedColumns = await database.pool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'activation_authorizations'`,
+        [schemaName],
+      );
+      assert.ok(upgradedColumns.rows.some((row) => row.column_name === 'self_check_confirmed_at'), '存在表升级后应补齐自检确认时间列');
+      const preserved = await database.pool.query<{ token_suffix: string; status: string; self_check_confirmed_at: Date | null }>(
+        'SELECT token_suffix, status, self_check_confirmed_at FROM activation_authorizations WHERE id = $1',
+        [legacyAuthorizationId],
+      );
+      assert.deepEqual(preserved.rows[0], {
+        token_suffix: 'SELFCH01', status: 'unclaimed', self_check_confirmed_at: null,
+      });
+      await database.pool.query(
+        'UPDATE activation_authorizations SET self_check_confirmed_at = $2 WHERE id = $1',
+        [legacyAuthorizationId, createdAt],
+      );
+      const written = await database.pool.query<{ self_check_confirmed_at: Date | null }>(
+        'SELECT self_check_confirmed_at FROM activation_authorizations WHERE id = $1',
+        [legacyAuthorizationId],
+      );
+      assert.equal(written.rows[0]?.self_check_confirmed_at?.toISOString(), createdAt.toISOString());
+    } finally {
+      await database.close();
+      await adminDatabase.pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
+      await adminDatabase.close();
+    }
+  });
 }

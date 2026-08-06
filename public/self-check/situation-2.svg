@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="240" viewBox="0 0 480 240" role="img" aria-label="情况二示意图占位">
+  <rect width="480" height="240" fill="#fdf6ee"/>
+  <rect x="1" y="1" width="478" height="238" fill="none" stroke="#ecd9b8" stroke-width="2" rx="8"/>
+  <circle cx="240" cy="92" r="36" fill="#b7791f"/>
+  <path d="M226 70 l28 44 M254 70 l-28 44" stroke="#ffffff" stroke-width="6" stroke-linecap="round"/>
+  <text x="240" y="170" text-anchor="middle" font-family="system-ui, sans-serif" font-size="24" fill="#17202a">情况二</text>
+  <text x="240" y="200" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#53616c">示意图占位</text>
+</svg>

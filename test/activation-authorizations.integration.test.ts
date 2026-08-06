@@ -122,6 +122,20 @@ async function cleanupBatchAuthorizations(database: Database): Promise<void> {
 }
 
 interface ListArticle { id: string; suffix: string; status: string; }
+
+/** 待领取且未自检确认的页面应渲染自检页：三张静态示意图占位、文案与下一步按钮，无取号表单与“我不适用”按钮。 */
+function assertSelfCheckPage(body: string): void {
+  assert.match(body, /情况一/);
+  assert.match(body, /情况二/);
+  assert.match(body, /情况三/);
+  assert.match(body, /src="\/static\/self-check\/situation-1\.svg"/);
+  assert.match(body, /src="\/static\/self-check\/situation-2\.svg"/);
+  assert.match(body, /src="\/static\/self-check\/situation-3\.svg"/);
+  assert.match(body, /符合情况一，请点击下一步；情况二、三不建议继续，请直接关闭页面。/);
+  assert.match(body, /<button type="submit">下一步<\/button>/);
+  assert.doesNotMatch(body, /我不适用/);
+  assert.doesNotMatch(body, /获取号码/);
+}
 function listArticles(body: string): ListArticle[] {
   const articles: ListArticle[] = [];
   for (const match of body.matchAll(
@@ -254,7 +268,7 @@ if (!databaseUrl) {
       now = new Date('2027-08-01T00:00:00.000Z');
       const oneYearLater = await app.inject({ method: 'GET', url: `/a/${links[0]}` });
       assert.equal(oneYearLater.statusCode, 200);
-      assert.match(oneYearLater.body, /获取号码/);
+      assertSelfCheckPage(oneYearLater.body);
       assert.doesNotMatch(oneYearLater.body, /领取前永久有效/);
     } finally {
       await cleanupBatchAuthorizations(database);
@@ -367,7 +381,7 @@ if (!databaseUrl) {
       const preview = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(preview.statusCode, 200);
       assert.match(preview.body, /<h1>OpenAI<\/h1>/);
-      assert.match(preview.body, /获取号码/);
+      assertSelfCheckPage(preview.body);
       assert.doesNotMatch(preview.body, /剩余号码获取额度/);
       assert.doesNotMatch(preview.body.replace('实际能否获取取决于供应商库存', ''), /链接剩余时间|候选地区|价格|库存|HeroSMS|供应商|期限|授权/);
 
@@ -442,6 +456,118 @@ if (!databaseUrl) {
       assert.deepEqual(expiredAuthorization.rows[0], { status: 'ended', ended_reason: 'acquisition_expired', token_hash: null });
     } finally {
       await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('待领取未自检确认时渲染自检页，下一步确认后 303 回链接并进入号码获取页，重复提交幂等不覆盖时间', async () => {
+    let now = new Date('2026-08-04T20:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+
+      const page = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(page.statusCode, 200);
+      assertSelfCheckPage(page.body);
+
+      const confirm = await app.inject({ method: 'POST', url: `/a/${token}/self-check` });
+      assert.equal(confirm.statusCode, 303);
+      assert.equal(confirm.headers.location, `/a/${token}`);
+      const stored = await database.pool.query<{ self_check_confirmed_at: Date | null }>(
+        'SELECT self_check_confirmed_at FROM activation_authorizations WHERE token_suffix = $1',
+        [token.slice(-8)],
+      );
+      assert.equal(stored.rows[0]?.self_check_confirmed_at?.toISOString(), now.toISOString());
+
+      // 确认后刷新直接进入号码获取页，不被弹回自检页。
+      const after = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(after.statusCode, 200);
+      assert.match(after.body, /获取号码/);
+      assert.match(after.body, /获取号码后，请在 24 小时内使用/);
+      assert.doesNotMatch(after.body, /情况一|下一步/);
+
+      // 重复提交幂等：不覆盖已写入的自检确认时间，仍返回号码获取页。
+      now = new Date('2026-08-04T21:00:00.000Z');
+      const again = await app.inject({ method: 'POST', url: `/a/${token}/self-check` });
+      assert.equal(again.statusCode, 303);
+      assert.equal(again.headers.location, `/a/${token}`);
+      const retained = await database.pool.query<{ self_check_confirmed_at: Date | null }>(
+        'SELECT self_check_confirmed_at FROM activation_authorizations WHERE token_suffix = $1',
+        [token.slice(-8)],
+      );
+      assert.equal(retained.rows[0]?.self_check_confirmed_at?.toISOString(), '2026-08-04T20:00:00.000Z');
+      const afterAgain = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(afterAgain.body, /获取号码/);
+
+      const missing = await app.inject({ method: 'POST', url: '/a/not-a-real-token-at-all' });
+      assert.equal(missing.statusCode, 404);
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('自检确认不消耗候选位置或获取额度，领取后重复提交幂等忽略且不改变状态', async () => {
+    const fixedNow = new Date('2026-08-04T22:00:00.000Z');
+    const { app, database } = await openApplication(scriptedHeroSms(), () => fixedNow);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+
+      await app.inject({ method: 'POST', url: `/a/${token}/self-check` });
+      // 自检确认不消耗任何候选位置或获取额度：确认后取号仍正常工作，且只消耗取号本身占用的位置。
+      const claim = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claim.statusCode, 303);
+      const candidates = await database.pool.query<{ used_at: Date | null }>(
+        `SELECT used_at FROM authorization_candidate_countries
+         WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1) ORDER BY position`,
+        [token.slice(-8)],
+      );
+      assert.deepEqual(candidates.rows.map((row) => row.used_at !== null), [true, false, false]);
+      const page = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(page.body, /剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
+
+      // 已领取（非待领取态）重复提交：幂等忽略，不写入时间、不改变状态。
+      const before = await database.pool.query<{ self_check_confirmed_at: Date | null; status: string }>(
+        'SELECT self_check_confirmed_at, status FROM activation_authorizations WHERE token_suffix = $1',
+        [token.slice(-8)],
+      );
+      const again = await app.inject({ method: 'POST', url: `/a/${token}/self-check` });
+      assert.equal(again.statusCode, 303);
+      assert.equal(again.headers.location, `/a/${token}`);
+      const after = await database.pool.query<{ self_check_confirmed_at: Date | null; status: string }>(
+        'SELECT self_check_confirmed_at, status FROM activation_authorizations WHERE token_suffix = $1',
+        [token.slice(-8)],
+      );
+      assert.equal(after.rows[0]?.self_check_confirmed_at?.toISOString(), before.rows[0]?.self_check_confirmed_at?.toISOString());
+      assert.equal(after.rows[0]?.status, 'in_progress');
+      const afterPage = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(afterPage.body, /415 555 0123/);
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
+  test('静态资源服务按白名单提供三张自检示意图占位，未知文件名返回 404', async () => {
+    const { app } = await openApplication();
+    try {
+      for (const name of ['situation-1.svg', 'situation-2.svg', 'situation-3.svg']) {
+        const response = await app.inject({ method: 'GET', url: `/static/self-check/${name}` });
+        assert.equal(response.statusCode, 200, `${name} 应可加载`);
+        assert.match(response.headers['content-type'] ?? '', /image\/svg\+xml/);
+        assert.match(response.body, /<svg/);
+      }
+      for (const name of ['situation-4.svg', 'situation-0.svg', 'self-check.css', 'situation-1.png']) {
+        const missing = await app.inject({ method: 'GET', url: `/static/self-check/${name}` });
+        assert.equal(missing.statusCode, 404, `${name} 不在白名单应返回 404`);
+      }
+    } finally {
       await app.close();
     }
   });
@@ -548,7 +674,7 @@ if (!databaseUrl) {
       const stillAvailable = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(stillAvailable.statusCode, 200);
       assert.match(stillAvailable.body, /OpenAI/);
-      assert.match(stillAvailable.body, /获取号码/);
+      assertSelfCheckPage(stillAvailable.body);
 
       await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
@@ -817,8 +943,7 @@ if (!databaseUrl) {
       const firstGet = await app.inject({ method: 'GET', url: `/a/${token}` });
       const secondGet = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(firstGet.statusCode, 200);
-      assert.match(firstGet.body, /获取号码/);
-      assert.match(firstGet.body, /获取号码后，请在 24 小时内使用/);
+      assertSelfCheckPage(firstGet.body);
       assert.doesNotMatch(firstGet.body, /链接剩余时间/);
       assert.equal(secondGet.statusCode, 200, '链接预览和重复 GET 不应领取授权');
       assert.equal(firstGet.headers['referrer-policy'], 'no-referrer');
@@ -956,7 +1081,7 @@ if (!databaseUrl) {
 
       const initial = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(initial.body, /OpenAI/);
-      assert.match(initial.body, /获取号码/);
+      assertSelfCheckPage(initial.body);
       assert.doesNotMatch(initial.body, /剩余号码获取额度/);
       assert.doesNotMatch(initial.body, /美国|英国|法国|HeroSMS|价格/);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });

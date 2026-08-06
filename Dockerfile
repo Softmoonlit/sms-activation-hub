@@ -10,6 +10,7 @@ RUN npm ci --include=dev
 
 COPY tsconfig.json ./
 COPY src/ ./src/
+COPY public/ ./public/
 
 RUN npm run build
 
@@ -26,6 +27,7 @@ RUN npm ci --omit=dev
 
 # Copy compiled output from build stage
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/public ./public
 
 # Run as non-root user
 USER node

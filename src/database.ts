@@ -237,6 +237,8 @@ export class Database {
         ADD COLUMN IF NOT EXISTS ended_reason TEXT;
       ALTER TABLE activation_authorizations
         ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;
+      ALTER TABLE activation_authorizations
+        ADD COLUMN IF NOT EXISTS self_check_confirmed_at TIMESTAMPTZ;
     `);
 
     // 检查是否存在未完结的旧模型记录（限定当前 schema，避免跨 schema 误判其他库的旧表）

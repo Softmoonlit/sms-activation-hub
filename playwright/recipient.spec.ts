@@ -77,22 +77,30 @@ test('三个独立浏览器通过同一授权链接完成领取、换号和结�
     assert.equal(created.statusCode, 201);
     const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
-    // 浏览器 A：仅打开授权链接并看到获取号码操作，不触发领取或号码获取。
+    // 浏览器 A：仅打开授权链接，看到自检页（三张静态示意图、文案与下一步按钮），
+    // 不点击任何按钮，不触发自检确认、领取或号码获取。
     const openingContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const openingPage = await openingContext.newPage();
     await openingPage.clock.setFixedTime(now);
     await openingPage.goto(`${origin}/a/${token}`);
     await expect(openingPage.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
-    await expect(openingPage.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
-    await expect(openingPage.getByRole('button', { name: '获取号码' })).toBeVisible();
+    await expect(openingPage.getByText('符合情况一，请点击下一步；情况二、三不建议继续，请直接关闭页面。')).toBeVisible();
+    await expect(openingPage.getByRole('img', { name: '情况一示意图' })).toBeVisible();
+    await expect(openingPage.getByRole('img', { name: '情况二示意图' })).toBeVisible();
+    await expect(openingPage.getByRole('img', { name: '情况三示意图' })).toBeVisible();
+    await expect(openingPage.getByRole('button', { name: '下一步' })).toBeVisible();
+    await expect(openingPage.getByRole('button', { name: '获取号码' })).toHaveCount(0);
+    await expect(openingPage.getByText('我不适用')).toHaveCount(0);
     await expect(openingPage.getByText(/剩余号码获取额度/)).toHaveCount(0);
     await openingContext.close();
 
-    // 浏览器 B：使用同一授权链接领取并看到首个号码。
+    // 浏览器 B：使用同一授权链接先过自检再领取并看到首个号码。
     const claimingContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const claimingPage = await claimingContext.newPage();
     await claimingPage.clock.setFixedTime(now);
     await claimingPage.goto(`${origin}/a/${token}`);
+    await claimingPage.getByRole('button', { name: '下一步' }).click();
+    await expect(claimingPage.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
     await claimingPage.getByRole('button', { name: '获取号码' }).click();
     await expect(claimingPage.getByText('415 555 0123', { exact: true })).toBeVisible();
     await expect(claimingPage.getByText('(+1)', { exact: true })).toBeVisible();

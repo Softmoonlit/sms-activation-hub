@@ -101,6 +101,8 @@ export type RecipientAuthorizationState = 'available' | 'claimed' | 'unavailable
 export interface RecipientAuthorizationView {
   state: RecipientAuthorizationState;
   hasAcquiredNumber: boolean;
+  /** 待领取状态下是否已通过自检确认；已确认后渲染号码获取页而非自检页。 */
+  selfCheckConfirmed?: boolean;
   expiresAt?: Date;
   countryName?: string;
   phoneNumber?: string;
@@ -165,6 +167,8 @@ export interface HeroSmsWebhookEvent {
 export type ClaimResult =
   | { state: 'claimed' | 'confirming' | 'no-numbers' | 'error' }
   | { state: 'unavailable' | 'not-found' | 'claim-failed' };
+
+export type SelfCheckResult = { state: 'confirmed' | 'ignored' | 'not-found' };
 
 export interface AcquisitionReconciliation {
   id: string;
@@ -737,7 +741,7 @@ export class ActivationAuthorizations {
       number_acquisition_expires_at: Date | null; result_view_until: Date | null; end_prompt_until: Date | null; country_name: string | null; phone_number: string | null;
       acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string; candidate_count: string;
       acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; end_use_pending: boolean | null; sms_code: string | null;
-      last_activation_status: string | null; last_activation_timed_out_at: Date | null;
+      last_activation_status: string | null; last_activation_timed_out_at: Date | null; self_check_confirmed_at: Date | null;
     }>(
       `SELECT auth.id, auth.status, auth.ended_reason, auth.number_acquisition_expires_at,
               COALESCE(auth.result_view_until, (
@@ -749,6 +753,7 @@ export class ActivationAuthorizations {
               candidate.country_name, activation.phone_number, activation.acquired_at,
               activation.cancel_available_at, activation.expires_at AS number_expires_at,
               activation.status AS activation_status, activation.end_use_pending, activation.sms_code,
+              auth.self_check_confirmed_at,
               (SELECT count(*) FROM authorization_candidate_countries candidate_count WHERE candidate_count.authorization_id = auth.id)::text AS candidate_count,
               (SELECT count(*) FROM authorization_candidate_countries used WHERE used.authorization_id = auth.id AND used.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status, last_activation.status AS last_activation_status,
@@ -791,6 +796,7 @@ export class ActivationAuthorizations {
       return {
         state: 'available', hasAcquiredNumber,
         ...(expiresAt ? { expiresAt } : {}),
+        ...(authorization.self_check_confirmed_at ? { selfCheckConfirmed: true } : {}),
       };
     }
     if (authorization.status === 'ended'
@@ -2155,6 +2161,23 @@ export class ActivationAuthorizations {
       await this.clearPendingReplacement(authorizationId);
       return { state: 'error' };
     }
+  }
+
+  /** 自检确认动作：仅在待领取且自检确认时间为空时写入当前时间，否则幂等忽略、不覆盖已有时间。
+   *  只作为渲染引导，不消耗候选位置或获取额度，也不以本动作硬拦截领取。 */
+  async confirmSelfCheck(token: string): Promise<SelfCheckResult> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { state: 'not-found' };
+    const target = await this.database.pool.query<{ id: string }>(
+      'SELECT id FROM activation_authorizations WHERE token_hash = $1', [tokenHash(token)],
+    );
+    if (!target.rows[0]) return { state: 'not-found' };
+    const updated = await this.database.pool.query(
+      `UPDATE activation_authorizations
+       SET self_check_confirmed_at = $2
+       WHERE id = $1 AND status = 'unclaimed' AND self_check_confirmed_at IS NULL`,
+      [target.rows[0].id, this.now()],
+    );
+    return updated.rowCount === 1 ? { state: 'confirmed' } : { state: 'ignored' };
   }
 
   async claimAndGetNumber(token: string): Promise<ClaimResult> {

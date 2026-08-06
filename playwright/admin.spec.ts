@@ -223,19 +223,21 @@ test('仅打开授权链接不领取号码，领取后持有同一授权链接�
     const { cookie, csrf } = await adminLogin(app);
     const token = await createAuthorization(app, cookie, csrf);
 
-    // 第一次：仅 GET 打开链接（模拟预览），不点击获取
+    // 第一次：仅 GET 打开链接（模拟预览），看到自检页但不点击任何按钮、不触发领取
     const previewContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const previewPage = await previewContext.newPage();
     await previewPage.goto(`${origin}/a/${token}`);
     await expect(previewPage.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
-    // 仅打开后页面显示「获取号码」按钮但还未触发领取
-    await expect(previewPage.getByRole('button', { name: '获取号码' })).toBeVisible();
+    // 仅打开后页面显示自检页（下一步按钮）而非获取号码按钮，且未触发领取
+    await expect(previewPage.getByRole('button', { name: '下一步' })).toBeVisible();
+    await expect(previewPage.getByRole('button', { name: '获取号码' })).toHaveCount(0);
     await previewContext.close();
 
-    // 第二次（不同浏览器上下文）：通过同一授权链接正式领取
+    // 第二次（不同浏览器上下文）：通过同一授权链接先过自检再正式领取
     const recipientContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const recipientPage = await recipientContext.newPage();
     await recipientPage.goto(`${origin}/a/${token}`);
+    await recipientPage.getByRole('button', { name: '下一步' }).click();
     await recipientPage.getByRole('button', { name: '获取号码' }).click();
     await expect(recipientPage.locator('.number')).toBeVisible();
     await recipientContext.close();
@@ -333,12 +335,14 @@ test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const page = await context.newPage();
 
-    // 1. 初始状态（待领取）
+    // 1. 初始状态（待领取且未自检确认：自检页）
     await page.goto(`${origin}/a/${token}`);
+    await expect(page.getByRole('button', { name: '下一步' })).toBeVisible();
     let html = await page.content();
     assertNoSensitiveAdminInfo(html, '初始页面');
 
-    // 2. 领取后（号码显示状态）
+    // 2. 过自检后领取（号码显示状态）
+    await page.getByRole('button', { name: '下一步' }).click();
     await page.getByRole('button', { name: '获取号码' }).click();
     await expect(page.locator('.number')).toBeVisible();
     html = await page.content();
@@ -385,8 +389,14 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
     const page = await context.newPage();
     await page.clock.setFixedTime(now);
 
-    // 初始状态
+    // 初始状态：自检页在移动视口下不溢出
     await page.goto(`${origin}/a/${token}`);
+    await expect(page.getByRole('button', { name: '下一步' })).toBeVisible();
+    await expect(page.getByText('符合情况一，请点击下一步；情况二、三不建议继续，请直接关闭页面。')).toBeVisible();
+    await assertNoOverflow(page, '自检页状态');
+
+    // 过自检后进入号码获取页，提示与获取号码按钮不溢出
+    await page.getByRole('button', { name: '下一步' }).click();
     await expect(page.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
     await expect(page.getByRole('button', { name: '获取号码' })).toBeVisible();
     const firstHintLayout = await page.evaluate(() => {
@@ -534,6 +544,7 @@ test('浏览器网络和应用日志不包含 token、Cookie、号码、验证�
     page.on('request', (req) => requestUrls.push(req.url()));
 
     await page.goto(`${origin}/a/${token}`);
+    await page.getByRole('button', { name: '下一步' }).click();
     await page.getByRole('button', { name: '获取号码' }).click();
     await expect(page.locator('.number')).toBeVisible();
 
