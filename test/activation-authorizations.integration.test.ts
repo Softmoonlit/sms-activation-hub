@@ -5059,6 +5059,93 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
+  test('取消对账遇等待短信重发取消返回 sms-delivered → 读取最新状态 → 按短信送达收尾并交付验证码', async () => {
+    let now = new Date('2026-08-20T11:30:00.000Z');
+    const activationId = `reconcile-resend-sms-delivered-${randomUUID()}`;
+    let statusCalls = 0;
+    let cancelCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123',
+        activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => {
+        cancelCalls += 1;
+        // 换号确认时的首次取消结果不明确 → 进入取消确认中；对账重发取消时短信恰好送达。
+        if (cancelCalls === 1) throw new HeroSmsResponseError('uncertain');
+        return 'sms-delivered';
+      },
+      activationStatus: async () => {
+        statusCalls += 1;
+        // 对账先读到等待短信（归一化后的对象形式等待响应），重发取消返回 sms-delivered 后重新读取最新状态。
+        if (statusCalls === 1) return { delivered: false };
+        return {
+          delivered: true, code: '654321', text: 'Your code is 654321',
+          receivedAt: new Date('2026-08-20T11:31:00.000Z'),
+        };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+
+      now = new Date('2026-08-20T11:32:05.000Z');
+      // 换号/结束使用路由会把取消确认调度器按数据库中最早到期时间重排：
+      // 重试期限为空时以 0 延迟触发对账，读到等待短信 → 重发取消 → sms-delivered → 读取最新状态 → webhook 交付。
+      const { output } = await withCapturedStdout(async () => {
+        const replacing = await app.inject({
+          method: 'POST', url: `/a/${token}/replacement/confirm`,
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          payload: 'replacement=confirm',
+        });
+        assert.equal(replacing.statusCode, 202);
+        // 等到 webhook 交付事务落库（completion_confirming）再断言，
+        // 避免只等到重发取消开始就对账尚未收尾时执行断言造成竞态。
+        let deliveredStatus: string | undefined;
+        await waitFor(() => {
+          void database.pool.query<{ status: string }>(
+            'SELECT status FROM supplier_activations WHERE provider_activation_id = $1',
+            [activationId],
+          ).then((result) => { deliveredStatus = result.rows[0]?.status; });
+          return deliveredStatus === 'completion_confirming';
+        }, 3_000);
+      });
+      assert.doesNotMatch(output, /\[herosms\]\[(warn|error)\]/, '等待短信与送达收尾不产生告警日志');
+
+      assert.equal(statusCalls, 2, '对账先读等待状态，重发取消返回 sms-delivered 后重新读取最新状态');
+      assert.equal(cancelCalls, 2, '等待短信触发一次重发取消');
+
+      const state = await database.pool.query<{
+        status: string; sms_code: string | null; sms_text: string | null; sms_received_at: Date | null;
+      }>(
+        'SELECT status, sms_code, sms_text, sms_received_at FROM supplier_activations WHERE provider_activation_id = $1',
+        [activationId],
+      );
+      assert.equal(state.rows[0]?.status, 'completion_confirming', '短信送达后按完成收尾');
+      assert.equal(state.rows[0]?.sms_code, '654321');
+      assert.equal(state.rows[0]?.sms_text, 'Your code is 654321');
+      assert.equal(state.rows[0]?.sms_received_at?.toISOString(), '2026-08-20T11:31:00.000Z');
+
+      const authorization = await database.pool.query<{ status: string }>(
+        'SELECT status FROM activation_authorizations WHERE id = (SELECT authorization_id FROM supplier_activations WHERE provider_activation_id = $1)',
+        [activationId],
+      );
+      assert.equal(authorization.rows[0]?.status, 'result_available', 'webhook 交付把授权推进到结果可查看');
+
+      // 接收者视角：验证码已交付可查看，且不再提供换号/结束使用操作。
+      const recipientPage = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(recipientPage.statusCode, 200);
+      assert.match(recipientPage.body, /654321/);
+      assert.doesNotMatch(recipientPage.body, /更换号码|结束使用/);
+    } finally { await resetAuthorizationTables(database); await app.close(); }
+  });
+
   test('对账发现短信已送达且时间落在号码窗口内 → 复用短信接收逻辑交付或完成收尾', async () => {
     let now = new Date('2026-08-20T12:00:00.000Z');
     const activationId = `reconcile-delivered-${randomUUID()}`;
