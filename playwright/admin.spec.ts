@@ -24,10 +24,11 @@ const heroSms: HeroSms = {
   balance: async () => 10,
   services: async () => [{ code: 'openai', name: 'OpenAI' }],
   countries: async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }],
+  // 报价必须含不高于测试最高价（saveCandidateSettings 第二参 0.11）的档位，否则预算内库存筛选无候选可取。
   offers: async (): Promise<HeroSmsOffer[]> => [
-    { serviceCode: 'openai', countryId: 1, defaultPrice: 1.2, totalStock: 1, map: { '1.2': 1 } },
-    { serviceCode: 'openai', countryId: 2, defaultPrice: 0.6, totalStock: 1, map: { '0.6': 1 } },
-    { serviceCode: 'openai', countryId: 3, defaultPrice: 0.9, totalStock: 1, map: { '0.9': 1 } },
+    { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 1, map: { '0.08': 1 } },
+    { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 1, map: { '0.09': 1 } },
+    { serviceCode: 'openai', countryId: 3, defaultPrice: 0.1, totalStock: 1, map: { '0.1': 1 } },
   ],
   getNumber: async (_serviceCode, countryId) => {
     latestActivationId = `admin-pw-${randomUUID()}`;

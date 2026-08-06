@@ -6,7 +6,7 @@ import { expect, test } from '@playwright/test';
 import { createApp } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
-import type { HeroSms } from '../src/herosms.js';
+import type { HeroSms, HeroSmsOffer } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error('Playwright 测试必须通过隔离测试数据库运行器执行');
@@ -26,7 +26,12 @@ const heroSms: HeroSms = {
   balance: async () => 10,
   services: async () => [{ code: 'openai', name: 'OpenAI' }],
   countries: async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }],
-  offers: async () => [],
+  // 报价必须含不高于测试最高价（saveCandidateSettings 第二参 0.11）的档位，否则预算内库存筛选无候选可取。
+  offers: async (): Promise<HeroSmsOffer[]> => [
+    { serviceCode: 'openai', countryId: 1, defaultPrice: 0.1, totalStock: 3, map: { '0.1': 3 } },
+    { serviceCode: 'openai', countryId: 2, defaultPrice: 0.1, totalStock: 3, map: { '0.1': 3 } },
+    { serviceCode: 'openai', countryId: 3, defaultPrice: 0.1, totalStock: 3, map: { '0.1': 3 } },
+  ],
   getNumber: async (_serviceCode, countryId) => {
     acquisitionCount += 1;
     latestActivationId = `pw-${randomUUID()}`;

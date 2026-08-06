@@ -412,23 +412,128 @@ function formatNationalNumber(nationalNumber: string, callingCode: string): stri
   return nationalNumber.replace(/(\d{3})(?=\d)/g, '$1 ').trim();
 }
 
-function recipientPage(token: string, view: RecipientAuthorizationView, message?: string): string {
-  const action = `/a/${encodeURIComponent(token)}/numbers`;
-  const errorMarkup = message ? `<p class="error" role="alert">${escapeHtml(message)}</p>` : '';
-  const firstFlowHint = !view.hasAcquiredNumber ? '<p>获取号码后，请在 24 小时内使用</p>' : '';
-  const countdownScript = COUNTDOWN_SCRIPT;
-  const acquisitionForm = (label = '获取号码') => `<form method="post" action="${action}" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">${label}</button></form>`;
-  const quotaMarkup = (remainingNumberCount?: number) => {
-    if (remainingNumberCount === undefined) throw new Error('可操作的接收者页面缺少剩余号码获取额度');
-    return `<p class="quota-info">剩余号码获取额度：${remainingNumberCount}${remainingNumberCount > 0 ? ' · 实际能否获取取决于供应商库存' : ''}</p>`;
-  };
-  if (view.state === 'available') {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${firstFlowHint}${errorMarkup}${acquisitionForm()}</section></main>`);
+// —— 接收者分步模板 ——
+// 按步骤类型拆分的独立渲染函数：自检页、号码页、接码页、边界简页各由一个函数承担，
+// recipientStepType 依据现有 recipientState 视图完成步骤类型调度，不引入新业务能力。
+
+type RecipientStepType = 'self-check' | 'number' | 'code' | 'boundary';
+
+// 取号表单：提交后禁用按钮并原地提示，避免重复取号。
+function recipientAcquisitionForm(token: string, label = '获取号码'): string {
+  return `<form method="post" action="/a/${encodeURIComponent(token)}/numbers" onsubmit="const button=this.querySelector('button');button.disabled=true;button.textContent='正在获取号码'"><button type="submit">${label}</button></form>`;
+}
+
+function recipientErrorMarkup(message?: string): string {
+  return message ? `<p class="error" role="alert">${escapeHtml(message)}</p>` : '';
+}
+
+function recipientFirstFlowHint(hasAcquiredNumber: boolean): string {
+  return hasAcquiredNumber ? '' : '<p>获取号码后，请在 24 小时内使用</p>';
+}
+
+function recipientQuotaMarkup(remainingNumberCount?: number): string {
+  if (remainingNumberCount === undefined) throw new Error('可操作的接收者页面缺少剩余号码获取额度');
+  return `<p class="quota-info">剩余号码获取额度：${remainingNumberCount}${remainingNumberCount > 0 ? ' · 实际能否获取取决于供应商库存' : ''}</p>`;
+}
+
+// 自检页：待领取授权链接的入口步骤。自检确认门落地前，本函数暂承载现有获取号码页内容。
+function selfCheckStepPage(token: string, view: RecipientAuthorizationView, message?: string): string {
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${recipientFirstFlowHint(view.hasAcquiredNumber)}${recipientErrorMarkup(message)}${recipientAcquisitionForm(token)}</section></main>`);
+}
+
+// 号码页：承载号码获取相关的状态与操作。取号对账过渡态归属本步骤，
+// 尚未内联为加载提示前，暂按现有独立状态页渲染。
+function numberStepPage(view: RecipientAuthorizationView): string {
+  const status = view.acquisitionState === 'manual' ? '号码状态待发送者处理' : '正在确认号码获取结果，请稍候';
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${recipientFirstFlowHint(view.hasAcquiredNumber)}<p>${status}</p></section></main>`);
+}
+
+// 接码页：已取得号码后等待短信或展示验证码结果的步骤。
+// 号码页与接码页按等待起点拆分前，本函数暂同时承载号码区块（当前号码、使用说明）与接码区块（等待/结果、动作）。
+function codeStepPage(token: string, view: RecipientAuthorizationView, message?: string): string {
+  const e164 = view.phoneNumber ? (view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`) : undefined;
+  const split = e164 ? splitNationalNumber(e164, countryCallingCode(view.countryName)) : undefined;
+  const countryMarkup = view.countryName
+    ? `<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName)}${split ? ` <span class="calling-code">(+${escapeHtml(split.callingCode)})</span>` : ''}</p>`
+    : '';
+  const numberMarkup = e164
+    ? split
+      ? `<p class="number">${escapeHtml(formatNationalNumber(split.nationalNumber, split.callingCode))}</p><button type="button" data-copy-value="${escapeHtml(split.nationalNumber)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
+      : `<p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
+    : '';
+  const numberExpiryIso = view.numberExpiresAt?.toISOString();
+  const numberExpiryMarkup = !view.smsDelivered && numberExpiryIso
+    ? `<p class="number-expiry">号码有效至：还剩 <span data-countdown="${escapeHtml(numberExpiryIso)}" data-format="clock" data-expired-text="00:00（号码已过期）">${escapeHtml(numberExpiryIso)}</span></p>`
+    : '';
+
+  const currentNumberSection = `<section class="section-current-number" aria-label="当前号码">${countryMarkup}${numberMarkup}${numberExpiryMarkup}</section>`;
+
+  const guideMarkup = view.smsDelivered
+    ? ''
+    : `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码并填入，同时切换对应国家代码，点击短信（即从Whatsapp切换到短信），最后点击继续；系统将自动接收并显示验证码。</p></div>`;
+
+  let verificationMarkup = '';
+  if (view.smsDelivered) {
+    const resultViewUntil = view.resultViewUntil?.toISOString();
+    const resultViewRemainingMarkup = resultViewUntil
+      ? `<p class="result-view-expiry">验证码可查看至：<span data-countdown="${escapeHtml(resultViewUntil)}" data-format="clock" data-expired-text="00:00（查看期已结束）">${escapeHtml(resultViewUntil)}</span></p>`
+      : '';
+    const delivery = view.verificationCode
+      ? `<p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
+      : '<p>短信已收到，暂时无法显示验证码，请联系发送者</p>';
+    verificationMarkup = `${delivery}${resultViewRemainingMarkup}`;
+  } else {
+    verificationMarkup = `<div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
   }
+  const verificationSection = `<section class="section-verification-result" aria-label="验证码">${verificationMarkup}</section>`;
+
+  let actionPrompt = '';
+  let actionButton = '';
+
+  if (!view.smsDelivered) {
+    const currentNumberAction = view.currentNumberAction;
+    const cancelAvailableIso = view.cancelAvailableAt?.toISOString();
+    if (currentNumberAction === 'replace') {
+      if (view.currentNumberActionAvailable) {
+        actionPrompt = '<p class="action-prompt">长时间未收到验证码，可点击更换号码</p>';
+        actionButton = `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">更换号码</button></form>`;
+      } else if (cancelAvailableIso) {
+        actionPrompt = `<p class="action-prompt"><span data-countdown="${escapeHtml(cancelAvailableIso)}" data-format="cancel-countdown" data-action="replace">${escapeHtml(cancelAvailableIso)}</span> 后可换号</p>`;
+        actionButton = '<button type="button" disabled>更换号码</button>';
+      }
+    } else if (currentNumberAction === 'end') {
+      if (view.currentNumberActionAvailable) {
+        actionPrompt = '<p class="action-prompt">仍长时间未收到验证码，可点击结束使用并联系管理员</p>';
+        actionButton = `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">结束使用</button></form>`;
+      } else if (cancelAvailableIso) {
+        actionPrompt = `<p class="action-prompt">再等 <span data-countdown="${escapeHtml(cancelAvailableIso)}" data-format="cancel-countdown" data-action="end">${escapeHtml(cancelAvailableIso)}</span></p>`;
+        actionButton = '<button type="button" disabled>结束使用</button>';
+      }
+    }
+  }
+
+  const actionSection = view.smsDelivered
+    ? ''
+    : `<section class="section-action">${recipientQuotaMarkup(view.remainingNumberCount)}${actionPrompt}${actionButton}</section>`;
+
+  const refreshDelay = view.resultViewRemainingMs;
+  const refreshScript = view.smsDelivered && refreshDelay !== undefined
+    ? `<script>setTimeout(()=>location.reload(),${Math.max(1000, Math.ceil(refreshDelay))});</script>`
+    : '';
+  const pollingScript = (!view.smsDelivered || !view.verificationCode)
+    ? '<script>setTimeout(()=>location.reload(),5000)</script>'
+    : '';
+
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${recipientErrorMarkup(message)}${currentNumberSection}${guideMarkup}${verificationSection}${actionSection}</section></main>${COUNTDOWN_SCRIPT}${pollingScript}${refreshScript}`);
+}
+
+// 边界简页：终态与边界态（额度用尽占面、动作确认中、超时确认中、号码过期、额度用尽）
+// 一律渲染独立简页，不进入分步导航。
+function boundaryStepPage(token: string, view: RecipientAuthorizationView, message?: string): string {
   if (view.state === 'claimed' && view.quotaExhaustedPromptUntil) {
     const promptUntil = view.quotaExhaustedPromptUntil.toISOString();
     const refreshDelay = Math.max(1_000, Math.ceil(view.quotaExhaustedPromptUntil.getTime() - Date.now()));
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>可用号码次数已用尽，请联系发送者</p><ul class="facts"><li>提示结束时间：<span data-countdown="${escapeHtml(promptUntil)}" data-format="minutes-seconds">${escapeHtml(promptUntil)}</span></li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),${refreshDelay});</script>`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>可用号码次数已用尽，请联系发送者</p><ul class="facts"><li>提示结束时间：<span data-countdown="${escapeHtml(promptUntil)}" data-format="minutes-seconds">${escapeHtml(promptUntil)}</span></li></ul></section></main>${COUNTDOWN_SCRIPT}<script>setTimeout(()=>location.reload(),${refreshDelay});</script>`);
   }
   if (view.state === 'claimed' && view.currentNumberActionInProgress) {
     const action = view.currentNumberActionInProgress === 'end' ? '正在结束使用' : '正在更换号码';
@@ -437,92 +542,35 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   if (view.state === 'claimed' && view.activationTimeoutInProgress) {
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在确认号码状态</p></section></main><script>setTimeout(()=>location.reload(),5000)</script>`);
   }
-  if (view.state === 'claimed' && (view.phoneNumber || view.smsDelivered)) {
-    const e164 = view.phoneNumber ? (view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`) : undefined;
-    const split = e164 ? splitNationalNumber(e164, countryCallingCode(view.countryName)) : undefined;
-    const countryMarkup = view.countryName
-      ? `<p class="country">${countryFlagHtml(view.countryName)} ${escapeHtml(view.countryName)}${split ? ` <span class="calling-code">(+${escapeHtml(split.callingCode)})</span>` : ''}</p>`
-      : '';
-    const numberMarkup = e164
-      ? split
-        ? `<p class="number">${escapeHtml(formatNationalNumber(split.nationalNumber, split.callingCode))}</p><button type="button" data-copy-value="${escapeHtml(split.nationalNumber)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
-        : `<p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
-      : '';
-    const numberExpiryIso = view.numberExpiresAt?.toISOString();
-    const numberExpiryMarkup = !view.smsDelivered && numberExpiryIso
-      ? `<p class="number-expiry">号码有效至：还剩 <span data-countdown="${escapeHtml(numberExpiryIso)}" data-format="clock" data-expired-text="00:00（号码已过期）">${escapeHtml(numberExpiryIso)}</span></p>`
-      : '';
-
-    const currentNumberSection = `<section class="section-current-number" aria-label="当前号码">${countryMarkup}${numberMarkup}${numberExpiryMarkup}</section>`;
-
-    const guideMarkup = view.smsDelivered
-      ? ''
-      : `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码并填入，同时切换对应国家代码，点击短信（即从Whatsapp切换到短信），最后点击继续；系统将自动接收并显示验证码。</p></div>`;
-
-    let verificationMarkup = '';
-    if (view.smsDelivered) {
-      const resultViewUntil = view.resultViewUntil?.toISOString();
-      const resultViewRemainingMarkup = resultViewUntil
-        ? `<p class="result-view-expiry">验证码可查看至：<span data-countdown="${escapeHtml(resultViewUntil)}" data-format="clock" data-expired-text="00:00（查看期已结束）">${escapeHtml(resultViewUntil)}</span></p>`
-        : '';
-      const delivery = view.verificationCode
-        ? `<p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
-        : '<p>短信已收到，暂时无法显示验证码，请联系发送者</p>';
-      verificationMarkup = `${delivery}${resultViewRemainingMarkup}`;
-    } else {
-      verificationMarkup = `<div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
-    }
-    const verificationSection = `<section class="section-verification-result" aria-label="验证码">${verificationMarkup}</section>`;
-
-    let actionPrompt = '';
-    let actionButton = '';
-
-    if (!view.smsDelivered) {
-      const currentNumberAction = view.currentNumberAction;
-      const cancelAvailableIso = view.cancelAvailableAt?.toISOString();
-      if (currentNumberAction === 'replace') {
-        if (view.currentNumberActionAvailable) {
-          actionPrompt = '<p class="action-prompt">长时间未收到验证码，可点击更换号码</p>';
-          actionButton = `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">更换号码</button></form>`;
-        } else if (cancelAvailableIso) {
-          actionPrompt = `<p class="action-prompt"><span data-countdown="${escapeHtml(cancelAvailableIso)}" data-format="cancel-countdown" data-action="replace">${escapeHtml(cancelAvailableIso)}</span> 后可换号</p>`;
-          actionButton = '<button type="button" disabled>更换号码</button>';
-        }
-      } else if (currentNumberAction === 'end') {
-        if (view.currentNumberActionAvailable) {
-          actionPrompt = '<p class="action-prompt">仍长时间未收到验证码，可点击结束使用并联系管理员</p>';
-          actionButton = `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">结束使用</button></form>`;
-        } else if (cancelAvailableIso) {
-          actionPrompt = `<p class="action-prompt">再等 <span data-countdown="${escapeHtml(cancelAvailableIso)}" data-format="cancel-countdown" data-action="end">${escapeHtml(cancelAvailableIso)}</span></p>`;
-          actionButton = '<button type="button" disabled>结束使用</button>';
-        }
-      }
-    }
-
-    const actionSection = view.smsDelivered
-      ? ''
-      : `<section class="section-action">${quotaMarkup(view.remainingNumberCount)}${actionPrompt}${actionButton}</section>`;
-
-    const refreshDelay = view.resultViewRemainingMs;
-    const refreshScript = view.smsDelivered && refreshDelay !== undefined
-      ? `<script>setTimeout(()=>location.reload(),${Math.max(1000, Math.ceil(refreshDelay))});</script>`
-      : '';
-    const pollingScript = (!view.smsDelivered || !view.verificationCode)
-      ? '<script>setTimeout(()=>location.reload(),5000)</script>'
-      : '';
-
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}${currentNumberSection}${guideMarkup}${verificationSection}${actionSection}</section></main>${countdownScript}${pollingScript}${refreshScript}`);
-  }
-  if (view.state === 'claimed' && view.acquisitionState) {
-    const status = view.acquisitionState === 'manual' ? '号码状态待发送者处理' : '正在确认号码获取结果，请稍候';
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${firstFlowHint}<p>${status}</p></section></main>`);
-  }
   const terminalMessage = view.remainingNumberCount === 0
     ? '<p>可用号码次数已用尽，请联系发送者</p>'
     : view.nextNumberAvailable
-      ? `<p>号码已过期</p>${quotaMarkup(view.remainingNumberCount)}` + acquisitionForm('获取下一个号码')
-      : `${firstFlowHint}${quotaMarkup(view.remainingNumberCount)}${acquisitionForm()}`;
-  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}${terminalMessage}</section></main>`);
+      ? `<p>号码已过期</p>${recipientQuotaMarkup(view.remainingNumberCount)}` + recipientAcquisitionForm(token, '获取下一个号码')
+      : `${recipientFirstFlowHint(view.hasAcquiredNumber)}${recipientQuotaMarkup(view.remainingNumberCount)}${recipientAcquisitionForm(token)}`;
+  return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${recipientErrorMarkup(message)}${terminalMessage}</section></main>`);
+}
+
+// 现有 recipientState 视图到步骤类型的调度。分支顺序即优先级，与重构前的页面分支顺序保持一致：
+// 待领取映射自检页；已领取且额度用尽占面、动作确认中、超时确认中映射边界简页；
+// 已领取且有当前号码或短信已送达映射接码页；取号对账过渡态归属号码页；其余终态映射边界简页。
+function recipientStepType(view: RecipientAuthorizationView): RecipientStepType {
+  if (view.state === 'available') return 'self-check';
+  if (view.state === 'claimed' && view.quotaExhaustedPromptUntil) return 'boundary';
+  if (view.state === 'claimed' && view.currentNumberActionInProgress) return 'boundary';
+  if (view.state === 'claimed' && view.activationTimeoutInProgress) return 'boundary';
+  if (view.state === 'claimed' && (view.phoneNumber || view.smsDelivered)) return 'code';
+  if (view.state === 'claimed' && view.acquisitionState) return 'number';
+  return 'boundary';
+}
+
+// 接收者页面入口：先由视图解析步骤类型，再交给对应步骤渲染函数。
+function recipientPage(token: string, view: RecipientAuthorizationView, message?: string): string {
+  switch (recipientStepType(view)) {
+    case 'self-check': return selfCheckStepPage(token, view, message);
+    case 'number': return numberStepPage(view);
+    case 'code': return codeStepPage(token, view, message);
+    case 'boundary': return boundaryStepPage(token, view, message);
+  }
 }
 
 function replacementConfirmationPage(token: string, action: 'replace' | 'end'): string {
