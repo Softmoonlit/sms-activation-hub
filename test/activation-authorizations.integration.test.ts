@@ -623,6 +623,112 @@ if (!databaseUrl) {
     }
   });
 
+  test('同一授权链接并发换号只取消一次当前激活并只取得一个后继号码', async () => {
+    let now = new Date('2026-08-15T00:00:00.000Z');
+    const firstActivationId = `concurrent-replacement-${randomUUID()}`;
+    const secondActivationId = `concurrent-replacement-next-${randomUUID()}`;
+    let getNumberCalls = 0;
+    let cancelCalls = 0;
+    let markCancellationStarted!: () => void;
+    const cancellationStarted = new Promise<void>((resolve) => { markCancellationStarted = resolve; });
+    let releaseCancellation!: () => void;
+    const cancellationReleased = new Promise<void>((resolve) => { releaseCancellation = resolve; });
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        return {
+          activationId: getNumberCalls === 1 ? firstActivationId : secondActivationId,
+          phoneNumber: getNumberCalls === 1 ? '+14155550123' : '+442079460123',
+          activationCost: 0.8, currency: 'USD', activationTime: now,
+          activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async (activationId) => {
+        assert.equal(activationId, firstActivationId, '换号只能取消当前激活');
+        cancelCalls += 1;
+        markCancellationStarted();
+        await cancellationReleased;
+        return 'cancelled';
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const acquired = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(acquired.statusCode, 303);
+      assert.equal(getNumberCalls, 1);
+
+      now = new Date('2026-08-15T00:02:00.000Z');
+      // 第一个请求取得取消状态转换后确定性阻塞在供应商取消调用上，
+      // 确保第二个请求到达时状态转换已提交但供应商调用尚未完成，不依赖任意延时。
+      const first = app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      await cancellationStarted;
+      assert.equal(cancelCalls, 1);
+
+      const second = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(second.statusCode, 409, '竞争请求必须收到明确冲突响应');
+      // 冲突页面提示换号仍在进行中：当前激活已被胜出请求转态，页面状态已经变化。
+      assert.match(second.body, /正在更换号码/);
+      assert.equal(cancelCalls, 1, '竞争请求不得重复调用供应商取消');
+      assert.equal(getNumberCalls, 1, '竞争请求不得消耗候选位置');
+
+      releaseCancellation();
+      const won = await first;
+      assert.equal(won.statusCode, 303, '胜出请求完成换号并重定向');
+      assert.equal(cancelCalls, 1);
+      assert.equal(getNumberCalls, 2);
+
+      const page = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(page.body, /20 7946 0123/);
+      assert.match(page.body, /剩余号码获取额度：1 · 实际能否获取取决于供应商库存/);
+
+      const activations = await database.pool.query<{ provider_activation_id: string; status: string }>(
+        `SELECT provider_activation_id, status FROM supplier_activations
+         WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
+         ORDER BY acquired_at`,
+        [token.slice(-8)],
+      );
+      assert.deepEqual(activations.rows, [
+        { provider_activation_id: firstActivationId, status: 'cancelled' },
+        { provider_activation_id: secondActivationId, status: 'waiting_sms' },
+      ]);
+      const candidates = await database.pool.query<{ used: string; total: string }>(
+        `SELECT count(*) FILTER (WHERE used_at IS NOT NULL)::text AS used, count(*)::text AS total
+         FROM authorization_candidate_countries
+         WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)`,
+        [token.slice(-8)],
+      );
+      assert.deepEqual(candidates.rows[0], { used: '2', total: '3' }, '并发换号恰好消耗两个候选位置');
+      const activeCount = await database.pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM supplier_activations
+         WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
+           AND status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming')`,
+        [token.slice(-8)],
+      );
+      assert.equal(activeCount.rows[0]?.count, '1', '并发换号后仍只有一个当前激活');
+      const authorization = await database.pool.query<{ status: string }>(
+        'SELECT status FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+      );
+      assert.equal(authorization.rows[0]?.status, 'in_progress');
+    } finally {
+      releaseCancellation();
+      await resetAuthorizationTables(database);
+      await app.close();
+    }
+  });
+
   test('待领取详情只展示短标识和生命周期，撤销后 token 立即返回 404', async () => {
     const fixedNow = new Date('2026-08-01T00:00:00.000Z');
     const { app, database } = await openApplication(scriptedHeroSms(), () => fixedNow);
