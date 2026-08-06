@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { PoolClient } from 'pg';
 
 import { AUTHORIZATION_STATUS_LABELS, AuthorizationTokenSuffixCollisionError, Database, type AuthorizationListDisplayStatus, type AuthorizationListPage, type AuthorizationListQuery, type AuthorizationStatus } from './database.js';
-import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsQuote } from './herosms.js';
+import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsActivationStatus, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsQuote } from './herosms.js';
 
 const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const RESULT_VIEW_LIFETIME_MS = 5 * 60 * 1000;
@@ -254,6 +254,31 @@ function normalizeProviderActivationTimes(number: HeroSmsNumber, confirmedAt: Da
 
 function resultViewDeadline(receivedAt: Date): Date {
   return new Date(receivedAt.getTime() + RESULT_VIEW_LIFETIME_MS);
+}
+
+/** 供应商状态处理结果的四类可观测性分类：等待短信静默不告警（调用点不记录），其余按严重程度记录极简 stdout 日志。 */
+type ProviderStatusOutcome = 'cancelled' | 'uncertain' | 'response';
+
+/** 状态查询异常的两档映射：格式错误（契约破坏）为 response，其余（网络错误、限流、上游临时故障等）统一为 uncertain。 */
+function providerStatusOutcomeOf(error: unknown): 'uncertain' | 'response' {
+  return error instanceof HeroSmsResponseError && error.kind === 'response' ? 'response' : 'uncertain';
+}
+
+/** 极简 stdout 日志：等待短信是正常中间态，调用点静默不产生告警；供应商取消 info、网络错误 warn、格式错误 error。 */
+function logProviderStatus(activationId: string, outcome: ProviderStatusOutcome): void {
+  let level: 'info' | 'warn' | 'error';
+  let message: string;
+  if (outcome === 'cancelled') {
+    level = 'info';
+    message = '供应商已取消';
+  } else if (outcome === 'uncertain') {
+    level = 'warn';
+    message = '状态查询失败（网络错误或供应商临时故障）';
+  } else {
+    level = 'error';
+    message = '状态查询返回格式错误（无法识别的响应）';
+  }
+  process.stdout.write(`[herosms][${level}] 激活 ${activationId} ${message}\n`);
 }
 
 export class ActivationAuthorizations {
@@ -1024,17 +1049,29 @@ export class ActivationAuthorizations {
       [now, new Date(now.getTime() + 60_000)],
     );
     for (const activation of polled.rows) {
+      let status: HeroSmsActivationStatus;
       try {
-        const status = await this.heroSms.activationStatus(activation.provider_activation_id);
-        const receivedAt = status.receivedAt ?? activation.sms_received_at;
-        const text = status.text ?? activation.sms_text;
-        if (status.delivered && text && receivedAt) {
-          await this.receiveHeroSmsWebhook({
-            activationId: activation.provider_activation_id, serviceCode: this.openAiServiceCode, countryId: activation.country_id,
-            receivedAt, text, ...(status.code ? { code: status.code } : {}),
-          });
-        }
-      } catch { /* 轮询是 Webhook 的恢复机制，失败留待下次任务。 */ }
+        status = await this.heroSms.activationStatus(activation.provider_activation_id);
+      } catch (error) {
+        // 轮询是 Webhook 的恢复机制：失败只记录、不处理，留待下次任务；
+        // 网络错误 warn 与格式错误 error 分开记录，等待状态不产生告警。
+        logProviderStatus(activation.provider_activation_id, providerStatusOutcomeOf(error));
+        continue;
+      }
+      const receivedAt = status.receivedAt ?? activation.sms_received_at;
+      const text = status.text ?? activation.sms_text;
+      if (status.delivered && text && receivedAt) {
+        await this.receiveHeroSmsWebhook({
+          activationId: activation.provider_activation_id, serviceCode: this.openAiServiceCode, countryId: activation.country_id,
+          receivedAt, text, ...(status.code ? { code: status.code } : {}),
+        });
+        continue;
+      }
+      if (status.providerStatus === 'cancelled') {
+        // 轮询路径对供应商取消只记录、不处理：上游主动取消仍由既有超时对账收尾。
+        logProviderStatus(activation.provider_activation_id, 'cancelled');
+      }
+      // 等待短信静默不告警；下一次轮询由 claim 时写入的 sms_poll_after 按约 60 秒推进。
     }
   }
 
@@ -1147,7 +1184,9 @@ export class ActivationAuthorizations {
       let finalStatus;
       try {
         finalStatus = await this.heroSms.activationStatus(activation.provider_activation_id);
-      } catch {
+      } catch (error) {
+        // 状态查询失败（网络错误 warn 或格式错误 error）只记录并释放租约，由下一次扫描继续对账。
+        logProviderStatus(activation.provider_activation_id, providerStatusOutcomeOf(error));
         await this.releaseTimeoutReconciliation(activation.id, reconciliationClaimToken);
         continue;
       }
@@ -1171,10 +1210,11 @@ export class ActivationAuthorizations {
         continue;
       }
       if (finalStatus.providerStatus !== 'cancelled') {
-        // STATUS_WAIT_CODE 不是最终状态，必须继续供应商对账，不能抢先开放后继号码。
+        // 等待短信（对象形式或 V1 字符串）不是最终状态，必须继续供应商对账，不能抢先开放后继号码；等待静默不告警。
         await this.releaseTimeoutReconciliation(activation.id, reconciliationClaimToken);
         continue;
       }
+      logProviderStatus(activation.provider_activation_id, 'cancelled');
       await this.recordSupplierCancellation(activation.id, reconciliationClaimToken);
       // 供应商已经确认取消；退款仍可继续对账，但不再阻塞接收者自行获取下一个号码。
       await this.confirmTimedOutFinalStatus(activation.id, reconciliationClaimToken);
@@ -1514,6 +1554,7 @@ export class ActivationAuthorizations {
       try {
         const status = await this.heroSms.activationStatus(activation.provider_activation_id);
         if (status.providerStatus === 'cancelled') {
+          logProviderStatus(activation.provider_activation_id, 'cancelled');
           const confirmed = await this.confirmCancellation(activation.provider_activation_id, claimToken);
           if (confirmed?.replacementAllowed) {
             await this.acquireReplacementNumber(confirmed.authorizationId);
@@ -1558,9 +1599,10 @@ export class ActivationAuthorizations {
             );
           }
         }
-      } catch {
-        // 供应商请求异常：保持取消确认状态；释放租约 token，保留 cancellation_retry_after 重试期限，
-        // 由专用定时器在期限到达后继续对账，不会以零延迟重试。
+      } catch (error) {
+        // 供应商请求异常：保持取消确认状态；网络错误 warn、格式错误 error 分开记录；
+        // 释放租约 token，保留 cancellation_retry_after 重试期限，由专用定时器在期限到达后继续对账，不会以零延迟重试。
+        logProviderStatus(activation.provider_activation_id, providerStatusOutcomeOf(error));
         await this.database.pool.query(
           `UPDATE supplier_activations
            SET cancellation_reconciliation_claimed_at = NULL, cancellation_reconciliation_claim_token = NULL
