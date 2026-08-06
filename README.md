@@ -77,7 +77,7 @@ cp .env.prod.example .env.prod
 chmod 600 .env.prod
 # 编辑 .env.prod，替换所有 replace-* 占位符为真实值
 # PUBLIC_ORIGIN=https://sms.example.com
-# TRUSTED_PROXY=127.0.0.1（Caddy 在宿主机上）
+# TRUSTED_PROXY=127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16（Caddy 在宿主机 + Docker 部署）
 
 # PostgreSQL 容器仅需一个密钥文件，避免应用密钥注入数据库容器
 cp .env.postgres.prod.example .env.postgres.prod
