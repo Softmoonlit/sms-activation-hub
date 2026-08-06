@@ -225,4 +225,36 @@ if (!databaseUrl) {
       await adminDatabase.close();
     }
   });
+
+  test('旧三位置默认配置存在空洞时升级明确失败', async () => {
+    const schemaName = `candidate_position_migration_${randomUUID().replaceAll('-', '')}`;
+    const adminDatabase = new Database(databaseUrl);
+    await adminDatabase.pool.query(`CREATE SCHEMA ${schemaName}`);
+
+    const scopedUrl = new URL(databaseUrl);
+    scopedUrl.searchParams.set('options', `-csearch_path=${schemaName}`);
+    const database = new Database(scopedUrl.toString());
+
+    try {
+      await database.pool.query(`
+        CREATE TABLE default_candidate_countries (
+          position SMALLINT PRIMARY KEY CHECK (position BETWEEN 1 AND 3),
+          country_id INTEGER NOT NULL CHECK (country_id >= 0),
+          country_name TEXT NOT NULL
+        );
+        INSERT INTO default_candidate_countries (position, country_id, country_name)
+        VALUES (1, 1, '美国'), (3, 3, '法国');
+      `);
+
+      await assert.rejects(
+        database.initialize(),
+        (error: unknown) => error instanceof Error
+          && error.message.includes('旧默认候选位置配置必须为空或完整包含位置一至三'),
+      );
+    } finally {
+      await database.close();
+      await adminDatabase.pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
+      await adminDatabase.close();
+    }
+  });
 }

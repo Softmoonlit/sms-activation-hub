@@ -420,7 +420,7 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     return `<p class="quota-info">剩余号码获取额度：${remainingNumberCount}${remainingNumberCount > 0 ? ' · 实际能否获取取决于供应商库存' : ''}</p>`;
   };
   if (view.state === 'available') {
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${firstFlowHint}${errorMarkup}${quotaMarkup(view.remainingNumberCount)}${acquisitionForm()}</section></main>`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${firstFlowHint}${errorMarkup}${acquisitionForm()}</section></main>`);
   }
   if (view.state === 'claimed' && view.quotaExhaustedPromptUntil) {
     const promptUntil = view.quotaExhaustedPromptUntil.toISOString();

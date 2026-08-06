@@ -13,7 +13,6 @@ const QUOTA_EXHAUSTED_ENDED_REASON = 'quota_exhausted';
 /** 取消请求返回 too-early 后的重试间隔，也是对账 claim 时持久化的下一次处理时间。 */
 const CANCELLATION_RETRY_DELAY_MS = 60_000;
 const CANCELLATION_RECONCILIATION_LEASE_MS = 5 * 60 * 1000;
-const MAX_NUMBERS_PER_AUTHORIZATION = 3;
 
 export interface CreatedAuthorization {
   id: string;
@@ -719,7 +718,7 @@ export class ActivationAuthorizations {
     const result = await this.database.pool.query<{
       id: string; status: AuthorizationStatus; ended_reason: string | null;
       number_acquisition_expires_at: Date | null; result_view_until: Date | null; end_prompt_until: Date | null; recipient_session_hash: string | null; country_name: string | null; phone_number: string | null;
-      acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string;
+      acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string; candidate_count: string;
       acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; end_use_pending: boolean | null; sms_code: string | null;
       last_activation_status: string | null; last_activation_timed_out_at: Date | null;
     }>(
@@ -733,6 +732,7 @@ export class ActivationAuthorizations {
               candidate.country_name, activation.phone_number, activation.acquired_at,
               activation.cancel_available_at, activation.expires_at AS number_expires_at,
               activation.status AS activation_status, activation.end_use_pending, activation.sms_code,
+              (SELECT count(*) FROM authorization_candidate_countries candidate_count WHERE candidate_count.authorization_id = auth.id)::text AS candidate_count,
               (SELECT count(*) FROM authorization_candidate_countries used WHERE used.authorization_id = auth.id AND used.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status, last_activation.status AS last_activation_status,
               last_activation.timed_out_at AS last_activation_timed_out_at
@@ -773,7 +773,6 @@ export class ActivationAuthorizations {
     if (authorization.status === 'unclaimed') {
       return {
         state: 'available', hasAcquiredNumber,
-        remainingNumberCount: MAX_NUMBERS_PER_AUTHORIZATION,
         ...(expiresAt ? { expiresAt } : {}),
       };
     }
@@ -788,6 +787,7 @@ export class ActivationAuthorizations {
       return { state: 'claimed', hasAcquiredNumber, quotaExhaustedPromptUntil: authorization.end_prompt_until };
     }
     const deliveryContextVisible = authorization.activation_status !== 'manual_reconciliation' || authorization.last_activation_timed_out_at === null;
+    const remainingNumberCount = Number(authorization.candidate_count) - Number(authorization.used_count);
     return {
       state: 'claimed', hasAcquiredNumber, ...(expiresAt ? { expiresAt } : {}),
       ...(authorization.country_name ? { countryName: authorization.country_name } : {}),
@@ -799,19 +799,19 @@ export class ActivationAuthorizations {
         resultViewUntil: authorization.result_view_until,
         resultViewRemainingMs: Math.max(0, authorization.result_view_until.getTime() - now.getTime()),
       } : {}),
-      remainingNumberCount: MAX_NUMBERS_PER_AUTHORIZATION - Number(authorization.used_count),
+      remainingNumberCount,
       ...(authorization.acquisition_status ? { acquisitionState: authorization.acquisition_status === 'manual' ? 'manual' as const : 'confirming' as const } : {}),
       // 领取截止后不得更换号码或创建后继号码：窗口内的当前号码只能结束使用。
       // waiting_sms 必然已领取，领取时写入的截止时间保证 expiresAt 已定义，防御分支只为类型安全。
       ...(authorization.activation_status === 'waiting_sms'
-        ? { currentNumberAction: (expiresAt === undefined || expiresAt <= now || Number(authorization.used_count) >= MAX_NUMBERS_PER_AUTHORIZATION) ? 'end' as const : 'replace' as const } : {}),
+        ? { currentNumberAction: (expiresAt === undefined || expiresAt <= now || remainingNumberCount === 0) ? 'end' as const : 'replace' as const } : {}),
       ...(authorization.activation_status === 'waiting_sms'
         && authorization.cancel_available_at && authorization.cancel_available_at <= now
         ? { currentNumberActionAvailable: true } : {}),
       ...(authorization.activation_status === 'cancellation_confirming'
         ? { currentNumberActionInProgress: authorization.end_use_pending ? 'end' as const : 'replace' as const } : {}),
       ...(authorization.last_activation_status === 'manual_reconciliation' && authorization.last_activation_timed_out_at ? { activationTimeoutInProgress: true } : {}),
-      ...(authorization.last_activation_status === 'timed_out' && Number(authorization.used_count) < 3 ? { nextNumberAvailable: true } : {}),
+      ...(authorization.last_activation_status === 'timed_out' && remainingNumberCount > 0 ? { nextNumberAvailable: true } : {}),
       ...(authorization.status === 'result_available' ? { smsDelivered: true } : {}),
       ...(authorization.sms_code ? { verificationCode: authorization.sms_code } : {}),
     };
@@ -1427,11 +1427,11 @@ export class ActivationAuthorizations {
       } else if (!sessionBound) {
         return { kind: 'unavailable' };
       }
-      const used = await client.query<{ count: string }>(
-        'SELECT count(*)::text AS count FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NOT NULL',
+      const candidates = await client.query<{ has_unused: boolean }>(
+        'SELECT EXISTS (SELECT 1 FROM authorization_candidate_countries WHERE authorization_id = $1 AND used_at IS NULL) AS has_unused',
         [authorization.id],
       );
-      const endingUse = acquisitionExpiresAt <= now || Number(used.rows[0]?.count) >= MAX_NUMBERS_PER_AUTHORIZATION;
+      const endingUse = acquisitionExpiresAt <= now || !candidates.rows[0]?.has_unused;
       const currentResult = await client.query<{ provider_activation_id: string; cancel_available_at: Date; cancellation_retry_after: Date | null }>(
         `SELECT provider_activation_id, cancel_available_at, cancellation_retry_after FROM supplier_activations
          WHERE authorization_id = $1 AND status = 'waiting_sms' FOR UPDATE`,

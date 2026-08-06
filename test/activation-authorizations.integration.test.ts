@@ -353,7 +353,7 @@ if (!databaseUrl) {
       assert.equal(preview.statusCode, 200);
       assert.match(preview.body, /<h1>OpenAI<\/h1>/);
       assert.match(preview.body, /获取号码/);
-      assert.match(preview.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
+      assert.doesNotMatch(preview.body, /剩余号码获取额度/);
       assert.doesNotMatch(preview.body.replace('实际能否获取取决于供应商库存', ''), /链接剩余时间|候选地区|价格|库存|HeroSMS|供应商|期限|授权/);
 
       const claim = await app.inject({ method: 'POST', url: `/a/${token}` + '/numbers', headers: { cookie: 'recipient_session=stale-client-value' } });
@@ -795,7 +795,7 @@ if (!databaseUrl) {
       const initial = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(initial.body, /OpenAI/);
       assert.match(initial.body, /获取号码/);
-      assert.match(initial.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
+      assert.doesNotMatch(initial.body, /剩余号码获取额度/);
       assert.doesNotMatch(initial.body, /美国|英国|法国|HeroSMS|价格/);
       const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(claimed.statusCode, 303);
@@ -1074,6 +1074,176 @@ if (!databaseUrl) {
         [token.slice(-8)],
       );
       assert.deepEqual(candidates.rows.map((candidate) => candidate.used_at), [null, null, null]);
+    } finally { await app.close(); }
+  });
+
+  test('八个候选位置在领取前不展示额度，无库存重试不消耗且成功后只减少一次', async () => {
+    const fixedNow = new Date('2026-08-04T13:00:00.000Z');
+    let stock = 0;
+    let acquisitionCount = 0;
+    const heroSms = scriptedHeroSms({
+      quotes: async () => [{ countryId: 1, price: 0.8, stock }],
+      getNumber: async () => {
+        acquisitionCount += 1;
+        return {
+          activationId: `dynamic-eight-${randomUUID()}`,
+          phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: fixedNow, activationEndTime: new Date(fixedNow.getTime() + 1_200_000),
+        };
+      },
+    });
+    const { app, database } = await openApplication(heroSms, () => fixedNow);
+    try {
+      await database.replaceDefaultCandidateLocations(Array.from({ length: 8 }, () => ({
+        countryId: 1,
+        countryName: '美国',
+      })));
+      await database.initialize();
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+
+      const unopened = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.doesNotMatch(unopened.body, /剩余号码获取额度/);
+
+      const empty = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(empty.statusCode, 409);
+      assert.match(empty.body, /当前暂无可用号码，请稍后重试/);
+      assert.match(empty.body, /剩余号码获取额度：8 · 实际能否获取取决于供应商库存/);
+      const recipientCookie = `recipient_session=${cookieValue(empty, 'recipient_session')}`;
+
+      const emptyAgain = await app.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
+      assert.equal(emptyAgain.statusCode, 409);
+      assert.match(emptyAgain.body, /剩余号码获取额度：8 · 实际能否获取取决于供应商库存/);
+
+      stock = 1;
+      const acquired = await app.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
+      assert.equal(acquired.statusCode, 303);
+      const acquiredPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(acquiredPage.body, /剩余号码获取额度：7 · 实际能否获取取决于供应商库存/);
+      assert.equal(acquisitionCount, 1);
+    } finally { await app.close(); }
+  });
+
+  test('十个重复地区候选位置逐个消费，第十个号码只能结束使用', async () => {
+    let now = new Date('2026-08-04T14:00:00.000Z');
+    let acquisitionCount = 0;
+    const heroSms = scriptedHeroSms({
+      quotes: async () => [{ countryId: 1, price: 0.8, stock: 10 }],
+      getNumber: async () => {
+        acquisitionCount += 1;
+        return {
+          activationId: `dynamic-ten-${acquisitionCount}-${randomUUID()}`,
+          phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await database.replaceDefaultCandidateLocations(Array.from({ length: 10 }, () => ({
+        countryId: 1,
+        countryName: '美国',
+      })));
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+
+      for (let usedCount = 1; usedCount < 10; usedCount += 1) {
+        now = new Date(now.getTime() + 120_000);
+        const page = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+        assert.match(page.body, /更换号码/);
+        assert.match(page.body, new RegExp(`剩余号码获取额度：${10 - usedCount}`));
+        const replacementResponse: InjectionResponse = await app.inject({
+          method: 'POST', url: `/a/${token}/replacement/confirm`,
+          headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+          payload: 'replacement=confirm',
+        });
+        assert.equal(replacementResponse.statusCode, 303);
+      }
+
+      now = new Date(now.getTime() + 120_000);
+      const finalPage = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(finalPage.body, /结束使用/);
+      assert.doesNotMatch(finalPage.body, /更换号码/);
+      assert.match(finalPage.body, /剩余号码获取额度：0/);
+      assert.equal(acquisitionCount, 10);
+
+      const ending = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(ending.statusCode, 303);
+      const terminal = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(terminal.body, /可用号码次数已用尽，请联系发送者/);
+    } finally { await app.close(); }
+  });
+
+  test('八个候选位置已消费五个后激活超时，仍可手动获取下一个号码', async () => {
+    let now = new Date('2026-08-04T16:00:00.000Z');
+    let acquisitionCount = 0;
+    let currentActivationId = '';
+    let currentAcquiredAt = now;
+    const heroSms = scriptedHeroSms({
+      quotes: async () => [{ countryId: 1, price: 0.8, stock: 8 }],
+      getNumber: async () => {
+        acquisitionCount += 1;
+        currentActivationId = `dynamic-timeout-${acquisitionCount}-${randomUUID()}`;
+        currentAcquiredAt = now;
+        return {
+          activationId: currentActivationId,
+          phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+          activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => 'cancelled',
+      activationStatus: async (activationId) => {
+        assert.equal(activationId, currentActivationId);
+        return { delivered: false, providerStatus: 'cancelled' };
+      },
+      activationHistory: async () => [{
+        activationId: currentActivationId,
+        phoneNumber: '+1********23', activationCost: 0, currency: 'USD',
+        activationTime: currentAcquiredAt, status: '4',
+      }],
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await database.replaceDefaultCandidateLocations(Array.from({ length: 8 }, () => ({
+        countryId: 1,
+        countryName: '美国',
+      })));
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      const recipientCookie = `recipient_session=${cookieValue(claimed, 'recipient_session')}`;
+
+      for (let replacementCount = 0; replacementCount < 4; replacementCount += 1) {
+        now = new Date(now.getTime() + 120_000);
+        const replacementResponse = await app.inject({
+          method: 'POST', url: `/a/${token}/replacement/confirm`,
+          headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
+          payload: 'replacement=confirm',
+        });
+        assert.equal(replacementResponse.statusCode, 303);
+      }
+      assert.equal(acquisitionCount, 5);
+
+      now = new Date(currentAcquiredAt.getTime() + 1_200_000);
+      const timedOut = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+      assert.match(timedOut.body, /号码已过期/);
+      assert.match(timedOut.body, /剩余号码获取额度：3 · 实际能否获取取决于供应商库存/);
+      assert.match(timedOut.body, /获取下一个号码/);
+
+      const next = await app.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: recipientCookie } });
+      assert.equal(next.statusCode, 303);
+      assert.equal(acquisitionCount, 6);
     } finally { await app.close(); }
   });
 

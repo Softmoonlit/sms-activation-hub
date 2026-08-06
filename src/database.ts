@@ -84,10 +84,15 @@ export interface CompleteDefaultCandidateLocation {
   countryName: string;
 }
 
+const MIN_CANDIDATE_POSITION_COUNT = 3;
+const MAX_CANDIDATE_POSITION_COUNT = 10;
+
 function completeDefaultCandidateLocationsFromRows(
   locations: readonly { position: number; countryId: number; countryName?: string | null }[],
 ): CompleteDefaultCandidateLocation[] | undefined {
-  if (locations.length !== 3 || locations.some((location, index) => (
+  if (locations.length < MIN_CANDIDATE_POSITION_COUNT
+    || locations.length > MAX_CANDIDATE_POSITION_COUNT
+    || locations.some((location, index) => (
     location.position !== index + 1 || !location.countryName || !location.countryName.trim()
   ))) {
     return undefined;
@@ -150,13 +155,6 @@ export class Database {
 
       ALTER TABLE default_candidate_countries
         DROP CONSTRAINT IF EXISTS default_candidate_countries_country_name_check;
-      DELETE FROM default_candidate_countries
-        WHERE country_name IS NULL OR btrim(country_name) = '';
-      ALTER TABLE default_candidate_countries
-        ALTER COLUMN country_name SET NOT NULL;
-      ALTER TABLE default_candidate_countries
-        ADD CONSTRAINT default_candidate_countries_country_name_check
-        CHECK (length(btrim(country_name)) > 0);
 
       CREATE TABLE IF NOT EXISTS activation_authorizations (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -174,6 +172,43 @@ export class Database {
         last_activity_at TIMESTAMPTZ,
         recipient_session_hash TEXT
       );
+    `);
+
+    const existingDefaultLocations = await this.pool.query<{
+      position: number; country_id: number; country_name: string | null;
+    }>('SELECT position, country_id, country_name FROM default_candidate_countries ORDER BY position');
+    const defaultPositionConstraints = await this.pool.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+       WHERE conrelid = 'default_candidate_countries'::regclass AND contype = 'c'`,
+    );
+    const hasLegacyPositionConstraint = defaultPositionConstraints.rows.some(({ definition }) => (
+      definition.includes('position') && definition.includes('position <= 3')
+    ));
+    const completeExistingDefaultLocations = completeDefaultCandidateLocationsFromRows(
+      existingDefaultLocations.rows.map((location) => ({
+        position: location.position,
+        countryId: location.country_id,
+        countryName: location.country_name,
+      })),
+    );
+    if (existingDefaultLocations.rows.length > 0
+      && (!completeExistingDefaultLocations
+        || (hasLegacyPositionConstraint && completeExistingDefaultLocations.length !== 3))) {
+      throw new Error('旧默认候选位置配置必须为空或完整包含位置一至三');
+    }
+
+    await this.pool.query(`
+      ALTER TABLE default_candidate_countries
+        DROP CONSTRAINT IF EXISTS default_candidate_countries_position_check;
+      ALTER TABLE default_candidate_countries
+        ADD CONSTRAINT default_candidate_countries_position_check
+        CHECK (position BETWEEN 1 AND 10);
+      ALTER TABLE default_candidate_countries
+        ALTER COLUMN country_name SET NOT NULL;
+      ALTER TABLE default_candidate_countries
+        ADD CONSTRAINT default_candidate_countries_country_name_check
+        CHECK (length(btrim(country_name)) > 0);
     `);
 
     // 补齐新模型列：必须先于旧模型记录检查执行（检查查询引用了 claimed_at 等新列，
@@ -331,6 +366,11 @@ export class Database {
         DROP COLUMN IF EXISTS quoted_stock;
       ALTER TABLE authorization_candidate_countries
         DROP CONSTRAINT IF EXISTS authorization_candidate_countri_authorization_id_country_id_key;
+      ALTER TABLE authorization_candidate_countries
+        DROP CONSTRAINT IF EXISTS authorization_candidate_countries_position_check;
+      ALTER TABLE authorization_candidate_countries
+        ADD CONSTRAINT authorization_candidate_countries_position_check
+        CHECK (position BETWEEN 1 AND 10);
 
       CREATE UNIQUE INDEX IF NOT EXISTS authorization_candidate_countries_position_country_idx
         ON authorization_candidate_countries (authorization_id, position, country_id);
@@ -366,7 +406,7 @@ export class Database {
       ALTER TABLE supplier_activations ALTER COLUMN candidate_position SET NOT NULL;
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_candidate_position_check;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_candidate_position_check
-        CHECK (candidate_position BETWEEN 1 AND 3);
+        CHECK (candidate_position BETWEEN 1 AND 10);
       ALTER TABLE supplier_activations DROP CONSTRAINT IF EXISTS supplier_activations_candidate_position_fkey;
       ALTER TABLE supplier_activations ADD CONSTRAINT supplier_activations_candidate_position_fkey
         FOREIGN KEY (authorization_id, candidate_position, country_id)
@@ -550,7 +590,7 @@ export class Database {
       ALTER TABLE number_acquisition_requests ALTER COLUMN candidate_position SET NOT NULL;
       ALTER TABLE number_acquisition_requests DROP CONSTRAINT IF EXISTS number_acquisition_requests_candidate_position_check;
       ALTER TABLE number_acquisition_requests ADD CONSTRAINT number_acquisition_requests_candidate_position_check
-        CHECK (candidate_position BETWEEN 1 AND 3);
+        CHECK (candidate_position BETWEEN 1 AND 10);
 
       ALTER TABLE number_acquisition_requests DROP CONSTRAINT IF EXISTS number_acquisition_requests_candidate_position_fkey;
       ALTER TABLE number_acquisition_requests ADD CONSTRAINT number_acquisition_requests_candidate_position_fkey
@@ -636,10 +676,12 @@ export class Database {
   }
 
   async replaceDefaultCandidateLocations(locations: readonly { countryId: number; countryName: string }[]): Promise<void> {
-    if (locations.length !== 3 || locations.some((location) => (
+    if (locations.length < MIN_CANDIDATE_POSITION_COUNT
+      || locations.length > MAX_CANDIDATE_POSITION_COUNT
+      || locations.some((location) => (
       !Number.isSafeInteger(location.countryId) || location.countryId < 0 || !location.countryName.trim()
     ))) {
-      throw new Error('默认候选地区必须包含三个完整位置');
+      throw new Error('默认候选地区必须包含三至十个完整位置');
     }
     await this.transaction(async (client) => {
       await client.query('DELETE FROM default_candidate_countries');

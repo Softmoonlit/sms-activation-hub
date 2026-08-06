@@ -73,8 +73,7 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     await page.goto(`${origin}/a/${token}`);
     await expect(page.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
     await expect(page.getByText('获取号码后，请在 24 小时内使用')).toBeVisible();
-    await expect(page.getByText('剩余号码获取额度：3 · 实际能否获取取决于供应商库存')).toBeVisible();
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, '待领取额度说明不应造成横向溢出');
+    await expect(page.getByText(/剩余号码获取额度/)).toHaveCount(0);
     await page.getByRole('button', { name: '获取号码' }).click();
     await expect(page.getByText('415 555 0123', { exact: true })).toBeVisible();
     await expect(page.getByText('(+1)', { exact: true })).toBeVisible();
