@@ -25,7 +25,7 @@ export interface CandidateLocationSettings {
 
 export class CandidateLocationValidationError extends Error {
   constructor() {
-    super('请选择三个可查询的候选地区。');
+    super('请选择三至十个可查询的候选地区。');
   }
 }
 
@@ -35,7 +35,7 @@ interface RemoteCandidateLocationSettings {
 }
 
 function completeConfiguration(locations: DefaultCandidateLocation[]): boolean {
-  return locations.length === 3 && locations.every((location, index) => (
+  return locations.length >= 3 && locations.length <= 10 && locations.every((location, index) => (
     location.position === index + 1 && Boolean(location.countryName?.trim())
   ));
 }
@@ -77,7 +77,7 @@ export class DefaultCandidateLocations {
   }
 
   async replace(countryIds: number[]): Promise<void> {
-    if (countryIds.length !== 3) {
+    if (countryIds.length < 3 || countryIds.length > 10) {
       throw new CandidateLocationValidationError();
     }
     const remote = await this.remoteSettings();

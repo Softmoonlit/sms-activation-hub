@@ -90,9 +90,28 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
     await expect(page.locator('h1', { hasText: '设置' })).toBeVisible();
     await expect(page.getByText('HeroSMS 已连接')).toBeVisible();
     await expect(page.getByText('余额：')).toBeVisible();
-    // 选择三个候选地区
+    const candidateCount = page.getByLabel('候选位置数量');
+    await expect(candidateCount).toHaveValue('3');
+    await candidateCount.selectOption('10');
+    await expect(page.getByRole('textbox', { name: /^候选地区 \d+$/ })).toHaveCount(10);
+    // 选择前三个位置后缩减，只裁剪末尾位置并保留前三个选择。
     for (const [position, countryName] of ['美国', '英国', '法国'].entries()) {
-      const candidate = page.getByRole('textbox', { name: `候选地区 ${position + 1}` });
+      const candidate = page.getByRole('textbox', { name: `候选地区 ${position + 1}`, exact: true });
+      await candidate.fill(countryName);
+      await page.getByRole('option', { name: countryName }).click();
+    }
+    await candidateCount.selectOption('3');
+    await expect(page.getByRole('textbox', { name: /^候选地区 \d+$/ })).toHaveCount(3);
+    await expect(page.getByRole('textbox', { name: '候选地区 1', exact: true })).toHaveValue(/美国/);
+    await expect(page.getByRole('textbox', { name: '候选地区 2', exact: true })).toHaveValue(/英国/);
+    await expect(page.getByRole('textbox', { name: '候选地区 3', exact: true })).toHaveValue(/法国/);
+
+    // 重新增加时位置四至十为空，不恢复已裁剪值；完成全部位置后保存十个位置。
+    await candidateCount.selectOption('10');
+    for (let position = 4; position <= 10; position += 1) {
+      await expect(page.getByRole('textbox', { name: `候选地区 ${position}`, exact: true })).toHaveValue('');
+      const countryName = ['美国', '英国', '法国'][(position - 1) % 3]!;
+      const candidate = page.getByRole('textbox', { name: `候选地区 ${position}`, exact: true });
       await candidate.fill(countryName);
       await page.getByRole('option', { name: countryName }).click();
     }
@@ -100,6 +119,7 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
     // 保存后重定向回设置页，候选地区已保存
     await expect(page.locator('h1', { hasText: '设置' })).toBeVisible();
     await expect(page.getByRole('status')).toHaveText('✓ 已保存');
+    await expect(page.getByLabel('候选位置数量')).toHaveValue('10');
 
     // 返回首页，进入批量数量确认页
     await page.getByRole('link', { name: '返回首页' }).click();

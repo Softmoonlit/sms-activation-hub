@@ -438,6 +438,61 @@ if (!databaseUrl) {
     }
   });
 
+  test('后台配置变更只影响尚未领取授权，领取时复制完整动态额度', async () => {
+    const heroSms = scriptedHeroSms({
+      quotes: async () => [
+        { countryId: 1, price: 0.8, stock: 0 },
+        { countryId: 2, price: 1.2, stock: 0 },
+        { countryId: 3, price: 1.5, stock: 0 },
+      ],
+      getNumber: async () => { throw new Error('零库存不应请求号码'); },
+    });
+    const { app, database } = await openApplication(heroSms, () => new Date('2026-08-01T00:00:00.000Z'));
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '2');
+      const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]!);
+      assert.equal(tokens.length, 2);
+
+      const saveEight = await post(app, session, `/${config.adminPath}/settings`, {
+        candidateCount: '8',
+        ...Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`candidate${index + 1}`, String(index % 3 + 1)])),
+      });
+      assert.equal(saveEight.statusCode, 303);
+      const firstClaim = await app.inject({ method: 'POST', url: `/a/${tokens[0]}/numbers` });
+      assert.equal(firstClaim.statusCode, 409);
+      assert.match(firstClaim.body, /剩余号码获取额度：8/);
+
+      const saveTen = await post(app, session, `/${config.adminPath}/settings`, {
+        candidateCount: '10',
+        ...Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`candidate${index + 1}`, String((index + 1) % 3 + 1)])),
+      });
+      assert.equal(saveTen.statusCode, 303);
+      const secondClaim = await app.inject({ method: 'POST', url: `/a/${tokens[1]}/numbers` });
+      assert.equal(secondClaim.statusCode, 409);
+      assert.match(secondClaim.body, /剩余号码获取额度：10/);
+
+      const copied = await database.pool.query<{ token_suffix: string; positions: number[]; country_ids: number[] }>(
+        `SELECT auth.token_suffix,
+                array_agg(candidate.position ORDER BY candidate.position)::int[] AS positions,
+                array_agg(candidate.country_id ORDER BY candidate.position)::int[] AS country_ids
+         FROM activation_authorizations auth
+         JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id
+         WHERE auth.token_suffix = ANY($1::text[])
+         GROUP BY auth.token_suffix`,
+        [tokens.map((token) => token.slice(-8))],
+      );
+      const copiedBySuffix = new Map(copied.rows.map((row) => [row.token_suffix, row]));
+      assert.deepEqual(copiedBySuffix.get(tokens[0]!.slice(-8))?.positions, [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.deepEqual(copiedBySuffix.get(tokens[0]!.slice(-8))?.country_ids, [1, 2, 3, 1, 2, 3, 1, 2]);
+      assert.deepEqual(copiedBySuffix.get(tokens[1]!.slice(-8))?.positions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      assert.deepEqual(copiedBySuffix.get(tokens[1]!.slice(-8))?.country_ids, [2, 3, 1, 2, 3, 1, 2, 3, 1, 2]);
+    } finally {
+      await cleanupBatchAuthorizations(database);
+      await app.close();
+    }
+  });
+
   test('默认候选配置不完整时领取整体回滚并保留待领取链接', async () => {
     let now = new Date('2026-08-02T00:00:00.000Z');
     let providerCalls = 0;

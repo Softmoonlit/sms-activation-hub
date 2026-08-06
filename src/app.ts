@@ -29,9 +29,8 @@ interface CsrfBody {
 }
 
 interface SettingsBody extends CsrfBody {
-  candidate1?: string;
-  candidate2?: string;
-  candidate3?: string;
+  candidateCount?: string;
+  [key: string]: string | undefined;
 }
 
 interface HeroSmsWebhookBody {
@@ -163,6 +162,7 @@ function htmlPage(title: string, content: string): string {
     .shell form button { margin: 0; background: #52616b; }
     .settings { max-width: 560px; padding: 32px 0; }
     .settings form { display: grid; gap: 16px; }
+    #candidate-locations { display: grid; gap: 16px; }
     .settings form button { justify-self: start; background: #117a65; }
     .empty { padding: 32px 0; color: #53616c; }
     .dashboard { display: grid; gap: 28px; padding: 28px 0; }
@@ -550,20 +550,28 @@ function settingsPage(path: string, csrfToken: string, settings: CandidateLocati
     return [location.id, `${location.name}，${quote}`];
   }));
   const configuredByPosition = new Map(settings.configuredLocations.map((location) => [location.position, location]));
-  const configuredPositions = [1, 2, 3].map((position) => configuredByPosition.get(position));
+  const candidateCount = settings.configurationComplete ? settings.configuredLocations.length : 3;
+  const configuredPositions = Array.from({ length: candidateCount }, (_, index) => configuredByPosition.get(index + 1));
   const initialIds = jsonForScript(configuredPositions.map((location) => location?.countryId ?? null));
-  const initialNames = jsonForScript(configuredPositions.map((location) => location?.countryName ?? null));
-  const comboboxes = [0, 1, 2].map((position) => {
+  const selectedLabel = (position: number): string => {
     const configured = configuredPositions[position];
     const selectedId = configured?.countryId;
     const selectedLocation = selectedId !== undefined ? settings.locations.find((location) => location.id === selectedId) : undefined;
-    const selectedName = configured?.countryName
-      ? escapeHtml(`${configured.countryName}${selectedLocation ? `，${selectedLocation.price === undefined || selectedLocation.stock === undefined ? '暂无报价' : `价格 ${selectedLocation.price.toString()}，库存 ${selectedLocation.stock}`}` : `，地区 ID ${configured.countryId}`}`)
+    return configured?.countryName
+      ? `${configured.countryName}${selectedLocation ? `，${selectedLocation.price === undefined || selectedLocation.stock === undefined ? '暂无报价' : `价格 ${selectedLocation.price.toString()}，库存 ${selectedLocation.stock}`}` : `，地区 ID ${configured.countryId}`}`
       : '';
+  };
+  const initialLabels = configuredPositions.map((_, position) => selectedLabel(position));
+  const initialLabelsJson = jsonForScript(initialLabels);
+  const comboboxMarkup = (position: number, selectedId?: number, label = ''): string => {
+    const selectedName = escapeHtml(label);
     const inputClass = selectedName ? ' cb-selected' : '';
     return `<label>候选地区 ${position + 1}<div class="cb" id="cb${position}"><input class="cb-input${inputClass}" type="text" value="${selectedName}" placeholder="输入地区名称搜索并选择…" autocomplete="off" aria-label="候选地区 ${position + 1}" aria-haspopup="listbox"><button type="button" class="cb-clear" tabindex="-1" title="清除选择">✕</button><input type="hidden" name="candidate${position + 1}" value="${selectedId ?? ''}"><ul class="cb-list" role="listbox"></ul></div></label>`;
-  }).join('');
-  const comboboxScript = `<script>(()=>{const LOCS=${locationsJson};const INIT=${initialIds};const INIT_NAMES=${initialNames};function esc(s){return s.replace(/[&<>'"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'})[c]??c);}function hl(text,q){if(!q)return esc(text);const i=text.toLowerCase().indexOf(q.toLowerCase());if(i<0)return esc(text);return esc(text.slice(0,i))+'<span class="cb-hl">'+esc(text.slice(i,i+q.length))+'</span>'+esc(text.slice(i+q.length));}function init(idx){const wrap=document.getElementById('cb'+idx);const inp=wrap.querySelector('.cb-input');const clr=wrap.querySelector('.cb-clear');const hid=wrap.querySelector('input[type=hidden]');const list=wrap.querySelector('.cb-list');let selId=INIT[idx];let selName=INIT_NAMES[idx]?inp.value:'';let activeIdx=-1;function render(q){list.innerHTML='';activeIdx=-1;const matched=LOCS.filter(l=>!q||l[1].toLowerCase().includes(q.toLowerCase()));if(!matched.length){list.innerHTML='<li class="cb-empty">无匹配地区</li>';}else{matched.forEach((l,i)=>{const li=document.createElement('li');li.className='cb-opt';li.setAttribute('role','option');li.dataset.id=l[0];li.dataset.name=l[1];li.innerHTML=hl(l[1],q);li.addEventListener('mousedown',e=>{e.preventDefault();pick(l[0],l[1]);});list.appendChild(li);});}list.classList.add('cb-open');}function pick(id,name){selId=id;selName=name;hid.value=id;inp.value=name;inp.classList.add('cb-selected');list.classList.remove('cb-open');}function clear(){selId=null;selName='';hid.value='';inp.value='';inp.classList.remove('cb-selected');list.classList.remove('cb-open');inp.focus();}inp.addEventListener('focus',()=>render(inp.classList.contains('cb-selected')?'':inp.value));inp.addEventListener('input',()=>{if(inp.classList.contains('cb-selected')&&inp.value!==selName){inp.classList.remove('cb-selected');hid.value='';selId=null;}render(inp.value);});inp.addEventListener('blur',()=>{setTimeout(()=>{list.classList.remove('cb-open');if(selId!=null&&inp.value!==selName){inp.value=selName;inp.classList.add('cb-selected');}else if(selId==null){inp.value='';inp.classList.remove('cb-selected');}},150);});inp.addEventListener('keydown',e=>{const opts=[...list.querySelectorAll('.cb-opt')];if(e.key==='ArrowDown'){e.preventDefault();activeIdx=Math.min(activeIdx+1,opts.length-1);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='ArrowUp'){e.preventDefault();activeIdx=Math.max(activeIdx-1,0);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='Enter'&&activeIdx>=0&&opts[activeIdx]){e.preventDefault();const o=opts[activeIdx];pick(Number(o.dataset.id),o.dataset.name);}else if(e.key==='Escape'){list.classList.remove('cb-open');inp.blur();}});clr.addEventListener('click',clear);}[0,1,2].forEach(init);document.addEventListener('click',e=>{if(!e.target.closest('.cb'))document.querySelectorAll('.cb-list').forEach(l=>l.classList.remove('cb-open'));});})();<\/script>`;
+  };
+  const comboboxes = configuredPositions.map((location, position) => comboboxMarkup(position, location?.countryId, initialLabels[position])).join('');
+  const countOptions = Array.from({ length: 8 }, (_, index) => index + 3)
+    .map((count) => `<option value="${count}"${count === candidateCount ? ' selected' : ''}>${count}</option>`).join('');
+  const comboboxScript = `<script>(()=>{const LOCS=${locationsJson};const INIT=${initialIds};const LABELS=${initialLabelsJson};const container=document.getElementById('candidate-locations');const count=document.getElementById('candidate-count');function esc(s){return s.replace(/[&<>'"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'})[c]??c);}function hl(text,q){if(!q)return esc(text);const i=text.toLowerCase().indexOf(q.toLowerCase());if(i<0)return esc(text);return esc(text.slice(0,i))+'<span class="cb-hl">'+esc(text.slice(i,i+q.length))+'</span>'+esc(text.slice(i+q.length));}function field(idx){const label=document.createElement('label');label.append('候选地区 '+(idx+1));const wrap=document.createElement('div');wrap.className='cb';wrap.id='cb'+idx;wrap.innerHTML='<input class="cb-input" type="text" placeholder="输入地区名称搜索并选择…" autocomplete="off" aria-label="候选地区 '+(idx+1)+'" aria-haspopup="listbox"><button type="button" class="cb-clear" tabindex="-1" title="清除选择">✕</button><input type="hidden" name="candidate'+(idx+1)+'"><ul class="cb-list" role="listbox"></ul>';label.append(wrap);return label;}function init(idx){const wrap=document.getElementById('cb'+idx);const inp=wrap.querySelector('.cb-input');const clr=wrap.querySelector('.cb-clear');const hid=wrap.querySelector('input[type=hidden]');const list=wrap.querySelector('.cb-list');let selId=INIT[idx];let selName=LABELS[idx]||'';let activeIdx=-1;if(selId!=null){hid.value=selId;inp.value=selName;inp.classList.add('cb-selected');}function render(q){list.innerHTML='';activeIdx=-1;const matched=LOCS.filter(l=>!q||l[1].toLowerCase().includes(q.toLowerCase()));if(!matched.length){list.innerHTML='<li class="cb-empty">无匹配地区</li>';}else{matched.forEach((l)=>{const li=document.createElement('li');li.className='cb-opt';li.setAttribute('role','option');li.dataset.id=l[0];li.dataset.name=l[1];li.innerHTML=hl(l[1],q);li.addEventListener('mousedown',e=>{e.preventDefault();pick(l[0],l[1]);});list.appendChild(li);});}list.classList.add('cb-open');}function pick(id,name){selId=id;selName=name;INIT[idx]=id;LABELS[idx]=name;hid.value=id;inp.value=name;inp.classList.add('cb-selected');list.classList.remove('cb-open');}function clear(){selId=null;selName='';INIT[idx]=null;LABELS[idx]='';hid.value='';inp.value='';inp.classList.remove('cb-selected');list.classList.remove('cb-open');inp.focus();}inp.addEventListener('focus',()=>render(inp.classList.contains('cb-selected')?'':inp.value));inp.addEventListener('input',()=>{if(inp.classList.contains('cb-selected')&&inp.value!==selName){inp.classList.remove('cb-selected');hid.value='';selId=null;INIT[idx]=null;LABELS[idx]='';}render(inp.value);});inp.addEventListener('blur',()=>{setTimeout(()=>{list.classList.remove('cb-open');if(selId!=null&&inp.value!==selName){inp.value=selName;inp.classList.add('cb-selected');}else if(selId==null){inp.value='';inp.classList.remove('cb-selected');}},150);});inp.addEventListener('keydown',e=>{const opts=[...list.querySelectorAll('.cb-opt')];if(e.key==='ArrowDown'){e.preventDefault();activeIdx=Math.min(activeIdx+1,opts.length-1);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='ArrowUp'){e.preventDefault();activeIdx=Math.max(activeIdx-1,0);opts.forEach((o,i)=>o.classList.toggle('cb-active',i===activeIdx));opts[activeIdx]?.scrollIntoView({block:'nearest'});}else if(e.key==='Enter'&&activeIdx>=0&&opts[activeIdx]){e.preventDefault();const o=opts[activeIdx];pick(Number(o.dataset.id),o.dataset.name);}else if(e.key==='Escape'){list.classList.remove('cb-open');inp.blur();}});clr.addEventListener('click',clear);}Array.from(container.children).forEach((_,idx)=>init(idx));count.addEventListener('change',()=>{const next=Number(count.value);while(container.children.length>next)container.lastElementChild.remove();INIT.length=next;LABELS.length=next;while(container.children.length<next){const idx=container.children.length;INIT[idx]=null;LABELS[idx]='';container.append(field(idx));init(idx);}});document.addEventListener('click',e=>{if(!e.target.closest('.cb'))document.querySelectorAll('.cb-list').forEach(l=>l.classList.remove('cb-open'));});})();<\/script>`;
   const errorMarkup = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : '';
   const savedBadge = saved
     ? `<span id="save-toast" role="status" aria-live="polite" style="margin-left:.75rem;color:#166534;font-size:.875rem">✓ 已保存</span><script>(()=>{setTimeout(()=>{const t=document.getElementById('save-toast');if(t)t.remove();history.replaceState(null,'',location.pathname);},3000);})();<\/script>`
@@ -574,8 +582,8 @@ function settingsPage(path: string, csrfToken: string, settings: CandidateLocati
   const balanceMarkup = settings.balance === undefined ? '' : `<p>余额：${settings.balance.toFixed(2)}</p>`;
   const configurationWarning = settings.configurationComplete
     ? ''
-    : '<p class="error" role="alert">当前默认候选地区配置不完整，请重新选择并保存三个候选地区。</p>';
-  return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', `<section class="settings">${heroStatus}${balanceMarkup}${configurationWarning}${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}">${comboboxes}<button type="submit">保存默认候选地区</button></form></section>${comboboxScript}`);
+    : '<p class="error" role="alert">当前默认候选位置配置不完整，请重新选择并保存。</p>';
+  return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', `<section class="settings">${heroStatus}${balanceMarkup}${configurationWarning}${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}"><label for="candidate-count">候选位置数量<select id="candidate-count" name="candidateCount">${countOptions}</select></label><div id="candidate-locations">${comboboxes}</div><button type="submit">保存默认候选地区</button></form></section>${comboboxScript}`);
 }
 
 function settingsUnavailablePage(path: string, csrfToken: string): string {
@@ -588,7 +596,14 @@ function csrfFrom(request: FastifyRequest): string | undefined {
 }
 
 function candidateCountryIds(body: SettingsBody): number[] | undefined {
-  const values = [body.candidate1, body.candidate2, body.candidate3];
+  if (!body.candidateCount || !/^(?:[3-9]|10)$/.test(body.candidateCount)) return undefined;
+  const candidateCount = Number(body.candidateCount);
+  const submittedCandidateFields = Object.keys(body).filter((key) => key.startsWith('candidate') && key !== 'candidateCount');
+  if (submittedCandidateFields.length !== candidateCount
+    || submittedCandidateFields.some((key) => !/^candidate(?:[1-9]|10)$/.test(key))) {
+    return undefined;
+  }
+  const values = Array.from({ length: candidateCount }, (_, index) => body[`candidate${index + 1}`]);
   if (values.some((value) => !value || !/^\d+$/.test(value))) {
     return undefined;
   }

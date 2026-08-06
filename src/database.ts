@@ -665,6 +665,7 @@ export class Database {
   }
 
   async completeDefaultCandidateLocationsFor(client: PoolClient): Promise<CompleteDefaultCandidateLocation[] | undefined> {
+    await client.query('LOCK TABLE default_candidate_countries IN SHARE MODE');
     const result = await client.query<{ position: number; country_id: number; country_name: string | null }>(
       'SELECT position, country_id, country_name FROM default_candidate_countries ORDER BY position',
     );
@@ -684,6 +685,7 @@ export class Database {
       throw new Error('默认候选地区必须包含三至十个完整位置');
     }
     await this.transaction(async (client) => {
+      await client.query('LOCK TABLE default_candidate_countries IN EXCLUSIVE MODE');
       await client.query('DELETE FROM default_candidate_countries');
       for (const [index, location] of locations.entries()) {
         await client.query(
