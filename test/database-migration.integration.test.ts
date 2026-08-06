@@ -32,7 +32,8 @@ if (!databaseUrl) {
           ADD COLUMN IF NOT EXISTS recipient_identifier TEXT,
           ADD COLUMN IF NOT EXISTS normalized_recipient_identifier TEXT,
           ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ,
-          ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+          ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS recipient_session_hash TEXT;
         ALTER TABLE authorization_candidate_countries
           ADD COLUMN IF NOT EXISTS quoted_price NUMERIC,
           ADD COLUMN IF NOT EXISTS quoted_stock INTEGER;
@@ -80,6 +81,7 @@ if (!databaseUrl) {
       assert.equal(columnNames.has('normalized_recipient_identifier'), false);
       assert.equal(columnNames.has('expires_at'), false);
       assert.equal(columnNames.has('revoked_at'), false);
+      assert.equal(columnNames.has('recipient_session_hash'), false);
 
       // 候选位置的领取时报价和库存快照字段一并彻底删除（ADR-0004）
       const candidateColumns = await database.pool.query<{ column_name: string }>(
@@ -280,9 +282,9 @@ if (!databaseUrl) {
       await database.pool.query(
         `INSERT INTO activation_authorizations
           (id, token_hash, token_suffix, status, created_at, claimed_at,
-           number_acquisition_expires_at, last_activity_at, recipient_session_hash)
+           number_acquisition_expires_at, last_activity_at)
          VALUES ($1, 'legacy-token-hash', 'LEGACY01', 'in_progress', $2::timestamptz, $2::timestamptz,
-                 $2::timestamptz + INTERVAL '24 hours', $2::timestamptz, 'legacy-session-hash')`,
+                 $2::timestamptz + INTERVAL '24 hours', $2::timestamptz)`,
         [authorizationId, createdAt],
       );
       await database.pool.query(

@@ -42,7 +42,7 @@ const heroSms: HeroSms = {
   finishActivation: async () => undefined,
 };
 
-test('移动视口完成领取、浏览器绑定、三次号码操作和结束使用确认', async ({ browser }) => {
+test('移动视口完成领取、三次号码操作和结束使用确认', async ({ browser }) => {
   acquisitionCount = 0;
   let now = new Date('2026-08-01T00:00:00.000Z');
   const database = new Database(databaseUrl!);
@@ -145,7 +145,8 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     const otherContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const otherPage = await otherContext.newPage();
     await otherPage.goto(`${origin}/a/${token}`);
-    await expect(otherPage.getByText('此链接不可用，请联系发送者')).toBeVisible();
+    await expect(otherPage.getByText('可用号码次数已用尽，请联系发送者')).toBeVisible();
+    await expect(otherPage.getByText('此链接不可用，请联系发送者')).toHaveCount(0);
     await otherContext.close();
     await context.close();
   } finally {
