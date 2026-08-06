@@ -131,7 +131,7 @@ function errorKind(value: unknown): HeroSmsErrorKind | undefined {
   const code = errorCode(value);
   if (code === 'NO_NUMBERS') return 'no-numbers';
   if (code === 'NO_BALANCE') return 'balance';
-  if (code === 'NO_KEY' || code === 'BAD_KEY' || code === 'BAD_API_KEY') return 'authentication';
+  if (code === 'NO_KEY' || code === 'BAD_KEY') return 'authentication';
   if (code === 'ACCOUNT_INACTIVE' || code === 'CHANNELS_LIMIT') return 'account';
   if (code === 'RATE_LIMIT') return 'rate-limit';
   if (code === 'SERVER_ERROR' || code === 'ERROR_SQL') return 'provider';
@@ -155,28 +155,35 @@ function objectEntries(value: unknown): [string, unknown][] | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : undefined;
 }
 
-function offerRecords(value: unknown): { serviceCode?: unknown; countryId?: unknown; value: unknown }[] | undefined {
+function offerRecords(value: unknown): { serviceCode: string; countryId: string; offer: unknown }[] | undefined {
   const entries = objectEntries(value);
   const dataEntries = entries ? objectEntries(Object.fromEntries(entries).data) : undefined;
   if (!dataEntries) return undefined;
-  const records: { serviceCode: string; countryId: string; value: unknown }[] = [];
+  const records: { serviceCode: string; countryId: string; offer: unknown }[] = [];
   for (const [serviceCode, countries] of dataEntries) {
     const countryEntries = objectEntries(countries);
     if (!countryEntries || !serviceCode.trim()) return undefined;
     for (const [countryId, offer] of countryEntries) {
-      records.push({ serviceCode, countryId, value: offer });
+      records.push({ serviceCode, countryId, offer });
     }
   }
   return records;
 }
 
-function heroSmsOffer(value: unknown, serviceCode?: unknown, keyedCountryId?: unknown): HeroSmsOffer | undefined {
+function priceTier(priceText: string, stock: unknown): { price: number; stock: number } | undefined {
+  if (!priceText.trim()) return undefined;
+  const price = Number(priceText);
+  const stockValue = nonNegativeNumber(stock);
+  if (!Number.isFinite(price) || price < 0 || stockValue === undefined || !Number.isInteger(stockValue)) return undefined;
+  return { price, stock: stockValue };
+}
+
+function heroSmsOffer(value: unknown, serviceCode: string, countryIdText: string): HeroSmsOffer | undefined {
   const entries = objectEntries(value);
   if (!entries) return undefined;
   const fields = Object.fromEntries(entries);
-  const countryIdValue = keyedCountryId ?? fields.countryId ?? fields.country_id ?? fields.country;
-  const countryId = nonNegativeNumber(typeof countryIdValue === 'string' ? Number(countryIdValue) : countryIdValue);
-  const normalizedServiceCode = nonEmptyString(serviceCode ?? fields.serviceCode);
+  const countryId = nonNegativeNumber(Number(countryIdText));
+  const normalizedServiceCode = nonEmptyString(serviceCode);
   const priceFields = objectEntries(fields.prices);
   const countFields = objectEntries(fields.counts);
   const mapEntries = objectEntries(fields.map);
@@ -187,11 +194,9 @@ function heroSmsOffer(value: unknown, serviceCode?: unknown, keyedCountryId?: un
 
   const map: Record<string, number> = {};
   for (const [priceText, stock] of mapEntries) {
-    const price = Number(priceText);
-    const stockValue = nonNegativeNumber(stock);
-    if (!priceText.trim() || !Number.isFinite(price) || price < 0
-      || stockValue === undefined || !Number.isInteger(stockValue)) return undefined;
-    map[priceText] = stockValue;
+    const tier = priceTier(priceText, stock);
+    if (!tier) return undefined;
+    map[priceText] = tier.stock;
   }
   return { serviceCode: normalizedServiceCode, countryId, defaultPrice, totalStock, map };
 }
@@ -201,11 +206,11 @@ export function budgetStockAtPrice(priceMap: Readonly<Record<string, number>>, m
   let selectedPrice = -1;
   let selectedStock = 0;
   for (const [priceText, stock] of Object.entries(priceMap)) {
-    const price = Number(priceText);
-    if (!Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) continue;
-    if (price <= maxPrice && price > selectedPrice) {
-      selectedPrice = price;
-      selectedStock = stock;
+    const tier = priceTier(priceText, stock);
+    if (!tier) continue;
+    if (tier.price <= maxPrice && tier.price > selectedPrice) {
+      selectedPrice = tier.price;
+      selectedStock = tier.stock;
     }
   }
   return selectedStock;
@@ -345,7 +350,7 @@ export class HeroSmsHttpAdapter implements HeroSms {
     });
     const records = offerRecords(value);
     if (!records) throw new HeroSmsResponseError('response');
-    const offers = records.map((record) => heroSmsOffer(record.value, record.serviceCode, record.countryId));
+    const offers = records.map((record) => heroSmsOffer(record.offer, record.serviceCode, record.countryId));
     if (offers.some((offer) => !offer)) throw new HeroSmsResponseError('response');
     return offers as HeroSmsOffer[];
   }

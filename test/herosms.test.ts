@@ -75,7 +75,7 @@ test('HeroSMS adapter 只在传入时向 getNumberV2 透传每号最高价', asy
 
 test('HeroSMS adapter 将新报价接口的认证、供应商和不确定错误分类', async () => {
   const cases = [
-    [JSON.stringify({ title: 'BAD_API_KEY' }), 401, 'authentication'],
+    [JSON.stringify({ title: 'Unauthenticated' }), 401, 'authentication'],
     [JSON.stringify({ title: 'SERVER_ERROR' }), 503, 'provider'],
     ['<html>upstream timeout</html>', 200, 'response'],
   ] as const;
