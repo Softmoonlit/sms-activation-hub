@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { PoolClient } from 'pg';
 
 import { AUTHORIZATION_STATUS_LABELS, AuthorizationTokenSuffixCollisionError, Database, type AuthorizationListDisplayStatus, type AuthorizationListPage, type AuthorizationListQuery, type AuthorizationStatus } from './database.js';
-import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsQuote } from './herosms.js';
+import { budgetStockAtPrice, HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsOffer, type HeroSmsQuote } from './herosms.js';
 
 const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const RESULT_VIEW_LIFETIME_MS = 5 * 60 * 1000;
@@ -1825,7 +1825,8 @@ export class ActivationAuthorizations {
   private async prepareNumberAcquisition(
     client: PoolClient,
     authorizationId: string,
-    quotes: HeroSmsQuote[],
+    offers: HeroSmsOffer[],
+    maxPrice: number,
   ): Promise<PreparedNumberAcquisition> {
     const authorizationResult = await client.query<{ status: string; number_acquisition_expires_at: Date | null }>(
       'SELECT status, number_acquisition_expires_at FROM activation_authorizations WHERE id = $1 FOR UPDATE',
@@ -1854,17 +1855,17 @@ export class ActivationAuthorizations {
     );
     if (!candidatesResult.rowCount) return { kind: 'no-candidates' };
 
-    const quoteByCountry = new Map(quotes.map((quote) => [quote.countryId, quote]));
+    const offerByCountry = new Map(
+      offers
+        .filter((offer) => offer.serviceCode === this.openAiServiceCode)
+        .map((offer) => [offer.countryId, offer]),
+    );
     const candidates: PreparedNumberCandidate[] = [];
     for (const candidate of candidatesResult.rows) {
-      const quote = quoteByCountry.get(candidate.country_id);
-      if (!quote || !Number.isFinite(quote.price) || quote.price < 0
-        || !Number.isInteger(quote.stock) || quote.stock < 0) {
-        return { kind: 'configuration-error' };
-      }
-      // 只有供应商明确报告 stock 为零时才跳过位置；该位置仍保留给后续请求。
-      if (quote.stock === 0) continue;
-      candidates.push({ position: candidate.position, countryId: candidate.country_id, requestedPrice: quote.price });
+      const offer = offerByCountry.get(candidate.country_id);
+      const budgetStock = offer ? budgetStockAtPrice(offer.map, maxPrice) : 0;
+      if (budgetStock === 0) continue;
+      candidates.push({ position: candidate.position, countryId: candidate.country_id, requestedPrice: maxPrice });
     }
     return { kind: 'ready', candidates };
   }
@@ -1931,9 +1932,13 @@ export class ActivationAuthorizations {
           return 'unavailable';
         }
 
-        let quotes: HeroSmsQuote[];
+        let offers: HeroSmsOffer[];
+        let maxPrice: number;
         try {
-          quotes = await this.heroSms.quotes(this.openAiServiceCode);
+          [offers, maxPrice] = await Promise.all([
+            this.heroSms.offers(),
+            this.database.maxPricePerNumber(),
+          ]);
         } catch {
           await clearPendingReplacement();
           return 'error';
@@ -1942,7 +1947,7 @@ export class ActivationAuthorizations {
         let prepared: PreparedNumberAcquisition;
         await client.query('BEGIN');
         try {
-          prepared = await this.prepareNumberAcquisition(client, authorizationId, quotes);
+          prepared = await this.prepareNumberAcquisition(client, authorizationId, offers, maxPrice);
           await client.query('COMMIT');
         } catch (error) {
           await client.query('ROLLBACK').catch(() => undefined);
@@ -2043,7 +2048,7 @@ export class ActivationAuthorizations {
 
           let number: HeroSmsNumber;
           try {
-            number = await this.heroSms.getNumber(this.openAiServiceCode, candidate.countryId);
+            number = await this.heroSms.getNumber(this.openAiServiceCode, candidate.countryId, candidate.requestedPrice);
           } catch (error) {
             if (error instanceof HeroSmsResponseError && error.kind === 'uncertain') {
               await client.query(

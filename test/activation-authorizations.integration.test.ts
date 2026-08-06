@@ -46,9 +46,9 @@ function scriptedHeroSms(overrides: Partial<{
       { countryId: 3, price: 1.5, stock: 1 },
     ]),
     offers: overrides.offers ?? (async (): Promise<HeroSmsOffer[]> => [
-      { serviceCode: 'openai', countryId: 1, defaultPrice: 0.8, totalStock: overrides.stock ?? 3, map: { '0.8': overrides.stock ?? 3 } },
-      { serviceCode: 'openai', countryId: 2, defaultPrice: 1.2, totalStock: 2, map: { '1.2': 2 } },
-      { serviceCode: 'openai', countryId: 3, defaultPrice: 1.5, totalStock: 1, map: { '1.5': 1 } },
+      { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: overrides.stock ?? 3, map: { '0.08': overrides.stock ?? 3 } },
+      { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 2, map: { '0.09': 2 } },
+      { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 1, map: { '0.10': 1 } },
     ]),
     getNumber: overrides.getNumber ?? (async (_serviceCode, countryId): Promise<HeroSmsNumber> => ({
       activationId: `activation-${countryId}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
@@ -203,7 +203,7 @@ if (!databaseUrl) {
     let providerCalls = 0;
     const heroSms = scriptedHeroSms({
       balance: async () => { providerCalls += 1; throw new Error('批量创建不应读取余额'); },
-      quotes: async () => { providerCalls += 1; throw new Error('批量创建不应读取报价'); },
+      offers: async () => { providerCalls += 1; throw new Error('批量创建不应读取报价'); },
       services: async () => { providerCalls += 1; throw new Error('批量创建不应读取服务'); },
       countries: async () => { providerCalls += 1; throw new Error('批量创建不应读取地区'); },
     });
@@ -337,7 +337,7 @@ if (!databaseUrl) {
     let now = new Date('2026-08-01T00:00:00.000Z');
     let quoteCalls = 0;
     const heroSms = scriptedHeroSms({
-      quotes: async () => {
+      offers: async () => {
         quoteCalls += 1;
         throw new Error('领取后实时查询暂时失败');
       },
@@ -439,10 +439,10 @@ if (!databaseUrl) {
 
   test('后台配置变更只影响尚未领取授权，领取时复制完整动态额度', async () => {
     const heroSms = scriptedHeroSms({
-      quotes: async () => [
-        { countryId: 1, price: 0.8, stock: 0 },
-        { countryId: 2, price: 1.2, stock: 0 },
-        { countryId: 3, price: 1.5, stock: 0 },
+      offers: async (): Promise<HeroSmsOffer[]> => [
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 0, map: { '0.08': 0 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 0, map: { '0.09': 0 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 0, map: { '0.10': 0 } },
       ],
       getNumber: async () => { throw new Error('零库存不应请求号码'); },
     });
@@ -501,10 +501,10 @@ if (!databaseUrl) {
       balance: async () => { providerCalls += 1; return 10; },
       services: async () => { providerCalls += 1; return [{ code: 'openai', name: 'OpenAI' }]; },
       countries: async () => { providerCalls += 1; return [{ id: 1, name: '美国' }]; },
-      quotes: async () => { providerCalls += 1; return [
-        { countryId: 1, price: 0.8, stock: 1 },
-        { countryId: 2, price: 1.2, stock: 1 },
-        { countryId: 3, price: 1.5, stock: 1 },
+      offers: async (): Promise<HeroSmsOffer[]> => { providerCalls += 1; return [
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 1, map: { '0.08': 1 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 1, map: { '0.09': 1 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 1, map: { '0.10': 1 } },
       ]; },
     });
     const { app, database } = await openApplication(heroSms, () => now);
@@ -896,7 +896,7 @@ if (!databaseUrl) {
       balance: async () => { providerCalls += 1; throw new Error('余额查询失败'); },
       services: async () => { providerCalls += 1; throw new Error('服务查询失败'); },
       countries: async () => { providerCalls += 1; throw new Error('地区查询失败'); },
-      quotes: async () => { providerCalls += 1; throw new Error('报价查询失败'); },
+      offers: async () => { providerCalls += 1; throw new Error('报价查询失败'); },
     });
     const opened = await openApplication(heroSms);
     try {
@@ -925,10 +925,10 @@ if (!databaseUrl) {
     const attemptedCountries: number[] = [];
     const activationId = `act-${randomUUID()}`;
     const heroSms = scriptedHeroSms({
-      quotes: async () => [
-        { countryId: 1, price: 1.3, stock: 2 },
-        { countryId: 2, price: 0.4, stock: 1 },
-        { countryId: 3, price: 0.9, stock: 3 },
+      offers: async (): Promise<HeroSmsOffer[]> => [
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 2, map: { '0.08': 2 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 1, map: { '0.09': 1 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 3, map: { '0.10': 3 } },
       ],
       getNumber: async (_serviceCode, countryId) => {
         attemptedCountries.push(countryId);
@@ -985,10 +985,10 @@ if (!databaseUrl) {
     const attemptedCountries: number[] = [];
     let acquiredCount = 0;
     const heroSms = scriptedHeroSms({
-      quotes: async () => [
-        { countryId: 1, price: 1.3, stock: 2 },
-        { countryId: 2, price: 0.4, stock: 1 },
-        { countryId: 3, price: 0.9, stock: 3 },
+      offers: async (): Promise<HeroSmsOffer[]> => [
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 2, map: { '0.08': 2 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 1, map: { '0.09': 1 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 3, map: { '0.10': 3 } },
       ],
       getNumber: async (_serviceCode, countryId) => {
         attemptedCountries.push(countryId);
@@ -1099,15 +1099,15 @@ if (!databaseUrl) {
     let releaseQuotes: (() => void) | undefined;
     const quotesReleased = new Promise<void>((resolve) => { releaseQuotes = resolve; });
     const heroSms = scriptedHeroSms({
-      quotes: async () => {
+      offers: async (): Promise<HeroSmsOffer[]> => {
         if (blockQuotes) {
           resolveQuotesStarted();
           await quotesReleased;
         }
         return [
-          { countryId: 1, price: 0.8, stock: 3 },
-          { countryId: 2, price: 1.2, stock: 2 },
-          { countryId: 3, price: 1.5, stock: 1 },
+          { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 3, map: { '0.08': 3 } },
+          { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 2, map: { '0.09': 2 } },
+          { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 1, map: { '0.10': 1 } },
         ];
       },
     });
@@ -1185,14 +1185,14 @@ if (!databaseUrl) {
     let inventoryAvailable = true;
     const attemptedCountries: number[] = [];
     const heroSms = scriptedHeroSms({
-      quotes: async () => inventoryAvailable ? [
-        { countryId: 1, price: 0.8, stock: 3 },
-        { countryId: 2, price: 1.2, stock: 2 },
-        { countryId: 3, price: 1.5, stock: 1 },
+      offers: async (): Promise<HeroSmsOffer[]> => inventoryAvailable ? [
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 3, map: { '0.08': 3 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 2, map: { '0.09': 2 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 1, map: { '0.10': 1 } },
       ] : [
-        { countryId: 1, price: 0.8, stock: 0 },
-        { countryId: 2, price: 1.2, stock: 0 },
-        { countryId: 3, price: 1.5, stock: 0 },
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 0, map: { '0.08': 0 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 0, map: { '0.09': 0 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 0, map: { '0.10': 0 } },
       ],
       getNumber: async (_serviceCode, countryId) => {
         attemptedCountries.push(countryId);
@@ -1231,7 +1231,7 @@ if (!databaseUrl) {
     let stock = 0;
     let acquisitionCount = 0;
     const heroSms = scriptedHeroSms({
-      quotes: async () => [{ countryId: 1, price: 0.8, stock }],
+      offers: async (): Promise<HeroSmsOffer[]> => [{ serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: stock, map: { '0.08': stock } }],
       getNumber: async () => {
         acquisitionCount += 1;
         return {
@@ -1277,7 +1277,7 @@ if (!databaseUrl) {
     let now = new Date('2026-08-04T14:00:00.000Z');
     let acquisitionCount = 0;
     const heroSms = scriptedHeroSms({
-      quotes: async () => [{ countryId: 1, price: 0.8, stock: 10 }],
+      offers: async (): Promise<HeroSmsOffer[]> => [{ serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 10, map: { '0.08': 10 } }],
       getNumber: async () => {
         acquisitionCount += 1;
         return {
@@ -1337,7 +1337,7 @@ if (!databaseUrl) {
     let currentActivationId = '';
     let currentAcquiredAt = now;
     const heroSms = scriptedHeroSms({
-      quotes: async () => [{ countryId: 1, price: 0.8, stock: 8 }],
+      offers: async (): Promise<HeroSmsOffer[]> => [{ serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 8, map: { '0.08': 8 } }],
       getNumber: async () => {
         acquisitionCount += 1;
         currentActivationId = `dynamic-timeout-${acquisitionCount}-${randomUUID()}`;
@@ -1399,18 +1399,18 @@ if (!databaseUrl) {
     const attemptedCountries: number[] = [];
     const activationId = `recovered-stock-${randomUUID()}`;
     const heroSms = scriptedHeroSms({
-      quotes: async () => inventory === 'available' ? [
-        { countryId: 1, price: 1.3, stock: 2 },
-        { countryId: 2, price: 0.4, stock: 1 },
-        { countryId: 3, price: 0.9, stock: 1 },
+      offers: async (): Promise<HeroSmsOffer[]> => inventory === 'available' ? [
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 2, map: { '0.08': 2 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 1, map: { '0.09': 1 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 1, map: { '0.10': 1 } },
       ] : inventory === 'empty' ? [
-        { countryId: 1, price: 1.3, stock: 0 },
-        { countryId: 2, price: 0.4, stock: 0 },
-        { countryId: 3, price: 0.9, stock: 0 },
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 0, map: { '0.08': 0 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 0, map: { '0.09': 0 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 0, map: { '0.10': 0 } },
       ] : [
-        { countryId: 1, price: 1.3, stock: 1 },
-        { countryId: 2, price: 0.4, stock: 1 },
-        { countryId: 3, price: 0.9, stock: 0 },
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 1, map: { '0.08': 1 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 1, map: { '0.09': 1 } },
+        { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 0, map: { '0.10': 0 } },
       ],
       getNumber: async (_serviceCode, countryId) => {
         attemptedCountries.push(countryId);
@@ -1446,19 +1446,19 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('报价缺失属于可重试的获取错误而不是无库存', async () => {
+  test('offers 接口异常属于可重试的获取错误而不是无库存', async () => {
     const fixedNow = new Date('2026-08-05T12:00:00.000Z');
-    let configurationReady = true;
+    let offersAvailable = true;
     let getNumberCalls = 0;
     const heroSms = scriptedHeroSms({
-      quotes: async () => configurationReady ? [
-        { countryId: 1, price: 0.8, stock: 3 },
-        { countryId: 2, price: 1.2, stock: 2 },
-        { countryId: 3, price: 1.5, stock: 1 },
-      ] : [
-        { countryId: 2, price: 1.2, stock: 2 },
-        { countryId: 3, price: 1.5, stock: 1 },
-      ],
+      offers: async (): Promise<HeroSmsOffer[]> => {
+        if (!offersAvailable) throw new HeroSmsResponseError('provider');
+        return [
+          { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 3, map: { '0.08': 3 } },
+          { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 2, map: { '0.09': 2 } },
+          { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 1, map: { '0.10': 1 } },
+        ];
+      },
       getNumber: async () => {
         getNumberCalls += 1;
         return { activationId: `quote-retry-${randomUUID()}`, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: fixedNow };
@@ -1470,7 +1470,7 @@ if (!databaseUrl) {
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
-      configurationReady = false;
+      offersAvailable = false;
       const failed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(failed.statusCode, 503);
       assert.match(failed.body, /暂时无法获取号码，请联系发送者/);
@@ -1484,7 +1484,7 @@ if (!databaseUrl) {
       );
       assert.equal(unused.rows[0]?.count, '0');
 
-      configurationReady = true;
+      offersAvailable = true;
       const retried = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(retried.statusCode, 303);
       assert.equal(getNumberCalls, 1);
@@ -6825,6 +6825,157 @@ if (!databaseUrl) {
       assert.ok(cancelCalls >= 1, '换号至少调用一次供应商取消');
     } finally {
       releaseCancel?.();
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('号码获取按当前每号最高价透传 maxPrice，且预算内可取库存为 0 的候选位置被跳过', async () => {
+    const fixedNow = new Date('2026-08-01T00:00:00.000Z');
+    const getNumberCalls: Array<{ serviceCode: string; countryId: number; maxPrice?: number }> = [];
+    const heroSms = scriptedHeroSms({
+      offers: async (): Promise<HeroSmsOffer[]> => [
+        // 国家 1：默认价 0.15，总库存 10，但 map 在每号最高价 0.11 下预算内库存为 0
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.15, totalStock: 10, map: { '0.15': 10 } },
+        // 国家 2：默认价 0.08，总库存 5，map 在每号最高价 0.11 下预算内库存为 5
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.08, totalStock: 5, map: { '0.08': 5 } },
+      ],
+      getNumber: async (serviceCode, countryId, maxPrice) => {
+        getNumberCalls.push({ serviceCode, countryId, maxPrice });
+        return {
+          activationId: `act-maxprice-${countryId}`,
+          phoneNumber: '+442079460123',
+          activationCost: 0.08,
+          currency: 'USD',
+          activationTime: fixedNow,
+          activationEndTime: new Date(fixedNow.getTime() + 1_200_000),
+        };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => fixedNow);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1];
+      assert.ok(token);
+
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+
+      assert.equal(getNumberCalls.length, 1);
+      assert.deepEqual(getNumberCalls[0], {
+        serviceCode: 'openai',
+        countryId: 2,
+        maxPrice: 0.11,
+      }, '应该跳过预算内库存为零的国家1，向国家2发起取号请求，且透传每号最高价 0.11');
+    } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('修改每号最高价后，已领取的激活授权在后续取号时立即采用新最高价', async () => {
+    let now = new Date('2026-08-01T00:00:00.000Z');
+    const getNumberCalls: Array<{ serviceCode: string; countryId: number; maxPrice?: number }> = [];
+    let acquiredCount = 0;
+    const heroSms = scriptedHeroSms({
+      offers: async (): Promise<HeroSmsOffer[]> => [
+        // 国家 1：0.15 档位 10 个；0.11 上限时预算内为 0，0.20 上限时预算内为 10
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.15, totalStock: 10, map: { '0.15': 10 } },
+        // 国家 2：0.08 档位 5 个；0.11 与 0.20 上限时预算内均 > 0
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.08, totalStock: 5, map: { '0.08': 5 } },
+      ],
+      getNumber: async (serviceCode, countryId, maxPrice) => {
+        getNumberCalls.push({ serviceCode, countryId, maxPrice });
+        acquiredCount += 1;
+        return {
+          activationId: `act-live-maxprice-${acquiredCount}`,
+          phoneNumber: acquiredCount === 1 ? '+442079460123' : '+14155550123',
+          activationCost: 0.08,
+          currency: 'USD',
+          activationTime: now,
+          activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => 'cancelled',
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1];
+      assert.ok(token);
+
+      // 首次取号：0.11 下国家 1 预算内库存为 0，取号国家 2
+      const firstClaim = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(firstClaim.statusCode, 303);
+      assert.equal(getNumberCalls.length, 1);
+      assert.equal(getNumberCalls[0]?.countryId, 2);
+      assert.equal(getNumberCalls[0]?.maxPrice, 0.11);
+
+      // 修改每号最高价配置为 0.20
+      await database.saveCandidateSettings([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 2, countryName: '英国' },
+        { countryId: 3, countryName: '法国' },
+      ], 0.20);
+
+      // 换号：已领取的授权再次请求取号，实时读取 DB 最新最高价 0.20；国家 1（位置 1）尚未消耗且此时预算内库存为 10 > 0
+      now = new Date(now.getTime() + 130_000);
+      const replaceResponse = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replaceResponse.statusCode, 303);
+
+      assert.equal(getNumberCalls.length, 2);
+      assert.equal(getNumberCalls[1]?.countryId, 1);
+      assert.equal(getNumberCalls[1]?.maxPrice, 0.20);
+    } finally {
+      await resetAuthorizationTables(database).catch(() => undefined);
+      await app.close().catch(() => undefined);
+    }
+  });
+
+  test('号码获取遭遇实时 no-numbers 错误时推进下一个候选位置', async () => {
+    const fixedNow = new Date('2026-08-01T00:00:00.000Z');
+    const attemptedCountries: number[] = [];
+    const heroSms = scriptedHeroSms({
+      offers: async (): Promise<HeroSmsOffer[]> => [
+        { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 2, map: { '0.08': 2 } },
+        { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 3, map: { '0.09': 3 } },
+      ],
+      getNumber: async (_serviceCode, countryId) => {
+        attemptedCountries.push(countryId);
+        if (countryId === 1) throw new HeroSmsResponseError('no-numbers');
+        return {
+          activationId: `act-no-numbers-retry-${countryId}`,
+          phoneNumber: '+442079460123',
+          activationCost: 0.09,
+          currency: 'USD',
+          activationTime: fixedNow,
+          activationEndTime: new Date(fixedNow.getTime() + 1_200_000),
+        };
+      },
+    });
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(heroSms, () => fixedNow);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1];
+      assert.ok(token);
+
+      const claimed = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claimed.statusCode, 303);
+      assert.deepEqual(attemptedCountries, [1, 2], '尝试国家1遇到 no-numbers 后，自动推进并取得国家2的号码');
+    } finally {
       await resetAuthorizationTables(database).catch(() => undefined);
       await app.close().catch(() => undefined);
     }
