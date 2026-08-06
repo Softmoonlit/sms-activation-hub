@@ -79,7 +79,7 @@ test('移动视口完成领取、浏览器绑定、三次号码操作和结束�
     await expect(page.getByText('(+1)', { exact: true })).toBeVisible();
     await expect(page.locator('.section-current-number')).toBeVisible();
     await expect(page.locator('.section-verification-result')).toBeVisible();
-    await expect(page.getByText('复制上方号码并填入，同时切换对应国家代码，点击短信（即从Whatsapp切换到短信），最后点击并确认；系统将自动接收并显示验证码。')).toBeVisible();
+    await expect(page.getByText('复制上方号码并填入，同时切换对应国家代码，点击短信（即从Whatsapp切换到短信），最后点击继续；系统将自动接收并显示验证码。')).toBeVisible();
     await expect(page.getByText(/^号码有效至：还剩 20:00$/)).toBeVisible();
     await expect(page.getByText('正在监听短信验证码...')).toBeVisible();
     await expect(page.getByText('剩余号码获取额度：2 · 实际能否获取取决于供应商库存')).toBeVisible();

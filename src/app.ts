@@ -454,7 +454,7 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
 
     const guideMarkup = view.smsDelivered
       ? ''
-      : `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码并填入，同时切换对应国家代码，点击短信（即从Whatsapp切换到短信），最后点击并确认；系统将自动接收并显示验证码。</p></div>`;
+      : `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">复制上方号码并填入，同时切换对应国家代码，点击短信（即从Whatsapp切换到短信），最后点击继续；系统将自动接收并显示验证码。</p></div>`;
 
     let verificationMarkup = '';
     if (view.smsDelivered) {

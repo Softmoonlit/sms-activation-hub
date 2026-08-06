@@ -1226,7 +1226,7 @@ if (!databaseUrl) {
 
       for (let replacementCount = 0; replacementCount < 4; replacementCount += 1) {
         now = new Date(now.getTime() + 120_000);
-        const replacementResponse = await app.inject({
+        const replacementResponse: InjectionResponse = await app.inject({
           method: 'POST', url: `/a/${token}/replacement/confirm`,
           headers: { cookie: recipientCookie, 'content-type': 'application/x-www-form-urlencoded' },
           payload: 'replacement=confirm',

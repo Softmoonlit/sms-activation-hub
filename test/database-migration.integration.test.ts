@@ -257,4 +257,107 @@ if (!databaseUrl) {
       await adminDatabase.close();
     }
   });
+
+  test('完整旧三位置配置、已领取授权和号码历史升级后保持不变', async () => {
+    const schemaName = `candidate_position_history_${randomUUID().replaceAll('-', '')}`;
+    const adminDatabase = new Database(databaseUrl);
+    await adminDatabase.pool.query(`CREATE SCHEMA ${schemaName}`);
+
+    const scopedUrl = new URL(databaseUrl);
+    scopedUrl.searchParams.set('options', `-csearch_path=${schemaName}`);
+    const database = new Database(scopedUrl.toString());
+    const authorizationId = randomUUID();
+    const providerActivationId = `legacy-${randomUUID()}`;
+    const createdAt = new Date('2026-08-01T00:00:00.000Z');
+
+    try {
+      await database.initialize();
+      await database.replaceDefaultCandidateLocations([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 2, countryName: '英国' },
+        { countryId: 3, countryName: '法国' },
+      ]);
+      await database.pool.query(
+        `INSERT INTO activation_authorizations
+          (id, token_hash, token_suffix, status, created_at, claimed_at,
+           number_acquisition_expires_at, last_activity_at, recipient_session_hash)
+         VALUES ($1, 'legacy-token-hash', 'LEGACY01', 'in_progress', $2::timestamptz, $2::timestamptz,
+                 $2::timestamptz + INTERVAL '24 hours', $2::timestamptz, 'legacy-session-hash')`,
+        [authorizationId, createdAt],
+      );
+      await database.pool.query(
+        `INSERT INTO authorization_candidate_countries
+          (authorization_id, position, country_id, country_name, used_at)
+         VALUES
+          ($1, 1, 1, '美国', $2),
+          ($1, 2, 2, '英国', NULL),
+          ($1, 3, 3, '法国', NULL)`,
+        [authorizationId, createdAt],
+      );
+      await database.pool.query(
+        `INSERT INTO supplier_activations
+          (authorization_id, candidate_position, country_id, provider_activation_id,
+           status, activation_cost, currency, acquired_at, cancel_available_at, expires_at)
+         VALUES ($1, 1, 1, $2, 'cancelled', 0.8, 'USD', $3::timestamptz,
+                 $3::timestamptz + INTERVAL '2 minutes', $3::timestamptz + INTERVAL '20 minutes')`,
+        [authorizationId, providerActivationId, createdAt],
+      );
+      await database.pool.query(
+        `INSERT INTO number_acquisition_requests
+          (authorization_id, candidate_position, country_id, requested_price,
+           status, error_kind, requested_at, updated_at)
+         VALUES ($1, 2, 2, 1.2, 'failed', 'no-numbers', $2, $2)`,
+        [authorizationId, createdAt],
+      );
+
+      await database.pool.query(`
+        ALTER TABLE default_candidate_countries
+          DROP CONSTRAINT default_candidate_countries_position_check,
+          ADD CONSTRAINT default_candidate_countries_position_check CHECK (position BETWEEN 1 AND 3);
+        ALTER TABLE authorization_candidate_countries
+          DROP CONSTRAINT authorization_candidate_countries_position_check,
+          ADD CONSTRAINT authorization_candidate_countries_position_check CHECK (position BETWEEN 1 AND 3);
+        ALTER TABLE supplier_activations
+          DROP CONSTRAINT supplier_activations_candidate_position_check,
+          ADD CONSTRAINT supplier_activations_candidate_position_check CHECK (candidate_position BETWEEN 1 AND 3);
+        ALTER TABLE number_acquisition_requests
+          DROP CONSTRAINT number_acquisition_requests_candidate_position_check,
+          ADD CONSTRAINT number_acquisition_requests_candidate_position_check CHECK (candidate_position BETWEEN 1 AND 3);
+      `);
+
+      await database.initialize();
+
+      assert.deepEqual(await database.defaultCandidateLocations(), [
+        { position: 1, countryId: 1, countryName: '美国' },
+        { position: 2, countryId: 2, countryName: '英国' },
+        { position: 3, countryId: 3, countryName: '法国' },
+      ]);
+      const history = await database.pool.query<{
+        position: number; country_id: number; used: boolean;
+        provider_activation_id: string | null; request_status: string | null;
+      }>(
+        `SELECT candidate.position, candidate.country_id, candidate.used_at IS NOT NULL AS used,
+                activation.provider_activation_id, request.status AS request_status
+         FROM authorization_candidate_countries candidate
+         LEFT JOIN supplier_activations activation
+           ON activation.authorization_id = candidate.authorization_id
+          AND activation.candidate_position = candidate.position
+         LEFT JOIN number_acquisition_requests request
+           ON request.authorization_id = candidate.authorization_id
+          AND request.candidate_position = candidate.position
+         WHERE candidate.authorization_id = $1
+         ORDER BY candidate.position`,
+        [authorizationId],
+      );
+      assert.deepEqual(history.rows, [
+        { position: 1, country_id: 1, used: true, provider_activation_id: providerActivationId, request_status: null },
+        { position: 2, country_id: 2, used: false, provider_activation_id: null, request_status: 'failed' },
+        { position: 3, country_id: 3, used: false, provider_activation_id: null, request_status: null },
+      ]);
+    } finally {
+      await database.close();
+      await adminDatabase.pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
+      await adminDatabase.close();
+    }
+  });
 }
