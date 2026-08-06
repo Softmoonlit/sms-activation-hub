@@ -576,7 +576,7 @@ export class ActivationAuthorizations {
            WHERE request.authorization_id = candidate.authorization_id
              AND request.candidate_position = candidate.position
              AND request.status IN ('confirmed_absent', 'failed')
-             AND (request.error_kind IS NULL OR request.error_kind NOT IN ('authorization-expired', 'authorization-unavailable', 'active-activation'))
+             AND (request.error_kind IS NULL OR request.error_kind NOT IN ('authorization-expired', 'authorization-unavailable', 'active-activation', 'sms-delivered'))
            ORDER BY request.updated_at DESC, request.id DESC
            LIMIT 1
          ) recent ON true

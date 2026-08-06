@@ -4075,8 +4075,9 @@ if (!databaseUrl) {
         await insertRequest(authorizationIds[resultCase.authorization]!, resultCase.position, resultCase.errorKind === 'confirmed_absent' ? 'confirmed_absent' : 'failed', resultCase.errorKind === 'confirmed_absent' ? null : resultCase.errorKind, resultTimes[index]!);
       }
 
-      // 最新记录是调用前中止时，查询应回溯到最近一次真实供应商调用的已结束结果。
+      // 最新记录是调用前或流程内部中止时，查询应回溯到最近一次真实供应商调用的已结束结果。
       await insertRequest(authorizationIds[0]!, 1, 'failed', 'authorization-expired', resultTimes[10]!);
+      await insertRequest(authorizationIds[0]!, 1, 'failed', 'sms-delivered', resultTimes[11]!);
       // 报价零库存没有创建请求的候选位置应只显示未消耗，不伪造结果。
       await database.pool.query(
         `UPDATE activation_authorizations SET status = 'in_progress' WHERE id = $1`, [authorizationIds[3]],
@@ -4091,7 +4092,7 @@ if (!databaseUrl) {
       assert.equal(detail.statusCode, 200);
       assert.match(detail.body, /位置 1 · 美国：<\/strong>⬜ 未消耗，无库存 · 08-05 08:10/);
       assert.match(detail.body, /位置 2 · 美国：<\/strong>⬜ 未消耗，对账确认未取得号码 · 08-05 08:20/);
-      assert.doesNotMatch(detail.body, /authorization-expired|获取时间 08-05 08:30/);
+      assert.doesNotMatch(detail.body, /authorization-expired|sms-delivered|号码获取失败|获取时间 08-05 08:30/);
 
       const abnormalDetails = await Promise.all(authorizationIds.slice(1, 4).map((id) => app.inject({
         method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie },
