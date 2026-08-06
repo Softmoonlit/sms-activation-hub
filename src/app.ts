@@ -15,6 +15,7 @@ import { countryFlagHtml, formatCurrency, formatDateTime } from './country-flag.
 import { type AppConfig, randomToken } from './config.js';
 import { Database } from './database.js';
 import { HeroSmsHttpAdapter, parseSupplierDate, type HeroSms } from './herosms.js';
+import { escapeHtml } from './html.js';
 
 const ADMIN_COOKIE = 'admin_session';
 const CSRF_COOKIE = 'admin_csrf';
@@ -536,10 +537,6 @@ function unavailableRecipientPage(message = '此链接不可用，请联系发�
   return htmlPage('链接不可用', `<main class="recipient"><section class="panel"><h1>链接不可用</h1><p>${escapeHtml(message)}</p></section></main>`);
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character] ?? character);
-}
-
 function settingsPage(path: string, csrfToken: string, settings: CandidateLocationSettings, error?: string, saved?: boolean): string {
   return adminPage('默认候选地区', '设置', path, csrfToken, `/${path}`, '返回首页', candidateLocationSettingsContent(path, csrfToken, settings, error, saved));
 }
@@ -557,8 +554,9 @@ function candidateCountryIds(body: SettingsBody): number[] | undefined {
   const candidateCount = parseCandidatePositionCount(body.candidateCount);
   if (candidateCount === undefined) return undefined;
   const submittedCandidateFields = Object.keys(body).filter((key) => key.startsWith('candidate') && key !== 'candidateCount');
+  const expectedCandidateFields = new Set(Array.from({ length: candidateCount }, (_, index) => `candidate${index + 1}`));
   if (submittedCandidateFields.length !== candidateCount
-    || submittedCandidateFields.some((key) => !/^candidate(?:[1-9]|10)$/.test(key))) {
+    || submittedCandidateFields.some((key) => !expectedCandidateFields.has(key))) {
     return undefined;
   }
   const values = Array.from({ length: candidateCount }, (_, index) => body[`candidate${index + 1}`]);

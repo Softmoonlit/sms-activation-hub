@@ -1,9 +1,6 @@
 import { CANDIDATE_POSITION_COUNTS, MIN_CANDIDATE_POSITION_COUNT } from './candidate-position.js';
 import type { CandidateLocationSettings } from './default-candidate-locations.js';
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character] ?? character);
-}
+import { escapeHtml } from './html.js';
 
 function jsonForScript(value: unknown): string {
   const serialized = JSON.stringify(value);
