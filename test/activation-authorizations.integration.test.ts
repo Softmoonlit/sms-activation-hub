@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { createApp, type AppDependencies } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
-import { ActivationAuthorizations } from '../src/activation-authorizations.js';
+import { ActivationAuthorizations, type HeroSmsWebhookEvent } from '../src/activation-authorizations.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsNumber } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -2308,6 +2308,55 @@ if (!databaseUrl) {
       );
       assert.equal(authorization.rows[0]?.status, 'in_progress', '轮询不触发状态变更');
     } finally { await polled.app.close(); }
+  });
+
+  test('轮询中短信落库失败只跳过本条激活，不中断轮询且不告警', async () => {
+    let now = new Date('2026-08-15T04:00:00.000Z');
+    const activationId = `poll-webhook-failure-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => ({
+        delivered: true, code: '482913', text: 'Your code is 482913',
+        receivedAt: new Date('2026-08-15T04:00:30.000Z'),
+      }),
+    });
+    await resetTablesBeforeApplication();
+    const seeding = await openApplication(heroSms, () => now);
+    let token = '';
+    try {
+      await resetAuthorizationTables(seeding.database);
+      const session = await login(seeding.app);
+      const created = await createAuthorization(seeding.app, session);
+      token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(token);
+      await seeding.app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+    } finally { await seeding.app.close(); }
+
+    // 模拟轮询把短信交给 webhook 落库时失败（如数据库抖动）：轮询是 Webhook 的恢复机制，
+    // 失败只跳过本条激活留待下次任务，不得中断本轮轮询（进而中断后台任务链）或产生告警。
+    const originalWebhook = ActivationAuthorizations.prototype.receiveHeroSmsWebhook;
+    ActivationAuthorizations.prototype.receiveHeroSmsWebhook = async function (this: ActivationAuthorizations, _event: HeroSmsWebhookEvent) {
+      throw new Error('模拟短信落库失败');
+    };
+    try {
+      const { value: polled, output } = await withCapturedStdout(() => openApplication(heroSms, () => now));
+      try {
+        assert.doesNotMatch(output, /\[herosms\]\[(warn|error)\]/, '短信落库失败不产生告警日志');
+        const state = await polled.database.pool.query<{ status: string; sms_code: string | null; sms_poll_after: Date | null }>(
+          'SELECT status, sms_code, sms_poll_after FROM supplier_activations WHERE provider_activation_id = $1',
+          [activationId],
+        );
+        assert.equal(state.rows[0]?.status, 'waiting_sms', '落库失败保持等待状态留待下次轮询');
+        assert.equal(state.rows[0]?.sms_code, null, '短信未交付');
+        const pollAfter = state.rows[0]?.sms_poll_after;
+        assert.ok(pollAfter);
+        assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '失败不阻断下一次轮询调度');
+      } finally { await polled.app.close(); }
+    } finally {
+      ActivationAuthorizations.prototype.receiveHeroSmsWebhook = originalWebhook;
+    }
   });
 
   test('供应商完成失败会持久重试，应用重启后继续且不影响验证码展示', async () => {

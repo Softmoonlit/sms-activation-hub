@@ -1061,10 +1061,14 @@ export class ActivationAuthorizations {
       const receivedAt = status.receivedAt ?? activation.sms_received_at;
       const text = status.text ?? activation.sms_text;
       if (status.delivered && text && receivedAt) {
-        await this.receiveHeroSmsWebhook({
-          activationId: activation.provider_activation_id, serviceCode: this.openAiServiceCode, countryId: activation.country_id,
-          receivedAt, text, ...(status.code ? { code: status.code } : {}),
-        });
+        try {
+          await this.receiveHeroSmsWebhook({
+            activationId: activation.provider_activation_id, serviceCode: this.openAiServiceCode, countryId: activation.country_id,
+            receivedAt, text, ...(status.code ? { code: status.code } : {}),
+          });
+        } catch {
+          // 轮询是 Webhook 的恢复机制：短信落库失败只跳过本条，留待下次任务，不中断本轮其余激活。
+        }
         continue;
       }
       if (status.providerStatus === 'cancelled') {
