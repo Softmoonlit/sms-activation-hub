@@ -26,7 +26,6 @@ function scriptedHeroSms(overrides: Partial<{
   stock: number;
   services: HeroSms['services'];
   countries: HeroSms['countries'];
-  quotes: HeroSms['quotes'];
   offers: HeroSms['offers'];
   getNumber: HeroSms['getNumber'];
   activeActivations: HeroSms['activeActivations'];
@@ -40,11 +39,6 @@ function scriptedHeroSms(overrides: Partial<{
     balance: typeof balance === 'function' ? balance : async () => balance ?? 10,
     services: overrides.services ?? (async () => [{ code: 'openai', name: 'OpenAI' }]),
     countries: overrides.countries ?? (async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }]),
-    quotes: overrides.quotes ?? (async () => [
-      { countryId: 1, price: 0.8, stock: overrides.stock ?? 3 },
-      { countryId: 2, price: 1.2, stock: 2 },
-      { countryId: 3, price: 1.5, stock: 1 },
-    ]),
     offers: overrides.offers ?? (async (): Promise<HeroSmsOffer[]> => [
       { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: overrides.stock ?? 3, map: { '0.08': overrides.stock ?? 3 } },
       { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 2, map: { '0.09': 2 } },
@@ -335,10 +329,10 @@ if (!databaseUrl) {
 
   test('批量链接 GET 不领取，首次 POST 原子领取并允许通过授权链接继续使用', async () => {
     let now = new Date('2026-08-01T00:00:00.000Z');
-    let quoteCalls = 0;
+    let offersCalls = 0;
     const heroSms = scriptedHeroSms({
       offers: async () => {
-        quoteCalls += 1;
+        offersCalls += 1;
         throw new Error('领取后实时查询暂时失败');
       },
     });
@@ -406,12 +400,12 @@ if (!databaseUrl) {
       const retry = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(retry.statusCode, 503);
       assert.equal(retry.cookies.find((cookie) => cookie.name === 'recipient_session'), undefined);
-      assert.equal(quoteCalls, 2);
+      assert.equal(offersCalls, 2);
       const otherBrowserPost = await app.inject({ method: 'POST', url: `/a/${token}/numbers`, headers: { cookie: 'irrelevant=other-browser' } });
       assert.equal(otherBrowserPost.statusCode, 503);
       assert.match(otherBrowserPost.body, /暂时无法获取号码，请联系发送者/);
       assert.equal(otherBrowserPost.cookies.find((cookie) => cookie.name === 'recipient_session'), undefined);
-      assert.equal(quoteCalls, 3);
+      assert.equal(offersCalls, 3);
       const retained = await database.pool.query<{ country_id: number; country_name: string }>(
         `SELECT country_id, country_name FROM authorization_candidate_countries
          WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1) ORDER BY position`,
@@ -1093,16 +1087,16 @@ if (!databaseUrl) {
   });
 
   test('首次获取在报价查询期间并发撤销时返回不可用而不是 404', async () => {
-    let blockQuotes = false;
-    let resolveQuotesStarted!: () => void;
-    const quotesStarted = new Promise<void>((resolve) => { resolveQuotesStarted = resolve; });
-    let releaseQuotes: (() => void) | undefined;
-    const quotesReleased = new Promise<void>((resolve) => { releaseQuotes = resolve; });
+    let blockOffers = false;
+    let resolveOffersStarted!: () => void;
+    const offersStarted = new Promise<void>((resolve) => { resolveOffersStarted = resolve; });
+    let releaseOffers: (() => void) | undefined;
+    const offersReleased = new Promise<void>((resolve) => { releaseOffers = resolve; });
     const heroSms = scriptedHeroSms({
       offers: async (): Promise<HeroSmsOffer[]> => {
-        if (blockQuotes) {
-          resolveQuotesStarted();
-          await quotesReleased;
+        if (blockOffers) {
+          resolveOffersStarted();
+          await offersReleased;
         }
         return [
           { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 3, map: { '0.08': 3 } },
@@ -1116,20 +1110,20 @@ if (!databaseUrl) {
       const session = await login(app);
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      blockQuotes = true;
+      blockOffers = true;
       const claim = app.inject({ method: 'POST', url: `/a/${token}/numbers` });
-      await quotesStarted;
+      await offersStarted;
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const authorizationId = authorizationIdFromHome(home.body, token);
       assert.equal((await post(app, session, `/${config.adminPath}/authorizations/${authorizationId}/revoke`, {})).statusCode, 303);
 
-      releaseQuotes?.();
+      releaseOffers?.();
       const result = await claim;
       assert.equal(result.statusCode, 409);
       assert.match(result.body, /此链接不可用，请联系发送者/);
     } finally {
-      releaseQuotes?.();
+      releaseOffers?.();
       await app.close();
     }
   });

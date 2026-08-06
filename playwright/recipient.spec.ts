@@ -26,7 +26,6 @@ const heroSms: HeroSms = {
   balance: async () => 10,
   services: async () => [{ code: 'openai', name: 'OpenAI' }],
   countries: async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }],
-  quotes: async () => [{ countryId: 1, price: 1.2, stock: 1 }, { countryId: 2, price: 0.6, stock: 1 }, { countryId: 3, price: 0.9, stock: 1 }],
   offers: async () => [],
   getNumber: async (_serviceCode, countryId) => {
     acquisitionCount += 1;

@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { PoolClient } from 'pg';
 
 import { AUTHORIZATION_STATUS_LABELS, AuthorizationTokenSuffixCollisionError, Database, type AuthorizationListDisplayStatus, type AuthorizationListPage, type AuthorizationListQuery, type AuthorizationStatus } from './database.js';
-import { budgetStockAtPrice, HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsOffer, type HeroSmsQuote } from './herosms.js';
+import { budgetStockAtPrice, HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsCountry, type HeroSmsNumber, type HeroSmsOffer } from './herosms.js';
 
 const CLAIM_ACQUISITION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const RESULT_VIEW_LIFETIME_MS = 5 * 60 * 1000;

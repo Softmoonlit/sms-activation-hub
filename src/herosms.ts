@@ -25,12 +25,6 @@ export interface HeroSmsCountry {
   name: string;
 }
 
-export interface HeroSmsQuote {
-  countryId: number;
-  price: number;
-  stock: number;
-}
-
 export interface HeroSmsOffer {
   serviceCode: string;
   countryId: number;
@@ -73,7 +67,6 @@ export interface HeroSms {
   balance(): Promise<number>;
   services(): Promise<HeroSmsService[]>;
   countries(): Promise<HeroSmsCountry[]>;
-  quotes(serviceCode: string): Promise<HeroSmsQuote[]>;
   offers(): Promise<HeroSmsOffer[]>;
   getNumber(serviceCode: string, countryId: number, maxPrice?: number): Promise<HeroSmsNumber>;
   activeActivations(): Promise<HeroSmsActivationRecord[]>;
@@ -315,33 +308,6 @@ export class HeroSmsHttpAdapter implements HeroSms {
       throw new HeroSmsResponseError('response');
     }
     return countries as HeroSmsCountry[];
-  }
-
-  async quotes(serviceCode: string): Promise<HeroSmsQuote[]> {
-    const value = await this.request('getPrices', { service: serviceCode });
-    const records = Array.isArray(value) ? value : [value];
-    const quotes: HeroSmsQuote[] = [];
-    for (const record of records) {
-      const entries = objectEntries(record);
-      if (!entries) {
-        throw new HeroSmsResponseError('response');
-      }
-      for (const [country, quote] of entries) {
-        const countryId = Number(country);
-        const quoteFields = objectEntries(quote);
-        const quoteObject = quoteFields ? Object.fromEntries(quoteFields) : undefined;
-        const serviceQuote = quoteObject && objectEntries(quoteObject[serviceCode])
-          ? Object.fromEntries(objectEntries(quoteObject[serviceCode])!)
-          : quoteObject;
-        const price = serviceQuote ? nonNegativeNumber(serviceQuote.cost) : undefined;
-        const stock = serviceQuote ? nonNegativeNumber(serviceQuote.count) : undefined;
-        if (!Number.isInteger(countryId) || countryId < 0 || price === undefined || stock === undefined || !Number.isInteger(stock)) {
-          throw new HeroSmsResponseError('response');
-        }
-        quotes.push({ countryId, price, stock });
-      }
-    }
-    return quotes;
   }
 
   async offers(): Promise<HeroSmsOffer[]> {

@@ -37,12 +37,6 @@ const heroSms: HeroSms = {
     { id: 3, name: '英国' },
     { id: 4, name: '法国' },
   ],
-  quotes: async () => [
-    { countryId: 1, price: 0.1234, stock: 0 },
-    { countryId: 2, price: 0.18, stock: 4 },
-    { countryId: 3, price: 0.2, stock: 3 },
-    { countryId: 4, price: 0.22, stock: 5 },
-  ],
   // 价格分布为"价格上限 → 累计可获取数量"的稀疏档位：中国最低档 0.1234 超默认
   // 每号最高价 0.11（预算内 0 但总库存 9）；美国 0.11 档累计 2、0.18 档累计 4。
   offers: async (): Promise<HeroSmsOffer[]> => [
@@ -64,13 +58,11 @@ const unavailableHeroSms: HeroSms = {
   balance: async () => { throw new Error('HeroSMS 暂时不可用'); },
   services: async () => { throw new Error('HeroSMS 暂时不可用'); },
   countries: async () => { throw new Error('HeroSMS 暂时不可用'); },
-  quotes: async () => { throw new Error('HeroSMS 暂时不可用'); },
 };
 
 const unsafeNameHeroSms: HeroSms = {
   ...heroSms,
   countries: async () => [{ id: 5, name: '</script><script>alert(1)</script>' }],
-  quotes: async () => [{ countryId: 5, price: 0.2, stock: 1 }],
 };
 
 type LoginMaterial = { csrf: string; csrfCookie: string };

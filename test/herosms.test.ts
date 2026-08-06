@@ -103,7 +103,7 @@ test('HeroSMS adapter 将新报价接口的认证、供应商和不确定错误�
   });
 });
 
-test('HeroSMS adapter 查询余额、服务、地区和 OpenAI 报价', async () => {
+test('HeroSMS adapter 查询余额、服务与地区', async () => {
   const requests: RequestedUrl[] = [];
   const adapter = new HeroSmsHttpAdapter({
     apiKey: 'test-api-key',
@@ -118,8 +118,6 @@ test('HeroSMS adapter 查询余额、服务、地区和 OpenAI 报价', async ()
           return response(JSON.stringify(example('successGetServicesListExample')));
         case 'getCountries':
           return response(JSON.stringify(example('successGetCountriesExample')));
-        case 'getPrices':
-          return response(JSON.stringify([{ 2: { cost: 0.08, count: 25370 } }]));
         default:
           throw new Error(`未预期操作 ${url.searchParams.get('action')}`);
       }
@@ -129,10 +127,8 @@ test('HeroSMS adapter 查询余额、服务、地区和 OpenAI 报价', async ()
   assert.equal(await adapter.balance(), 100.5);
   assert.deepEqual(await adapter.services(), [{ code: 'aoo', name: 'Pegasus Airlines' }]);
   assert.deepEqual(await adapter.countries(), [{ id: 2, name: '哈萨克斯坦' }]);
-  assert.deepEqual(await adapter.quotes('aoo'), [{ countryId: 2, price: 0.08, stock: 25370 }]);
-  assert.deepEqual(requests.map((url) => url.searchParams.get('action')), ['getBalance', 'getServicesList', 'getCountries', 'getPrices']);
+  assert.deepEqual(requests.map((url) => url.searchParams.get('action')), ['getBalance', 'getServicesList', 'getCountries']);
   assert.ok(requests.every((url) => url.searchParams.get('api_key') === 'test-api-key'));
-  assert.equal(requests[3]?.searchParams.get('service'), 'aoo');
 });
 
 test('HeroSMS adapter 兼容 getNumber 成功文本与 getNumberV2 JSON 响应', async () => {
@@ -162,7 +158,7 @@ test('HeroSMS adapter 兼容 getNumber 成功文本与 getNumberV2 JSON 响应',
   });
 });
 
-test('HeroSMS adapter 兼容线上地区对象和按服务嵌套的报价对象', async () => {
+test('HeroSMS adapter 兼容线上地区对象', async () => {
   const adapter = new HeroSmsHttpAdapter({
     apiKey: 'test-api-key',
     baseUrl: 'https://hero-sms.test/stubs/handler_api.php',
@@ -174,12 +170,6 @@ test('HeroSMS adapter 兼容线上地区对象和按服务嵌套的报价对象'
           2: { id: 2, rus: 'Казахстан', eng: 'Kazakhstan', chn: '哈萨克斯坦', visible: 1 },
         }));
       }
-      if (action === 'getPrices') {
-        return response(JSON.stringify({
-          1: { dr: { cost: 0.11, count: 1976, physicalCount: 648 } },
-          2: { dr: { cost: 0.055, count: 4641, physicalCount: 0 } },
-        }));
-      }
       throw new Error(`未预期操作 ${action}`);
     },
   });
@@ -187,10 +177,6 @@ test('HeroSMS adapter 兼容线上地区对象和按服务嵌套的报价对象'
   assert.deepEqual(await adapter.countries(), [
     { id: 1, name: '乌克兰' },
     { id: 2, name: '哈萨克斯坦' },
-  ]);
-  assert.deepEqual(await adapter.quotes('dr'), [
-    { countryId: 1, price: 0.11, stock: 1976 },
-    { countryId: 2, price: 0.055, stock: 4641 },
   ]);
 });
 
@@ -212,7 +198,7 @@ test('HeroSMS adapter 将兼容文本和 JSON 错误归类且不包含请求 URL
     assert.doesNotMatch(error.message, /secret-key|hero-sms\.test/);
     return true;
   });
-  await assert.rejects(jsonErrorAdapter.quotes('openai'), (error: unknown) => {
+  await assert.rejects(jsonErrorAdapter.services(), (error: unknown) => {
     assert.ok(error instanceof HeroSmsResponseError);
     assert.equal(error.kind, 'request');
     assert.doesNotMatch(error.message, /secret-key|hero-sms\.test/);
