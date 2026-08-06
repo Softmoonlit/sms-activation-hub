@@ -1,5 +1,7 @@
 import { Pool, type PoolClient } from 'pg';
 
+import { MAX_CANDIDATE_POSITION_COUNT, MIN_CANDIDATE_POSITION_COUNT } from './candidate-position.js';
+
 export type AuthorizationStatus =
   | 'unclaimed'
   | 'in_progress'
@@ -83,9 +85,6 @@ export interface CompleteDefaultCandidateLocation {
   countryId: number;
   countryName: string;
 }
-
-const MIN_CANDIDATE_POSITION_COUNT = 3;
-const MAX_CANDIDATE_POSITION_COUNT = 10;
 
 function completeDefaultCandidateLocationsFromRows(
   locations: readonly { position: number; countryId: number; countryName?: string | null }[],

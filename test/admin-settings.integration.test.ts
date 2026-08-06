@@ -141,6 +141,19 @@ if (!databaseUrl) {
       const afterSave = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers });
       assert.match(afterSave.body, /<option value="10" selected>/);
       assert.equal((afterSave.body.match(/name="candidate\d+"/g) || []).length, 10);
+
+      const shrunk = await app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/settings`,
+        headers,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&candidate1=1&candidate2=2&candidate3=3`,
+      });
+      assert.equal(shrunk.statusCode, 303);
+      assert.deepEqual((await database.completeDefaultCandidateLocations())?.map((location) => location.countryId), [1, 2, 3]);
+      const afterShrink = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers });
+      assert.match(afterShrink.body, /<option value="3" selected>/);
+      assert.equal((afterShrink.body.match(/name="candidate\d+"/g) || []).length, 3);
+      assert.doesNotMatch(afterShrink.body, /name="candidate4"/);
     } finally {
       await app.close();
     }

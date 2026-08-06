@@ -94,9 +94,10 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
     await expect(candidateCount).toHaveValue('3');
     await candidateCount.selectOption('10');
     await expect(page.getByRole('textbox', { name: /^候选地区 \d+$/ })).toHaveCount(10);
-    // 选择前三个位置后缩减，只裁剪末尾位置并保留前三个选择。
-    for (const [position, countryName] of ['美国', '英国', '法国'].entries()) {
-      const candidate = page.getByRole('textbox', { name: `候选地区 ${position + 1}`, exact: true });
+    // 先填写全部十个位置，再缩减并验证只裁剪末尾位置。
+    for (let position = 1; position <= 10; position += 1) {
+      const countryName = ['美国', '英国', '法国'][(position - 1) % 3]!;
+      const candidate = page.getByRole('textbox', { name: `候选地区 ${position}`, exact: true });
       await candidate.fill(countryName);
       await page.getByRole('option', { name: countryName }).click();
     }

@@ -1,4 +1,5 @@
 import { Database, type DefaultCandidateLocation } from './database.js';
+import { MAX_CANDIDATE_POSITION_COUNT, MIN_CANDIDATE_POSITION_COUNT } from './candidate-position.js';
 import type { HeroSms, HeroSmsCountry, HeroSmsQuote } from './herosms.js';
 
 export interface CandidateLocation {
@@ -35,7 +36,9 @@ interface RemoteCandidateLocationSettings {
 }
 
 function completeConfiguration(locations: DefaultCandidateLocation[]): boolean {
-  return locations.length >= 3 && locations.length <= 10 && locations.every((location, index) => (
+  return locations.length >= MIN_CANDIDATE_POSITION_COUNT
+    && locations.length <= MAX_CANDIDATE_POSITION_COUNT
+    && locations.every((location, index) => (
     location.position === index + 1 && Boolean(location.countryName?.trim())
   ));
 }
@@ -77,7 +80,7 @@ export class DefaultCandidateLocations {
   }
 
   async replace(countryIds: number[]): Promise<void> {
-    if (countryIds.length < 3 || countryIds.length > 10) {
+    if (countryIds.length < MIN_CANDIDATE_POSITION_COUNT || countryIds.length > MAX_CANDIDATE_POSITION_COUNT) {
       throw new CandidateLocationValidationError();
     }
     const remote = await this.remoteSettings();
