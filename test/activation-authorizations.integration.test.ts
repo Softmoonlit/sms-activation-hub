@@ -78,11 +78,11 @@ async function openApplication(heroSms = scriptedHeroSms(), now?: () => Date, ex
   const database = new Database(databaseUrl!);
   const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, now, extraDependencies.tokenGenerator);
   const app = await createApp({ ...config, sessionSecret: `${config.sessionSecret}-${randomUUID()}` }, database, { heroSms, now, ...extraDependencies });
-  await database.replaceDefaultCandidateLocations([
+  await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
-  ]);
+  ], 0.11);
   return { app, database, activationAuthorizations };
 }
 async function post(app: FastifyInstance, session: { cookie: string; csrf: string }, url: string, fields: Record<string, string>) {
@@ -340,11 +340,11 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 2, countryName: '英国' },
         { countryId: 1, countryName: '美国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createBatch(app, session, '1');
       assert.equal(created.statusCode, 201);
@@ -393,11 +393,11 @@ if (!databaseUrl) {
         { position: 3, country_id: 1, country_name: '美国', used_at: null },
       ]);
 
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 3, countryName: '法国' },
         { countryId: 3, countryName: '法国' },
         { countryId: 2, countryName: '英国' },
-      ]);
+      ], 0.11);
       now = new Date('2026-08-01T01:00:00.000Z');
       const retry = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(retry.statusCode, 503);
@@ -451,6 +451,7 @@ if (!databaseUrl) {
 
       const saveEight = await post(app, session, `/${config.adminPath}/settings`, {
         candidateCount: '8',
+        maxPricePerNumber: '0.11',
         ...Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`candidate${index + 1}`, String(index % 3 + 1)])),
       });
       assert.equal(saveEight.statusCode, 303);
@@ -460,6 +461,7 @@ if (!databaseUrl) {
 
       const saveTen = await post(app, session, `/${config.adminPath}/settings`, {
         candidateCount: '10',
+        maxPricePerNumber: '0.11',
         ...Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`candidate${index + 1}`, String((index + 1) % 3 + 1)])),
       });
       assert.equal(saveTen.statusCode, 303);
@@ -535,11 +537,11 @@ if (!databaseUrl) {
       assert.match(stillAvailable.body, /OpenAI/);
       assert.match(stillAvailable.body, /获取号码/);
 
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 2, countryName: '英国' },
         { countryId: 3, countryName: '法国' },
-      ]);
+      ], 0.11);
       now = new Date('2026-08-02T00:01:00.000Z');
       const repaired = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(repaired.statusCode, 303);
@@ -568,11 +570,11 @@ if (!databaseUrl) {
     const heroSms = scriptedHeroSms();
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 2, countryName: '英国' },
         { countryId: 3, countryName: '法国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createBatch(app, session, '1');
       const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1];
@@ -818,11 +820,11 @@ if (!databaseUrl) {
   test('管理员可以用三个相同候选地区创建激活授权', async () => {
     const { app, database } = await openApplication();
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 1, countryName: '美国' },
         { countryId: 1, countryName: '美国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createAuthorization(app, session);
 
@@ -848,11 +850,11 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 1, countryName: '美国' },
         { countryId: 1, countryName: '美国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createAuthorization(app, session);
       assert.equal(created.statusCode, 201);
@@ -1237,10 +1239,10 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => fixedNow);
     try {
-      await database.replaceDefaultCandidateLocations(Array.from({ length: 8 }, () => ({
+      await database.saveCandidateSettings(Array.from({ length: 8 }, () => ({
         countryId: 1,
         countryName: '美国',
-      })));
+      })), 0.11);
       await database.initialize();
       const session = await login(app);
       const created = await createAuthorization(app, session);
@@ -1284,10 +1286,10 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations(Array.from({ length: 10 }, () => ({
+      await database.saveCandidateSettings(Array.from({ length: 10 }, () => ({
         countryId: 1,
         countryName: '美国',
-      })));
+      })), 0.11);
       const session = await login(app);
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
@@ -1355,10 +1357,10 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations(Array.from({ length: 8 }, () => ({
+      await database.saveCandidateSettings(Array.from({ length: 8 }, () => ({
         countryId: 1,
         countryName: '美国',
-      })));
+      })), 0.11);
       const session = await login(app);
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
@@ -1670,11 +1672,11 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 1, countryName: '美国' },
         { countryId: 1, countryName: '美国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
@@ -1731,11 +1733,11 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 1, countryName: '美国' },
         { countryId: 1, countryName: '美国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
@@ -3261,11 +3263,11 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 2, countryName: '英国' },
         { countryId: 3, countryName: '法国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createBatch(app, session, '3');
       const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
@@ -3306,11 +3308,11 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 2, countryName: '英国' },
         { countryId: 3, countryName: '法国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createBatch(app, session, '2');
       const tokens = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
@@ -3346,11 +3348,11 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 2, countryName: '英国' },
         { countryId: 3, countryName: '法国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createBatch(app, session, '1');
       const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
@@ -4444,11 +4446,11 @@ if (!databaseUrl) {
     let now = new Date('2026-08-01T00:00:00.000Z');
     const { app, database } = await openApplication(scriptedHeroSms(), () => now);
     await resetAuthorizationTables(database);
-    await database.replaceDefaultCandidateLocations([
+    await database.saveCandidateSettings([
       { countryId: 1, countryName: '美国' },
       { countryId: 2, countryName: '英国' },
       { countryId: 3, countryName: '法国' },
-    ]);
+    ], 0.11);
     try {
       const session = await login(app);
 
@@ -4672,11 +4674,11 @@ if (!databaseUrl) {
     });
     const { app, database } = await openApplication(heroSms, () => now);
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '未知地区' },
         { countryId: 2, countryName: '英国' },
         { countryId: 3, countryName: '法国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);

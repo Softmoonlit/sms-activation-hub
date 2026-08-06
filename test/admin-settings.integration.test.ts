@@ -134,7 +134,7 @@ if (!databaseUrl) {
         method: 'POST',
         url: `/${config.adminPath}/settings`,
         headers,
-        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=10&${Array.from({ length: 10 }, (_, index) => `candidate${index + 1}=${index % 4 + 1}`).join('&')}`,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=10&maxPricePerNumber=0.11&${Array.from({ length: 10 }, (_, index) => `candidate${index + 1}=${index % 4 + 1}`).join('&')}`,
       });
       assert.equal(saved.statusCode, 303);
       assert.deepEqual((await database.completeDefaultCandidateLocations())?.map((location) => location.countryId), [1, 2, 3, 4, 1, 2, 3, 4, 1, 2]);
@@ -147,7 +147,7 @@ if (!databaseUrl) {
         method: 'POST',
         url: `/${config.adminPath}/settings`,
         headers,
-        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&candidate1=1&candidate2=2&candidate3=3`,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.11&candidate1=1&candidate2=2&candidate3=3`,
       });
       assert.equal(shrunk.statusCode, 303);
       assert.deepEqual((await database.completeDefaultCandidateLocations())?.map((location) => location.countryId), [1, 2, 3]);
@@ -163,22 +163,22 @@ if (!databaseUrl) {
   test('设置提交拒绝非法数量与不连续位置，并原子保留原配置', async () => {
     const { app, database } = await openApplication();
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '中国' },
         { countryId: 2, countryName: '美国' },
         { countryId: 3, countryName: '英国' },
-      ]);
+      ], 0.11);
       const session = await login(app);
       const headers = { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin };
       const original = await database.defaultCandidateLocations();
       const invalidPayloads = [
-        'candidateCount=2&candidate1=1&candidate2=2',
-        `candidateCount=11&${Array.from({ length: 11 }, (_, index) => `candidate${index + 1}=1`).join('&')}`,
-        'candidateCount=3.5&candidate1=1&candidate2=2&candidate3=3',
-        'candidate1=1&candidate2=2&candidate3=3',
-        'candidateCount=3&candidate1=1&candidate3=3',
-        'candidateCount=3&candidate1=1&candidate2=&candidate3=3',
-        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3&candidate4=4',
+        'candidateCount=2&candidate1=1&candidate2=2&maxPricePerNumber=0.11',
+        `candidateCount=11&maxPricePerNumber=0.11&${Array.from({ length: 11 }, (_, index) => `candidate${index + 1}=1`).join('&')}`,
+        'candidateCount=3.5&candidate1=1&candidate2=2&candidate3=3&maxPricePerNumber=0.11',
+        'candidate1=1&candidate2=2&candidate3=3&maxPricePerNumber=0.11',
+        'candidateCount=3&candidate1=1&candidate3=3&maxPricePerNumber=0.11',
+        'candidateCount=3&candidate1=1&candidate2=&candidate3=3&maxPricePerNumber=0.11',
+        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3&candidate4=4&maxPricePerNumber=0.11',
       ];
       for (const invalidPayload of invalidPayloads) {
         const rejected = await app.inject({
@@ -199,11 +199,11 @@ if (!databaseUrl) {
     const { app, database } = await openApplication();
     const writer = await database.pool.connect();
     try {
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '中国' },
         { countryId: 2, countryName: '美国' },
         { countryId: 3, countryName: '英国' },
-      ]);
+      ], 0.11);
       await writer.query('BEGIN');
       await writer.query('LOCK TABLE default_candidate_countries IN EXCLUSIVE MODE');
       await writer.query('DELETE FROM default_candidate_countries');
@@ -262,7 +262,7 @@ if (!databaseUrl) {
         method: 'POST',
         url: `/${config.adminPath}/settings`,
         headers: { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin },
-        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&candidate1=1&candidate2=2&candidate3=3`,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.11&candidate1=1&candidate2=2&candidate3=3`,
       });
       assert.equal(saved.statusCode, 303);
       assert.equal(saved.headers.location, `/${config.adminPath}/settings?saved=1`);
@@ -295,7 +295,7 @@ if (!databaseUrl) {
         method: 'POST',
         url: `/${config.adminPath}/settings`,
         headers,
-        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&candidate1=1&candidate2=2&candidate3=3`,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.11&candidate1=1&candidate2=2&candidate3=3`,
       });
       assert.equal(initial.statusCode, 303);
 
@@ -303,7 +303,7 @@ if (!databaseUrl) {
         method: 'POST',
         url: `/${config.adminPath}/settings`,
         headers,
-        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&candidate1=1&candidate2=1&candidate3=1`,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.11&candidate1=1&candidate2=1&candidate3=1`,
       });
       assert.equal(duplicatesAllowed.statusCode, 303);
 
@@ -311,7 +311,7 @@ if (!databaseUrl) {
         method: 'POST',
         url: `/${config.adminPath}/settings`,
         headers,
-        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&candidate1=1&candidate2=1&candidate3=99`,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.11&candidate1=1&candidate2=1&candidate3=99`,
       });
       assert.equal(rejected.statusCode, 422);
       assert.match(rejected.body, /三至十个可查询的候选地区/);
@@ -335,11 +335,11 @@ if (!databaseUrl) {
     try {
       // 旧配置被收缩迁移裁剪为不足三个位置时（迁移删除缺失地区名称的行），配置视为不完整；
       // 先显式构造完整配置再删除位置 3，不依赖其他测试留下的状态。
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '中国' },
         { countryId: 2, countryName: '美国' },
         { countryId: 3, countryName: '英国' },
-      ]);
+      ], 0.11);
       await database.pool.query('DELETE FROM default_candidate_countries WHERE position = 3');
       const session = await login(app);
       const settings = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
@@ -353,7 +353,7 @@ if (!databaseUrl) {
         method: 'POST',
         url: `/${config.adminPath}/settings`,
         headers: { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin },
-        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&candidate1=1&candidate2=2&candidate3=1`,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.11&candidate1=1&candidate2=2&candidate3=1`,
       });
       assert.equal(saved.statusCode, 303);
       assert.deepEqual(await database.completeDefaultCandidateLocations(), [
@@ -382,11 +382,11 @@ if (!databaseUrl) {
   test('HeroSMS 不可用时仍显示已保存的完整候选配置且保存不会写入部分配置', async () => {
     const initial = await openApplication();
     try {
-      await initial.database.replaceDefaultCandidateLocations([
+      await initial.database.saveCandidateSettings([
         { countryId: 1, countryName: '中国' },
         { countryId: 2, countryName: '美国' },
         { countryId: 1, countryName: '中国' },
-      ]);
+      ], 0.11);
     } finally {
       await initial.app.close();
     }
@@ -407,13 +407,156 @@ if (!databaseUrl) {
         method: 'POST',
         url: `/${config.adminPath}/settings`,
         headers: { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin },
-        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&candidate1=2&candidate2=2&candidate3=2`,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.11&candidate1=2&candidate2=2&candidate3=2`,
       });
       assert.equal(rejected.statusCode, 503);
       assert.deepEqual(await unavailable.database.completeDefaultCandidateLocations(), [
         { position: 1, countryId: 1, countryName: '中国' },
         { position: 2, countryId: 2, countryName: '美国' },
         { position: 3, countryId: 1, countryName: '中国' },
+      ]);
+    } finally {
+      await unavailable.app.close();
+    }
+  });
+
+  test('每号最高价首次进入显示默认值 0.11，随候选地区原子保存并回显', async () => {
+    const { app, database } = await openApplication();
+    try {
+      await database.saveCandidateSettings([
+        { countryId: 1, countryName: '中国' },
+        { countryId: 2, countryName: '美国' },
+        { countryId: 3, countryName: '英国' },
+      ], 0.11);
+      const session = await login(app);
+      const headers = { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin };
+
+      const settings = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
+      assert.equal(settings.statusCode, 200);
+      assert.match(settings.body, /name="maxPricePerNumber"[^>]*value="0.11"/);
+
+      const saved = await app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/settings`,
+        headers,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.15&candidate1=2&candidate2=3&candidate3=1`,
+      });
+      assert.equal(saved.statusCode, 303);
+      assert.equal(await database.maxPricePerNumber(), 0.15);
+      assert.deepEqual(await database.completeDefaultCandidateLocations(), [
+        { position: 1, countryId: 2, countryName: '美国' },
+        { position: 2, countryId: 3, countryName: '英国' },
+        { position: 3, countryId: 1, countryName: '中国' },
+      ]);
+
+      const afterSave = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
+      assert.match(afterSave.body, /name="maxPricePerNumber"[^>]*value="0.15"/);
+
+      // 指数形式回显后可再次保存同一值（数值往返一致，不被误判为非法输入）
+      const exponentSaved = await app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/settings`,
+        headers,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=1e-20&candidate1=2&candidate2=3&candidate3=1`,
+      });
+      assert.equal(exponentSaved.statusCode, 303);
+      const exponentEcho = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
+      assert.match(exponentEcho.body, /name="maxPricePerNumber"[^>]*value="1e-20"/);
+      const exponentResubmit = await app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/settings`,
+        headers,
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=1e-20&candidate1=2&candidate2=3&candidate3=1`,
+      });
+      assert.equal(exponentResubmit.statusCode, 303);
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('每号最高价非法输入被拒绝且原有完整配置保持不变', async () => {
+    const { app, database } = await openApplication();
+    try {
+      await database.saveCandidateSettings([
+        { countryId: 1, countryName: '中国' },
+        { countryId: 2, countryName: '美国' },
+        { countryId: 3, countryName: '英国' },
+      ], 0.15);
+      const session = await login(app);
+      const headers = { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin };
+      const originalLocations = await database.defaultCandidateLocations();
+      const invalidPayloads = [
+        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3&maxPricePerNumber=abc',
+        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3&maxPricePerNumber=-1',
+        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3&maxPricePerNumber=',
+        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3',
+        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3&maxPricePerNumber=0.5.5',
+        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3&maxPricePerNumber=.5',
+        'candidateCount=3&candidate1=1&candidate2=2&candidate3=3&maxPricePerNumber=0x11',
+      ];
+      for (const invalidPayload of invalidPayloads) {
+        const rejected = await app.inject({
+          method: 'POST',
+          url: `/${config.adminPath}/settings`,
+          headers,
+          payload: `csrf=${encodeURIComponent(session.csrfCookie)}&${invalidPayload}`,
+        });
+        assert.equal(rejected.statusCode, 422, invalidPayload);
+        assert.match(rejected.body, /每号最高价必须是大于等于 0 的数字。/, invalidPayload);
+        assert.deepEqual(await database.defaultCandidateLocations(), originalLocations, invalidPayload);
+        assert.equal(await database.maxPricePerNumber(), 0.15, invalidPayload);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('HeroSMS 不可用时仍可查看和保存每号最高价，修改候选地区仍被拒绝', async () => {
+    const initial = await openApplication();
+    try {
+      await initial.database.saveCandidateSettings([
+        { countryId: 1, countryName: '中国' },
+        { countryId: 2, countryName: '美国' },
+        { countryId: 3, countryName: '英国' },
+      ], 0.11);
+    } finally {
+      await initial.app.close();
+    }
+
+    const unavailable = await openApplication(unavailableHeroSms);
+    try {
+      const session = await login(unavailable.app);
+      const settings = await unavailable.app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: sessionCookie(session) } });
+      assert.equal(settings.statusCode, 200);
+      assert.match(settings.body, /暂时无法读取 HeroSMS 设置/);
+      assert.match(settings.body, /name="maxPricePerNumber"[^>]*value="0.11"/);
+
+      const saved = await unavailable.app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/settings`,
+        headers: { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin },
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.2&candidate1=1&candidate2=2&candidate3=3`,
+      });
+      assert.equal(saved.statusCode, 303);
+      assert.equal(await unavailable.database.maxPricePerNumber(), 0.2);
+      assert.deepEqual(await unavailable.database.completeDefaultCandidateLocations(), [
+        { position: 1, countryId: 1, countryName: '中国' },
+        { position: 2, countryId: 2, countryName: '美国' },
+        { position: 3, countryId: 3, countryName: '英国' },
+      ]);
+
+      const rejected = await unavailable.app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/settings`,
+        headers: { cookie: sessionCookie(session), 'content-type': 'application/x-www-form-urlencoded', origin },
+        payload: `csrf=${encodeURIComponent(session.csrfCookie)}&candidateCount=3&maxPricePerNumber=0.3&candidate1=2&candidate2=2&candidate3=2`,
+      });
+      assert.equal(rejected.statusCode, 503);
+      assert.equal(await unavailable.database.maxPricePerNumber(), 0.2);
+      assert.deepEqual(await unavailable.database.completeDefaultCandidateLocations(), [
+        { position: 1, countryId: 1, countryName: '中国' },
+        { position: 2, countryId: 2, countryName: '美国' },
+        { position: 3, countryId: 3, countryName: '英国' },
       ]);
     } finally {
       await unavailable.app.close();

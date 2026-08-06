@@ -155,6 +155,15 @@ export class Database {
       ALTER TABLE default_candidate_countries
         DROP CONSTRAINT IF EXISTS default_candidate_countries_country_name_check;
 
+      CREATE TABLE IF NOT EXISTS app_settings (
+        singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+        max_price_per_number NUMERIC NOT NULL CHECK (max_price_per_number >= 0)
+      );
+
+      INSERT INTO app_settings (singleton, max_price_per_number)
+      VALUES (true, 0.11)
+      ON CONFLICT (singleton) DO NOTHING;
+
       CREATE TABLE IF NOT EXISTS activation_authorizations (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         internal_note TEXT,
@@ -664,13 +673,20 @@ export class Database {
     })));
   }
 
-  async replaceDefaultCandidateLocations(locations: readonly { countryId: number; countryName: string }[]): Promise<void> {
+  /** 原子保存候选地区与每号最高价：要么整体写入，要么整体不变。 */
+  async saveCandidateSettings(
+    locations: readonly { countryId: number; countryName: string }[],
+    maxPricePerNumber: number,
+  ): Promise<void> {
     if (locations.length < MIN_CANDIDATE_POSITION_COUNT
       || locations.length > MAX_CANDIDATE_POSITION_COUNT
       || locations.some((location) => (
       !Number.isSafeInteger(location.countryId) || location.countryId < 0 || !location.countryName.trim()
     ))) {
       throw new Error('默认候选地区必须包含三至十个完整位置');
+    }
+    if (!Number.isFinite(maxPricePerNumber) || maxPricePerNumber < 0) {
+      throw new Error('每号最高价必须是大于等于 0 的数字');
     }
     await this.transaction(async (client) => {
       await client.query('LOCK TABLE default_candidate_countries IN EXCLUSIVE MODE');
@@ -681,7 +697,25 @@ export class Database {
           [index + 1, location.countryId, location.countryName],
         );
       }
+      const updated = await client.query(
+        'UPDATE app_settings SET max_price_per_number = $1 WHERE singleton = true',
+        [maxPricePerNumber],
+      );
+      if (updated.rowCount !== 1) {
+        throw new Error('每号最高价配置行缺失，无法保存');
+      }
     });
+  }
+
+  async maxPricePerNumber(): Promise<number> {
+    const result = await this.pool.query<{ value: string }>(
+      'SELECT max_price_per_number::text AS value FROM app_settings WHERE singleton = true',
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new Error('每号最高价配置行缺失');
+    }
+    return Number(row.value);
   }
 
   async createUnclaimedAuthorizationBatch(input: readonly { tokenHash: string; tokenSuffix: string; createdAt: Date }[]): Promise<string[]> {

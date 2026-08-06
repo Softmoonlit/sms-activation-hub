@@ -55,5 +55,5 @@ export function candidateLocationSettingsContent(
   const configurationWarning = settings.configurationComplete
     ? ''
     : '<p class="error" role="alert">当前默认候选位置配置不完整，请重新选择并保存。</p>';
-  return `<section class="settings">${heroStatus}${balanceMarkup}${configurationWarning}${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}"><label for="candidate-count">候选位置数量<select id="candidate-count" name="candidateCount">${countOptions}</select></label><div id="candidate-locations">${comboboxes}</div><button type="submit">保存默认候选地区</button></form></section>${comboboxTemplate}${comboboxScript}`;
+  return `<section class="settings">${heroStatus}${balanceMarkup}${configurationWarning}${errorMarkup}<form method="post" action="/${path}/settings"><input type="hidden" name="csrf" value="${csrfToken}"><label for="candidate-count">候选位置数量<select id="candidate-count" name="candidateCount">${countOptions}</select></label><div id="candidate-locations">${comboboxes}</div><label for="max-price">每号最高价<input id="max-price" type="number" name="maxPricePerNumber" min="0" step="any" value="${settings.maxPricePerNumber.toString()}" required></label><button type="submit">保存默认候选地区</button></form></section>${comboboxTemplate}${comboboxScript}`;
 }

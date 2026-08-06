@@ -274,11 +274,11 @@ if (!databaseUrl) {
 
     try {
       await database.initialize();
-      await database.replaceDefaultCandidateLocations([
+      await database.saveCandidateSettings([
         { countryId: 1, countryName: '美国' },
         { countryId: 2, countryName: '英国' },
         { countryId: 3, countryName: '法国' },
-      ]);
+      ], 0.11);
       await database.pool.query(
         `INSERT INTO activation_authorizations
           (id, token_hash, token_suffix, status, created_at, claimed_at,
@@ -355,6 +355,39 @@ if (!databaseUrl) {
         { position: 1, country_id: 1, used: true, provider_activation_id: providerActivationId, request_status: null },
         { position: 2, country_id: 2, used: false, provider_activation_id: null, request_status: 'failed' },
         { position: 3, country_id: 3, used: false, provider_activation_id: null, request_status: null },
+      ]);
+    } finally {
+      await database.close();
+      await adminDatabase.pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
+      await adminDatabase.close();
+    }
+  });
+
+  test('每号最高价配置表初始化幂等：默认值 0.11，重复启动不报错也不覆盖已保存值', async () => {
+    const schemaName = `max_price_settings_${randomUUID().replaceAll('-', '')}`;
+    const adminDatabase = new Database(databaseUrl);
+    await adminDatabase.pool.query(`CREATE SCHEMA ${schemaName}`);
+
+    const scopedUrl = new URL(databaseUrl);
+    scopedUrl.searchParams.set('options', `-csearch_path=${schemaName}`);
+    const database = new Database(scopedUrl.toString());
+    try {
+      await database.initialize();
+      assert.equal(await database.maxPricePerNumber(), 0.11);
+      await database.initialize();
+      assert.equal(await database.maxPricePerNumber(), 0.11);
+
+      await database.saveCandidateSettings([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 2, countryName: '英国' },
+        { countryId: 3, countryName: '法国' },
+      ], 0.18);
+      await database.initialize();
+      assert.equal(await database.maxPricePerNumber(), 0.18);
+      assert.deepEqual(await database.completeDefaultCandidateLocations(), [
+        { position: 1, countryId: 1, countryName: '美国' },
+        { position: 2, countryId: 2, countryName: '英国' },
+        { position: 3, countryId: 3, countryName: '法国' },
       ]);
     } finally {
       await database.close();

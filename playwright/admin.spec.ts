@@ -91,6 +91,7 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
     await expect(page.locator('h1', { hasText: '设置' })).toBeVisible();
     await expect(page.getByText('HeroSMS 已连接')).toBeVisible();
     await expect(page.getByText('余额：')).toBeVisible();
+    await expect(page.getByLabel('每号最高价')).toHaveValue('0.11');
     const candidateCount = page.getByLabel('候选位置数量');
     await expect(candidateCount).toHaveValue('3');
     await candidateCount.selectOption('10');
@@ -117,11 +118,13 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
       await candidate.fill(countryName);
       await page.getByRole('option', { name: countryName }).click();
     }
+    await page.getByLabel('每号最高价').fill('0.15');
     await page.getByRole('button', { name: '保存默认候选地区' }).click();
     // 保存后重定向回设置页，候选地区已保存
     await expect(page.locator('h1', { hasText: '设置' })).toBeVisible();
     await expect(page.getByRole('status')).toHaveText('✓ 已保存');
     await expect(page.getByLabel('候选位置数量')).toHaveValue('10');
+    await expect(page.getByLabel('每号最高价')).toHaveValue('0.15');
 
     // 返回首页，进入批量数量确认页
     await page.getByRole('link', { name: '返回首页' }).click();
@@ -154,11 +157,11 @@ test('桌面视口完成管理员登录、设置默认候选地区、预检确�
 test('桌面视口管理员可以查看授权详情页和撤销确认页', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
-  await database.replaceDefaultCandidateLocations([
+  await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
-  ]);
+  ], 0.11);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
@@ -206,11 +209,11 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
 test('仅打开授权链接不领取号码，领取后持有同一授权链接的其他浏览器可继续使用', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
-  await database.replaceDefaultCandidateLocations([
+  await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
-  ]);
+  ], 0.11);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
@@ -261,11 +264,11 @@ test('待领取链接永久有效，领取 24 小时截止后访问返回 404', 
     },
     now: () => now,
   });
-  await database.replaceDefaultCandidateLocations([
+  await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
-  ]);
+  ], 0.11);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
@@ -313,11 +316,11 @@ test('随机地址返回 404', async ({ browser }) => {
 test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部状态信息', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
-  await database.replaceDefaultCandidateLocations([
+  await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
-  ]);
+  ], 0.11);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
@@ -364,11 +367,11 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
   let now = new Date('2026-08-01T00:00:00.000Z');
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => now });
-  await database.replaceDefaultCandidateLocations([
+  await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
-  ]);
+  ], 0.11);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
@@ -509,11 +512,11 @@ test('管理员单会话：新登录使旧会话失效', async ({ browser }) => 
 test('浏览器网络和应用日志不包含 token、Cookie、号码、验证码或短信正文', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
-  await database.replaceDefaultCandidateLocations([
+  await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
-  ]);
+  ], 0.11);
   await app.listen({ host: '127.0.0.1', port: 32124 });
   try {
     const { cookie, csrf } = await adminLogin(app);
@@ -728,11 +731,11 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
   try {
     const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
     await resetAuthorizationTables(database);
-    await database.replaceDefaultCandidateLocations([
+    await database.saveCandidateSettings([
       { countryId: 1, countryName: '美国' },
       { countryId: 2, countryName: '英国' },
       { countryId: 3, countryName: '法国' },
-    ]);
+    ], 0.11);
     const links = await createBatch(app, cookie, csrf, '1');
     const token = links[0]!;
     const suffix = token.slice(-8);

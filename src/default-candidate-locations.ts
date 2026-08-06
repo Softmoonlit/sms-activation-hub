@@ -22,11 +22,18 @@ export interface CandidateLocationSettings {
   locations: CandidateLocation[];
   configurationComplete: boolean;
   heroSmsAvailable: boolean;
+  maxPricePerNumber: number;
 }
 
 export class CandidateLocationValidationError extends Error {
   constructor() {
     super('请选择三至十个可查询的候选地区。');
+  }
+}
+
+export class MaxPricePerNumberValidationError extends Error {
+  constructor() {
+    super('每号最高价必须是大于等于 0 的数字。');
   }
 }
 
@@ -65,11 +72,15 @@ export class DefaultCandidateLocations {
   ) {}
 
   async settings(): Promise<CandidateLocationSettings> {
-    const configuredLocations = await this.database.defaultCandidateLocations();
+    const [configuredLocations, maxPricePerNumber] = await Promise.all([
+      this.database.defaultCandidateLocations(),
+      this.database.maxPricePerNumber(),
+    ]);
     const base = {
       configuredCountryIds: configuredLocations.map((location) => location.countryId),
       configuredLocations,
       configurationComplete: completeConfiguration(configuredLocations),
+      maxPricePerNumber,
     };
     try {
       const remote = await this.remoteSettings();
@@ -79,18 +90,37 @@ export class DefaultCandidateLocations {
     }
   }
 
-  async replace(countryIds: number[]): Promise<void> {
+  async replace(countryIds: number[], maxPricePerNumber: number): Promise<void> {
+    if (!Number.isFinite(maxPricePerNumber) || maxPricePerNumber < 0) {
+      throw new MaxPricePerNumberValidationError();
+    }
     if (countryIds.length < MIN_CANDIDATE_POSITION_COUNT || countryIds.length > MAX_CANDIDATE_POSITION_COUNT) {
       throw new CandidateLocationValidationError();
     }
+    let completeSelected: { countryId: number; countryName: string }[];
+    try {
+      completeSelected = await this.completeSelectedLocations(countryIds);
+    } catch (error) {
+      // 供应商报价接口不可用时仍允许保存每号最高价：提交的候选地区必须与库中
+      // 已保存配置逐位一致，地区名称沿用库中值，不引入未经验证的新地区。
+      const existing = await this.database.completeDefaultCandidateLocations();
+      if (!existing || existing.length !== countryIds.length
+        || existing.some((location, index) => location.countryId !== countryIds[index])) {
+        throw error;
+      }
+      completeSelected = existing.map((location) => ({ countryId: location.countryId, countryName: location.countryName }));
+    }
+    await this.database.saveCandidateSettings(completeSelected, maxPricePerNumber);
+  }
+
+  private async completeSelectedLocations(countryIds: number[]): Promise<{ countryId: number; countryName: string }[]> {
     const remote = await this.remoteSettings();
     const locationById = new Map(remote.locations.map((location) => [location.id, location]));
     const selected = countryIds.map((countryId) => locationById.get(countryId));
-    const completeSelected = selected.map((location) => {
+    return selected.map((location) => {
       if (!queryableLocation(location)) throw new CandidateLocationValidationError();
       return { countryId: location.id, countryName: location.name };
     });
-    await this.database.replaceDefaultCandidateLocations(completeSelected);
   }
 
   private async remoteSettings(): Promise<RemoteCandidateLocationSettings> {

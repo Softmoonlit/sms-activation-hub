@@ -53,11 +53,11 @@ test('三个独立浏览器通过同一授权链接完成领取、换号和结�
   let now = new Date('2026-08-01T00:00:00.000Z');
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => now });
-  await database.replaceDefaultCandidateLocations([
+  await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
     { countryId: 3, countryName: '法国' },
-  ]);
+  ], 0.11);
   await app.listen({ host: '127.0.0.1', port: 32123 });
   try {
     const loginPage = await app.inject({ method: 'GET', url: `/${config.adminPath}` });

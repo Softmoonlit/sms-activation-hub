@@ -9,7 +9,7 @@ import { candidateLocationSettingsContent } from './admin-settings-page.js';
 import { ActivationAuthorizations, AuthorizationValidationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationTokenGeneratorInput, type BatchAuthorizationPreflight, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { parseCandidatePositionCount } from './candidate-position.js';
 import { type AuthorizationListPage, type AuthorizationListQuery, type AuthorizationListTopLevelStatus } from './database.js';
-import { CandidateLocationValidationError, DefaultCandidateLocations, type CandidateLocationSettings } from './default-candidate-locations.js';
+import { CandidateLocationValidationError, DefaultCandidateLocations, MaxPricePerNumberValidationError, type CandidateLocationSettings } from './default-candidate-locations.js';
 import { countryCallingCode } from './country-calling-code.js';
 import { countryFlagHtml, formatCurrency, formatDateTime } from './country-flag.js';
 import { type AppConfig, randomToken } from './config.js';
@@ -32,6 +32,7 @@ interface CsrfBody {
 
 interface SettingsBody extends CsrfBody {
   candidateCount?: string;
+  maxPricePerNumber?: string;
   [key: string]: string | undefined;
 }
 
@@ -564,6 +565,15 @@ function candidateCountryIds(body: SettingsBody): number[] | undefined {
   }
   const countryIds = values.map((value) => Number(value));
   return countryIds.every(Number.isSafeInteger) ? countryIds : undefined;
+}
+
+function parseMaxPricePerNumber(value: string | undefined): number | undefined {
+  const raw = value?.trim();
+  if (raw === undefined || raw === '' || !/^\d+(\.\d+)?([eE][+-]?\d+)?$/.test(raw)) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function loginFailure(reply: FastifyReply, adminPath: string, statusCode: number, message: string): FastifyReply {
@@ -1152,14 +1162,18 @@ export async function createApp(config: AppConfig, database = new Database(confi
     }
 
     const countryIds = candidateCountryIds(request.body);
+    const maxPricePerNumber = parseMaxPricePerNumber(request.body.maxPricePerNumber);
     try {
       if (!countryIds) {
         throw new CandidateLocationValidationError();
       }
-      await defaultCandidateLocations.replace(countryIds);
+      if (maxPricePerNumber === undefined) {
+        throw new MaxPricePerNumberValidationError();
+      }
+      await defaultCandidateLocations.replace(countryIds, maxPricePerNumber);
       return reply.redirect(`${adminRoot}/settings?saved=1`, 303);
     } catch (error) {
-      if (error instanceof CandidateLocationValidationError) {
+      if (error instanceof CandidateLocationValidationError || error instanceof MaxPricePerNumberValidationError) {
         try {
           const settings = await defaultCandidateLocations.settings();
           return reply.code(422).type('text/html; charset=utf-8').send(settingsPage(config.adminPath, session.csrfToken, settings, error.message));
