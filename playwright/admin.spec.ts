@@ -202,7 +202,7 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
   }
 });
 
-test('仅打开链接（聊天软件预览）不领取号码，跨浏览器绑定被拒绝', async ({ browser }) => {
+test('仅打开授权链接不领取号码，领取后持有同一授权链接的其他浏览器可继续使用', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
   await database.replaceDefaultCandidateLocations([
@@ -220,11 +220,11 @@ test('仅打开链接（聊天软件预览）不领取号码，跨浏览器绑�
     const previewPage = await previewContext.newPage();
     await previewPage.goto(`${origin}/a/${token}`);
     await expect(previewPage.getByRole('heading', { name: 'OpenAI' })).toBeVisible();
-    // 仅打开后页面显示「获取号码」按钮但还未触发绑定
+    // 仅打开后页面显示「获取号码」按钮但还未触发领取
     await expect(previewPage.getByRole('button', { name: '获取号码' })).toBeVisible();
     await previewContext.close();
 
-    // 第二次（不同浏览器上下文）：正式领取
+    // 第二次（不同浏览器上下文）：通过同一授权链接正式领取
     const recipientContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const recipientPage = await recipientContext.newPage();
     await recipientPage.goto(`${origin}/a/${token}`);
@@ -232,11 +232,11 @@ test('仅打开链接（聊天软件预览）不领取号码，跨浏览器绑�
     await expect(recipientPage.locator('.number')).toBeVisible();
     await recipientContext.close();
 
-    // 第三次：不同浏览器上下文尝试用同一链接，应被拒绝（浏览器绑定页面）
+    // 第三次：不同浏览器上下文持有同一授权链接，可继续查看当前号码
     const otherContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const otherPage = await otherContext.newPage();
     await otherPage.goto(`${origin}/a/${token}`);
-    await expect(otherPage.getByText('此链接已被领取，当前浏览器无法访问，请联系发送者')).toBeVisible();
+    await expect(otherPage.locator('.number')).toBeVisible();
     await otherContext.close();
   } finally {
     await app.close();
@@ -278,11 +278,10 @@ test('待领取链接永久有效，领取 24 小时截止后访问返回 404', 
     // 领取后启动 24 小时领取期限（截止 = 08-31 00:00），号码窗口至 08-30 00:20
     const claim = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
     assert.equal(claim.statusCode, 303, '领取应成功');
-    const recipientCookie = `recipient_session=${claim.cookies.find((c) => c.name === 'recipient_session')?.value ?? ''}`;
 
     // 领取 24 小时后：号码窗口早已结束，超时收尾后以领取后期限结束访问
     now = new Date('2026-08-31T00:20:00.000Z');
-    const checkAfter = await app.inject({ method: 'GET', url: `/a/${token}`, headers: { cookie: recipientCookie } });
+    const checkAfter = await app.inject({ method: 'GET', url: `/a/${token}` });
     assert.equal(checkAfter.statusCode, 404, '领取 24 小时后应返回 404');
 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -545,12 +544,8 @@ test('浏览器网络和应用日志不包含 token、Cookie、号码、验证�
     const cacheControl = response?.headers()['cache-control'];
     assert.equal(cacheControl, 'no-store', 'Cache-Control 应为 no-store');
 
-    // recipient session cookie 应为 HttpOnly（无法从 JS 读取）
     const cookies = await context.cookies();
-    const recipientSession = cookies.find((c) => c.name === 'recipient_session');
-    if (recipientSession) {
-      assert.ok(recipientSession.httpOnly, 'recipient_session 应为 HttpOnly');
-    }
+    assert.equal(cookies.some((cookie) => cookie.name === 'recipient_session'), false, '授权链接访问不应创建 recipient_session Cookie');
 
     await context.close();
   } finally {
