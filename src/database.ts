@@ -168,8 +168,7 @@ export class Database {
         end_prompt_until TIMESTAMPTZ,
         ended_at TIMESTAMPTZ,
         ended_reason TEXT,
-        last_activity_at TIMESTAMPTZ,
-        recipient_session_hash TEXT
+        last_activity_at TIMESTAMPTZ
       );
     `);
 
@@ -229,8 +228,6 @@ export class Database {
         ADD COLUMN IF NOT EXISTS ended_reason TEXT;
       ALTER TABLE activation_authorizations
         ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;
-      ALTER TABLE activation_authorizations
-        ADD COLUMN IF NOT EXISTS recipient_session_hash TEXT;
     `);
 
     // 检查是否存在未完结的旧模型记录（限定当前 schema，避免跨 schema 误判其他库的旧表）
@@ -266,23 +263,20 @@ export class Database {
         SET status = 'ended',
             ended_reason = 'admin_revoked',
             ended_at = COALESCE(ended_at, created_at),
-            token_hash = NULL,
-            recipient_session_hash = NULL
+            token_hash = NULL
         WHERE status = 'revoked';
 
       UPDATE activation_authorizations
         SET status = 'ended',
             ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
             ended_at = COALESCE(ended_at, created_at),
-            token_hash = NULL,
-            recipient_session_hash = NULL
+            token_hash = NULL
         WHERE status = 'expired';
 
       UPDATE activation_authorizations
         SET status = 'ended',
             ended_reason = COALESCE(ended_reason, 'quota_exhausted'),
-            token_hash = NULL,
-            recipient_session_hash = NULL
+            token_hash = NULL
         WHERE status = 'quota_exhausted';
 
       UPDATE activation_authorizations
@@ -300,10 +294,6 @@ export class Database {
             END,
             token_hash = CASE
               WHEN result_view_until IS NOT NULL AND result_view_until > now() THEN token_hash
-              ELSE NULL
-            END,
-            recipient_session_hash = CASE
-              WHEN result_view_until IS NOT NULL AND result_view_until > now() THEN recipient_session_hash
               ELSE NULL
             END
         WHERE status = 'sms_delivered';
@@ -328,14 +318,13 @@ export class Database {
       DROP INDEX IF EXISTS activation_authorizations_unclaimed_recipient_idx;
       DROP INDEX IF EXISTS activation_authorizations_unended_recipient_idx;
 
+      DROP INDEX IF EXISTS activation_authorizations_recipient_session_idx;
+
       ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS recipient_identifier;
       ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS normalized_recipient_identifier;
       ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS expires_at;
       ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS revoked_at;
-
-      CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_recipient_session_idx
-        ON activation_authorizations (recipient_session_hash)
-        WHERE recipient_session_hash IS NOT NULL;
+      ALTER TABLE activation_authorizations DROP COLUMN IF EXISTS recipient_session_hash;
 
       UPDATE activation_authorizations
         SET last_activity_at = COALESCE(last_activity_at, created_at)
@@ -460,7 +449,7 @@ export class Database {
         WHERE status = 'timed_out' AND timeout_final_status_confirmed_at IS NULL;
 
       -- 旧运行时版本可能在三个候选位置都消耗且最后激活已超时后留下 in_progress 中间态；
-      -- 收缩模型下收敛为已结束并记录额度用尽原因，提示窗口期内仍保留 token 与浏览器绑定。
+      -- 收缩模型下收敛为已结束并记录额度用尽原因，提示窗口期内仍保留 token。
       UPDATE activation_authorizations auth
         SET status = 'ended',
             ended_reason = COALESCE(ended_reason, 'quota_exhausted'),
@@ -817,7 +806,7 @@ export class Database {
                  AND request.status IN ('requesting', 'reconciling', 'manual')
              )
            )
-           AND (token_hash IS NOT NULL OR recipient_session_hash IS NOT NULL)
+           AND token_hash IS NOT NULL
          FOR UPDATE`,
         [now],
       );
@@ -828,7 +817,7 @@ export class Database {
          SET status = 'ended',
              ended_at = COALESCE(ended_at, $2),
              ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
-             token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
+             token_hash = NULL, last_activity_at = $2
          WHERE id = ANY($1::uuid[])
            AND status NOT IN ('result_available', 'ended')
            AND NOT (status = 'ended' AND end_prompt_until > $2)
@@ -857,7 +846,7 @@ export class Database {
        SET status = 'ended',
            ended_at = COALESCE(ended_at, $2),
            ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
-           token_hash = NULL, recipient_session_hash = NULL, last_activity_at = $2
+           token_hash = NULL, last_activity_at = $2
        WHERE id = $1 AND number_acquisition_expires_at IS NOT NULL
          AND number_acquisition_expires_at <= $2
          AND status NOT IN ('result_available', 'ended')

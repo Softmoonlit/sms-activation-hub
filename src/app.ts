@@ -19,7 +19,6 @@ import { escapeHtml } from './html.js';
 
 const ADMIN_COOKIE = 'admin_session';
 const CSRF_COOKIE = 'admin_csrf';
-const RECIPIENT_COOKIE = 'recipient_session';
 const HEROSMS_COMPATIBILITY_URL = 'https://hero-sms.com/stubs/handler_api.php';
 
 interface LoginBody {
@@ -854,8 +853,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
     return authorizationExpirySchedulingPromise;
   };
 
-  const recipientState = async (token: string, sessionToken?: string): Promise<Awaited<ReturnType<ActivationAuthorizations['recipientState']>>> => {
-    const view = await activationAuthorizations.recipientState(token, sessionToken);
+  const recipientState = async (token: string): Promise<Awaited<ReturnType<ActivationAuthorizations['recipientState']>>> => {
+    const view = await activationAuthorizations.recipientState(token);
     trackPromise(scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling));
     return view;
   };
@@ -1038,34 +1037,25 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
 
   app.get<{ Params: { token: string } }>('/a/:token', async (request, reply) => {
-    const result = await recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    const result = await recipientState(request.params.token);
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage());
-    if (result.state === 'browser-mismatch') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
     return reply.type('text/html; charset=utf-8').send(recipientPage(request.params.token, result));
   });
 
   app.post<{ Params: { token: string } }>('/a/:token/numbers', async (request, reply) => {
-    const result = await activationAuthorizations.claimAndGetNumber(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    const result = await activationAuthorizations.claimAndGetNumber(request.params.token);
     // 号码获取可能产生授权到期取消任务（跨截止确认的号码）：重新安排取消确认对账调度。
     wakeCancellationConfirmationReconciliationScheduling();
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
-    if (result.state === 'browser-mismatch') {
-      return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
-    }
     if (result.state === 'claim-failed') {
       const view = await recipientState(request.params.token);
       if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
       return reply.code(503).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, RECIPIENT_ACQUISITION_ERROR_MESSAGE));
     }
-    if (result.setSessionCookie) {
-      reply.setCookie(RECIPIENT_COOKIE, result.sessionToken, {
-        httpOnly: true, maxAge: 25 * 60 * 60, path: `/a/${request.params.token}`, sameSite: 'strict', secure: true,
-      });
-    }
     if (result.state === 'claimed') return reply.redirect(`/a/${request.params.token}`, 303);
-    const view = await recipientState(request.params.token, result.sessionToken);
+    const view = await recipientState(request.params.token);
     if (result.state === 'confirming') {
       return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
     }
@@ -1076,10 +1066,9 @@ export async function createApp(config: AppConfig, database = new Database(confi
   });
 
   app.post<{ Params: { token: string } }>('/a/:token/replacement', async (request, reply) => {
-    const view = await recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    const view = await recipientState(request.params.token);
     if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
-    if (view.state === 'browser-mismatch') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
     if (!view.currentNumberAction || !view.currentNumberActionAvailable) {
       return reply.code(409).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view, '当前号码暂时不能操作，请继续等待。'));
     }
@@ -1089,17 +1078,16 @@ export async function createApp(config: AppConfig, database = new Database(confi
   app.post<{ Body: ReplacementBody; Params: { token: string } }>('/a/:token/replacement/confirm', async (request, reply) => {
     if (request.body?.replacement === 'wait') return reply.redirect(`/a/${request.params.token}`, 303);
     if (request.body?.replacement !== 'confirm') return reply.code(400).send();
-    const result = await activationAuthorizations.requestNumberReplacement(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    const result = await activationAuthorizations.requestNumberReplacement(request.params.token);
     // 换号/结束使用请求可能进入“取消确认中”或产生新的取消重试时间：
     // 无条件重新安排两个专用调度器，不依赖页面刷新、短信 webhook 或 60 秒后台扫描。
     void scheduleNextPendingReplacementCancellation().catch(retryPendingReplacementCancellationScheduling);
     wakeCancellationConfirmationReconciliationScheduling();
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
-    const view = await recipientState(request.params.token, request.cookies[RECIPIENT_COOKIE]);
+    const view = await recipientState(request.params.token);
     if (view.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (view.state === 'unavailable') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage());
-    if (view.state === 'browser-mismatch') return reply.code(409).type('text/html; charset=utf-8').send(unavailableRecipientPage('此链接已被领取，当前浏览器无法访问，请联系发送者'));
     if (result.state === 'replaced' || result.state === 'ended') return reply.redirect(`/a/${request.params.token}`, 303);
     if (result.state === 'confirming') return reply.code(202).type('text/html; charset=utf-8').send(recipientPage(request.params.token, view));
     const message = result.state === 'too-early'
