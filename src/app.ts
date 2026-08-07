@@ -300,6 +300,8 @@ function waitDurationLabel(start: Date, end: Date): string {
 
 // 供应商激活卡片的接码耗时观测内联追加段：等待起点、短信送达或放弃时刻与等待耗时；
 // 等待起点为空记未记录（短信已送达仍单独显示送达时刻），非接收者主动放弃（超时等）不套耗时指标。
+// 已送达号码即使存在放弃时刻（送达事件处理前接收者主动放弃的观测事实）也只展示送达口径，
+// 与“成功号等多久收到 / 放弃号等多久放弃”的互斥分类一致，避免“已完成仍显示放弃”的误读。
 function activationObservationMarkup(activation: {
   verificationRequestedAt?: Date;
   abandonedAt?: Date;
@@ -309,7 +311,7 @@ function activationObservationMarkup(activation: {
   const requested = activation.verificationRequestedAt;
   parts.push(requested ? `等待起点 ${escapeHtml(formatDateTime(requested, currentDate))}` : '等待起点未记录');
   if (activation.smsReceivedAt) parts.push(`短信送达 ${escapeHtml(formatDateTime(activation.smsReceivedAt, currentDate))}`);
-  if (activation.abandonedAt) parts.push(`放弃时刻 ${escapeHtml(formatDateTime(activation.abandonedAt, currentDate))}`);
+  if (!activation.smsReceivedAt && activation.abandonedAt) parts.push(`放弃时刻 ${escapeHtml(formatDateTime(activation.abandonedAt, currentDate))}`);
   if (requested && activation.smsReceivedAt) {
     parts.push(`等多久收到：${waitDurationLabel(requested, activation.smsReceivedAt)}`);
   } else if (requested && activation.abandonedAt) {

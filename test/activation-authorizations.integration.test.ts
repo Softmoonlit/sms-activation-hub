@@ -5229,17 +5229,18 @@ if (!databaseUrl) {
       );
       const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
       await database.pool.query("UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'acquisition_expired', token_hash = NULL WHERE id = $1", [authorizationId, now]);
-      const activationIds = ['success', 'abandoned', 'unrecorded', 'timedout'].map((suffix) => `${suffix}-${randomUUID()}`);
+      const activationIds = ['success', 'abandoned', 'unrecorded', 'timedout', 'delivered-abandoned'].map((suffix) => `${suffix}-${randomUUID()}`);
       for (const [index] of activationIds.entries()) {
         await database.pool.query(
           `INSERT INTO authorization_candidate_countries (authorization_id, position, country_id, country_name, used_at)
            VALUES ($1, $2, $3, $4, $5)`,
-          [authorizationId, index + 1, index + 1, ['美国', '英国', '法国', '德国'][index], now],
+          [authorizationId, index + 1, index + 1, ['美国', '英国', '法国', '德国', '西班牙'][index], now],
         );
       }
       // 成功号：已点按钮 + 短信送达；放弃号：已点按钮 + 换号确认放弃；
       // 未记录号：未点按钮但短信已送达；超时号：已点按钮但无送达无放弃；
-      // 其中放弃号与超时号号码已被领域删除（phone_number 为空），成功号保留号码作为敏感窗口事实。
+      // 已送达且放弃号：已点按钮 + 短信送达与放弃时刻并存（送达事件处理前接收者主动放弃的观测事实）；
+      // 其中放弃号与超时号号码已被领域删除（phone_number 为空），成功号与已送达且放弃号保留号码作为敏感窗口事实。
       for (const [index, activationId] of activationIds.entries()) {
         await database.pool.query(
           `INSERT INTO supplier_activations
@@ -5249,12 +5250,12 @@ if (!databaseUrl) {
            VALUES ($1, $2, $3, $4, $5, $6, 'USD', $7, $7, $8, $9, $10, $11, $12, $13)`,
           [
             authorizationId, index + 1, index + 1, activationId,
-            index === 0 ? 'sms_delivered' : index === 1 ? 'cancelled' : index === 2 ? 'completed' : 'timed_out',
-            [0.8, 1.25, 2, 3][index], new Date(now.getTime() + index), new Date('2026-08-10T00:20:00.000Z'),
-            index === 0 ? '+14155550123' : null,
-            index === 0 ? now : index === 1 ? new Date(now.getTime() + 60_000) : index === 2 ? null : new Date(now.getTime() + 120_000),
-            index === 1 ? new Date(now.getTime() + 180_000) : null,
-            index === 0 ? new Date(now.getTime() + 300_000) : index === 2 ? new Date(now.getTime() + 240_000) : null,
+            index === 0 ? 'sms_delivered' : index === 1 ? 'cancelled' : index === 2 || index === 4 ? 'completed' : 'timed_out',
+            [0.8, 1.25, 2, 3, 4.5][index], new Date(now.getTime() + index), new Date('2026-08-10T00:20:00.000Z'),
+            index === 0 ? '+14155550123' : index === 4 ? '+34612345678' : null,
+            index === 0 ? now : index === 1 ? new Date(now.getTime() + 60_000) : index === 2 ? null : index === 3 ? new Date(now.getTime() + 120_000) : new Date(now.getTime() + 240_000),
+            index === 1 ? new Date(now.getTime() + 180_000) : index === 4 ? new Date(now.getTime() + 300_000) : null,
+            index === 0 ? new Date(now.getTime() + 300_000) : index === 2 ? new Date(now.getTime() + 240_000) : index === 4 ? new Date(now.getTime() + 360_000) : null,
             // 超时号已确认最终状态：初始化不会再把它改判为 manual_reconciliation，避免与短信已送达行撞唯一部分索引
             index === 3 ? now : null,
           ],
@@ -5284,6 +5285,14 @@ if (!databaseUrl) {
       const timedOutRow = detail.body.match(/<li><strong>位置 4 · 德国：<\/strong>[\s\S]*?<\/li>/)?.[0];
       assert.ok(timedOutRow);
       assert.doesNotMatch(timedOutRow, /等多久收到|等多久放弃/);
+
+      // 已送达且放弃号：短信送达与放弃时刻并存时只展示送达口径，不出现放弃时刻与“等多久放弃”
+      assert.match(detail.body, /位置 5 · 西班牙：<\/strong>✅ 已完成，获取时间 08-10 08:00，激活 ID delivered-abandoned-/);
+      assert.match(detail.body, /完整号码：<\/strong>\+34612345678/);
+      assert.match(detail.body, /等待起点 08-10 08:04，短信送达 08-10 08:06，等多久收到：等 2 分 0 秒/);
+      const deliveredAbandonedRow = detail.body.match(/<li><strong>位置 5 · 西班牙：<\/strong>[\s\S]*?<\/li>/)?.[0];
+      assert.ok(deliveredAbandonedRow);
+      assert.doesNotMatch(deliveredAbandonedRow, /放弃时刻|等多久放弃/);
 
       // 列表页不加等待耗时或相关时间戳
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
