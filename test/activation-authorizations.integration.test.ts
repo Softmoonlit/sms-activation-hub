@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { createApp, type AppDependencies } from '../src/app.js';
 import type { AppConfig } from '../src/config.js';
 import { Database } from '../src/database.js';
-import { ActivationAuthorizations, type HeroSmsWebhookEvent } from '../src/activation-authorizations.js';
+import { ActivationAuthorizations, SMS_POLL_INTERVAL_MS, type HeroSmsWebhookEvent } from '../src/activation-authorizations.js';
 import { HeroSmsResponseError, type HeroSms, type HeroSmsActivationRecord, type HeroSmsNumber, type HeroSmsOffer } from '../src/herosms.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -75,7 +75,11 @@ async function login(app: FastifyInstance): Promise<{ cookie: string; csrf: stri
 async function openApplication(heroSms = scriptedHeroSms(), now?: () => Date, extraDependencies: Omit<AppDependencies, 'heroSms' | 'now'> = {}) {
   const database = new Database(databaseUrl!);
   const activationAuthorizations = new ActivationAuthorizations(database, heroSms, config.openAiServiceCode, now, extraDependencies.tokenGenerator);
-  const app = await createApp({ ...config, sessionSecret: `${config.sessionSecret}-${randomUUID()}` }, database, { heroSms, now, ...extraDependencies });
+  // 既有测试的轮询时序断言锚定在 60 秒周期：默认注入 60 秒调度间隔保持确定性，
+  // 20 秒步长语义由独立调度器专项测试注入小间隔覆盖；extraDependencies 可覆盖本默认。
+  const app = await createApp({ ...config, sessionSecret: `${config.sessionSecret}-${randomUUID()}` }, database, {
+    heroSms, now, smsPollIntervalMs: 60_000, ...extraDependencies,
+  });
   await database.saveCandidateSettings([
     { countryId: 1, countryName: '美国' },
     { countryId: 2, countryName: '英国' },
@@ -2151,7 +2155,7 @@ if (!databaseUrl) {
     } finally { await structured.app.close(); }
   });
 
-  test('轮询遇对象形式等待响应：静默推进约 60 秒下次轮询，不告警、不触发 webhook', async () => {
+  test('轮询遇对象形式等待响应：静默推进约 20 秒下次轮询，不告警、不触发 webhook', async () => {
     let now = new Date('2026-08-15T00:00:00.000Z');
     const activationId = `poll-object-waiting-${randomUUID()}`;
     let activationStatusCalls = 0;
@@ -2189,7 +2193,7 @@ if (!databaseUrl) {
       assert.equal(state.rows[0]?.sms_code, null, '等待响应不触发 webhook 交付');
       const pollAfter = state.rows[0]?.sms_poll_after;
       assert.ok(pollAfter);
-      assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '下一次轮询按约 60 秒推进');
+      assert.equal(pollAfter.getTime(), now.getTime() + SMS_POLL_INTERVAL_MS, '下一次轮询按约 20 秒推进');
       const authorization = await polled.database.pool.query<{ status: string }>(
         'SELECT status FROM activation_authorizations WHERE token_hash = $1',
         [tokenHash(token)],
@@ -2230,7 +2234,7 @@ if (!databaseUrl) {
       assert.equal(state.rows[0]?.status, 'waiting_sms', '格式错误不改变激活状态');
       const pollAfter = state.rows[0]?.sms_poll_after;
       assert.ok(pollAfter);
-      assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '格式错误不影响下一次轮询调度');
+      assert.equal(pollAfter.getTime(), now.getTime() + SMS_POLL_INTERVAL_MS, '格式错误不影响下一次轮询调度');
     } finally { await polled.app.close(); }
   });
 
@@ -2266,7 +2270,7 @@ if (!databaseUrl) {
       assert.equal(state.rows[0]?.status, 'waiting_sms', '网络错误不改变激活状态');
       const pollAfter = state.rows[0]?.sms_poll_after;
       assert.ok(pollAfter);
-      assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '网络错误不影响下一次轮询调度');
+      assert.equal(pollAfter.getTime(), now.getTime() + SMS_POLL_INTERVAL_MS, '网络错误不影响下一次轮询调度');
     } finally { await polled.app.close(); }
   });
 
@@ -2303,7 +2307,7 @@ if (!databaseUrl) {
       assert.equal(state.rows[0]?.sms_code, null, '供应商取消不触发 webhook 交付');
       const pollAfter = state.rows[0]?.sms_poll_after;
       assert.ok(pollAfter);
-      assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '供应商取消不阻断下一次轮询调度');
+      assert.equal(pollAfter.getTime(), now.getTime() + SMS_POLL_INTERVAL_MS, '供应商取消不阻断下一次轮询调度');
       const authorization = await polled.database.pool.query<{ status: string }>(
         'SELECT status FROM activation_authorizations WHERE token_hash = $1',
         [tokenHash(token)],
@@ -2354,11 +2358,55 @@ if (!databaseUrl) {
         assert.equal(state.rows[0]?.sms_code, null, '短信未交付');
         const pollAfter = state.rows[0]?.sms_poll_after;
         assert.ok(pollAfter);
-        assert.equal(pollAfter.getTime(), now.getTime() + 60_000, '失败不阻断下一次轮询调度');
+        assert.equal(pollAfter.getTime(), now.getTime() + SMS_POLL_INTERVAL_MS, '失败不阻断下一次轮询调度');
       } finally { await polled.app.close(); }
     } finally {
       ActivationAuthorizations.prototype.receiveHeroSmsWebhook = originalWebhook;
     }
+  });
+
+  test('短信轮询由独立短间隔调度器驱动：按约 20 秒推进步长拾起待轮询激活，不重复、不漏触发', async () => {
+    let now = new Date('2026-08-15T05:00:00.000Z');
+    const activationId = `independent-poll-scheduler-${randomUUID()}`;
+    let statusCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+        activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      activationStatus: async () => {
+        statusCalls += 1;
+        return { delivered: false };
+      },
+    });
+    await resetTablesBeforeApplication();
+    // 注入 50 毫秒调度间隔：独立调度器在真实定时器下按步长驱动轮询，
+    // 60 秒后台扫描不可能在 2 秒断言预算内承担任何一次查询，证明查询来自独立调度器。
+    const { app, database } = await openApplication(heroSms, () => now, { smsPollIntervalMs: 50 });
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+
+      // 领取后 sms_poll_after = 取得时刻，独立调度器在短间隔内立刻拾起并查询一次。
+      await waitFor(() => statusCalls === 1, 2_000);
+      // 推进步长未到（fake now 冻结）：调度器多次触发也不重复查询同一激活。
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(statusCalls, 1, '推进步长内不重复轮询');
+      // 每越过一个推进步长查询一次：连续推进两个步长只多出两次查询。
+      now = new Date(now.getTime() + SMS_POLL_INTERVAL_MS);
+      await waitFor(() => statusCalls === 2, 2_000);
+      now = new Date(now.getTime() + SMS_POLL_INTERVAL_MS);
+      await waitFor(() => statusCalls === 3, 2_000);
+      const state = await database.pool.query<{ status: string; sms_poll_after: Date | null }>(
+        'SELECT status, sms_poll_after FROM supplier_activations WHERE provider_activation_id = $1',
+        [activationId],
+      );
+      assert.equal(state.rows[0]?.status, 'waiting_sms', '等待响应不改变激活状态');
+      assert.equal(state.rows[0]?.sms_poll_after?.getTime(), now.getTime() + SMS_POLL_INTERVAL_MS, '每次查询把下一次轮询按约 20 秒推进');
+    } finally { await resetAuthorizationTables(database); await app.close(); }
   });
 
   test('供应商完成失败会持久重试，应用重启后继续且不影响验证码展示', async () => {

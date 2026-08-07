@@ -13,6 +13,9 @@ const QUOTA_EXHAUSTED_ENDED_REASON = 'quota_exhausted';
 /** 取消请求返回 too-early 后的重试间隔，也是对账 claim 时持久化的下一次处理时间。 */
 const CANCELLATION_RETRY_DELAY_MS = 60_000;
 const CANCELLATION_RECONCILIATION_LEASE_MS = 5 * 60 * 1000;
+/** 短信轮询步长：webhook 推送丢失时兜底恢复的唯一通道，由独立短间隔调度器按约 20 秒驱动。
+ *  与调度器步长一致，把最坏恢复从约 90 秒降到约 25 秒；10 秒会把稳态打听频率翻倍、更易撞供应商限流。 */
+export const SMS_POLL_INTERVAL_MS = 20_000;
 
 export interface CreatedAuthorization {
   id: string;
@@ -1103,7 +1106,7 @@ export class ActivationAuthorizations {
          ORDER BY activation.acquired_at FOR UPDATE OF activation SKIP LOCKED
        )
        RETURNING activation.provider_activation_id, activation.country_id, activation.sms_received_at, activation.sms_text`,
-      [now, new Date(now.getTime() + 60_000)],
+      [now, new Date(now.getTime() + SMS_POLL_INTERVAL_MS)],
     );
     for (const activation of polled.rows) {
       let status: HeroSmsActivationStatus;
@@ -1132,7 +1135,7 @@ export class ActivationAuthorizations {
         // 轮询路径对供应商取消只记录、不处理：上游主动取消仍由既有超时对账收尾。
         logProviderStatus(activation.provider_activation_id, 'cancelled');
       }
-      // 等待短信静默不告警；下一次轮询由 claim 时写入的 sms_poll_after 按约 60 秒推进。
+      // 等待短信静默不告警；下一次轮询由 claim 时写入的 sms_poll_after 按约 20 秒推进。
     }
   }
 

@@ -6,7 +6,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 
 import { AdminAuthentication, ADMIN_SESSION_MAX_AGE_SECONDS, LoginRateLimitedError } from './admin-auth.js';
 import { candidateLocationSettingsContent } from './admin-settings-page.js';
-import { ActivationAuthorizations, AuthorizationValidationError, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationTokenGeneratorInput, type BatchAuthorizationPreflight, type RecipientAuthorizationView } from './activation-authorizations.js';
+import { ActivationAuthorizations, AuthorizationValidationError, SMS_POLL_INTERVAL_MS, type AcquisitionReconciliation, type AuthorizationDetail, type AuthorizationTokenGeneratorInput, type BatchAuthorizationPreflight, type RecipientAuthorizationView } from './activation-authorizations.js';
 import { parseCandidatePositionCount } from './candidate-position.js';
 import { type AuthorizationListPage, type AuthorizationListQuery, type AuthorizationListTopLevelStatus } from './database.js';
 import { CandidateLocationValidationError, DefaultCandidateLocations, MaxPricePerNumberValidationError, type CandidateLocationSettings } from './default-candidate-locations.js';
@@ -653,6 +653,8 @@ export interface AppDependencies {
   heroSms?: HeroSms;
   now?: () => Date;
   tokenGenerator?: AuthorizationTokenGeneratorInput;
+  /** 短信轮询独立调度器步长；默认 SMS_POLL_INTERVAL_MS（约 20 秒），测试可注入小间隔驱动回归锚。 */
+  smsPollIntervalMs?: number;
 }
 
 export async function createApp(config: AppConfig, database = new Database(config.databaseUrl), dependencies: AppDependencies = {}): Promise<FastifyInstance> {
@@ -1255,11 +1257,11 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await activationAuthorizations.retryPendingReplacementCancellations();
     await activationAuthorizations.reconcileCancellationConfirmations();
     await activationAuthorizations.runPendingReplacementAcquisitions();
-    await activationAuthorizations.pollWaitingActivations();
     await activationAuthorizations.finishDeliveredActivations();
     await activationAuthorizations.deleteExpiredSensitiveDeliveryData();
     // 后台扫描只是通用恢复机制：结束后重新武装全部精确调度器，
     // 正常调度正确性由各调度器按数据库中最早到期时间承担。
+    // 短信轮询不在此列：webhook 兜底恢复由下方独立短间隔调度器按约 20 秒驱动。
     await scheduleNextAuthorizationExpiry();
     await scheduleNextRevocationCancellation();
     await scheduleNextCancellationConfirmationReconciliation();
@@ -1274,6 +1276,19 @@ export async function createApp(config: AppConfig, database = new Database(confi
       .finally(() => { backgroundTasksRunning = false; });
   }, 60_000);
   expirationSweep.unref();
+  // 短信轮询是 webhook 丢失时兜底恢复的唯一通道，脱离 60 秒通用后台扫描，
+  // 由独立短间隔调度器按约 20 秒驱动；其余后台任务扫描频率不变。
+  // sms_poll_after 推进步长与调度间隔一致，重复触发由运行中守卫与数据库提前推进共同兜住。
+  const smsPollIntervalMs = dependencies.smsPollIntervalMs ?? SMS_POLL_INTERVAL_MS;
+  let smsPollRunning = false;
+  const smsPollSweep = setInterval(() => {
+    if (smsPollRunning) return;
+    smsPollRunning = true;
+    void activationAuthorizations.pollWaitingActivations()
+      .catch(() => undefined)
+      .finally(() => { smsPollRunning = false; });
+  }, smsPollIntervalMs);
+  smsPollSweep.unref();
   await scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
   await scheduleNextRevocationCancellation().catch(retryRevocationCancellationScheduling);
   await scheduleNextCancellationConfirmationReconciliation().catch(retryCancellationConfirmationReconciliationScheduling);
@@ -1283,6 +1298,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   app.addHook('onClose', async () => {
     closing = true;
     clearInterval(expirationSweep);
+    clearInterval(smsPollSweep);
     if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
     if (revocationCancellationTimer) clearTimeout(revocationCancellationTimer);
     if (cancellationConfirmationReconciliationTimer) clearTimeout(cancellationConfirmationReconciliationTimer);
