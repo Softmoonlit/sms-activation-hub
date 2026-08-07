@@ -174,9 +174,9 @@ async function resetTablesBeforeApplication(): Promise<void> {
 }
 
 /** 轮询等待真实定时器触发的异步条件；预算必须远小于 60 秒后台扫描周期，确保对账来自专用调度器。 */
-async function waitFor(condition: () => boolean, timeoutMs: number, intervalMs = 20): Promise<void> {
+async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs: number, intervalMs = 20): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
+  while (!(await condition())) {
     if (Date.now() >= deadline) throw new Error(`等待条件在 ${timeoutMs}ms 内未满足`);
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
@@ -1789,7 +1789,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('有效短信进入五分钟结果窗口，原号码页面保留交付上下文并禁用后继操作', async () => {
+  test('有效短信送达后进入结果可查看状态，原号码页面保留交付上下文并禁用后继操作', async () => {
     let now = new Date('2026-08-09T00:00:00.000Z');
     const activationId = `result-window-${randomUUID()}`;
     const heroSms = scriptedHeroSms({
@@ -1815,16 +1815,15 @@ if (!databaseUrl) {
       const page = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(page.statusCode, 200);
       assert.match(page.body, /美国 <span class="calling-code">\(\+1\)<\/span>|415 555 0123|复制号码/);
-      assert.match(page.body, /使用说明|482913|复制验证码|验证码可查看至/);
-      assert.doesNotMatch(page.body, /剩余号码获取额度|已收到验证码|更换号码|结束使用|可换号时间|可结束时间|正在监听短信验证码/);
-      const state = await database.pool.query<{ authorization_status: string; result_view_until: Date | null; phone_number: string | null; sms_code: string | null }>(
-        `SELECT auth.status AS authorization_status, auth.result_view_until, activation.phone_number, activation.sms_code
+      assert.match(page.body, /使用说明|482913|复制验证码/);
+      assert.doesNotMatch(page.body, /剩余号码获取额度|已收到验证码|更换号码|结束使用|可换号时间|可结束时间|正在监听短信验证码|验证码可查看至/);
+      const state = await database.pool.query<{ authorization_status: string; phone_number: string | null; sms_code: string | null }>(
+        `SELECT auth.status AS authorization_status, activation.phone_number, activation.sms_code
          FROM activation_authorizations auth
          JOIN supplier_activations activation ON activation.authorization_id = auth.id
          WHERE activation.provider_activation_id = $1`, [activationId],
       );
       assert.equal(state.rows[0]?.authorization_status, 'result_available');
-      assert.equal(state.rows[0]?.result_view_until?.toISOString(), '2026-08-09T00:08:00.000Z');
       assert.deepEqual({ phone_number: state.rows[0]?.phone_number, sms_code: state.rows[0]?.sms_code }, { phone_number: '+14155550123', sms_code: '482913' });
     } finally { await app.close(); }
   });
@@ -1930,7 +1929,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('首次确认短信时五分钟结果窗口已结束会立即清理访问凭据和敏感数据', async () => {
+  test('首次确认短信晚于接收时刻数分钟到达仍完整交付验证码，不因延迟提前收尾', async () => {
     let now = new Date('2026-08-09T00:00:00.000Z');
     const activationId = `result-too-late-${randomUUID()}`;
     const heroSms = scriptedHeroSms({
@@ -1946,13 +1945,18 @@ if (!databaseUrl) {
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
 
+      // 供应商补推数分钟前送达的短信：只要链接未到 24 小时领取期限，晚到的确认仍完整交付。
       now = new Date('2026-08-09T00:10:00.000Z');
       const delivered = await app.inject({
         method: 'POST', url: `/${config.heroSmsWebhookPath}`,
         payload: { activationId, service: 'openai', country: 1, receivedAt: '2026-08-09T00:03:00.000Z', code: '482913', text: 'too late body' },
       });
       assert.equal(delivered.statusCode, 200);
-      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
+
+      const page = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(page.statusCode, 200);
+      assert.match(page.body, /482913|复制验证码/);
+      assert.doesNotMatch(page.body, /验证码可查看至/);
 
       const state = await database.pool.query<{ authorization_status: string; ended_reason: string | null; token_hash: string | null; phone_number: string | null; sms_code: string | null; sms_text: string | null }>(
         `SELECT auth.status AS authorization_status, auth.ended_reason, auth.token_hash,
@@ -1962,13 +1966,13 @@ if (!databaseUrl) {
          WHERE activation.provider_activation_id = $1`, [activationId],
       );
       assert.deepEqual(state.rows[0], {
-        authorization_status: 'ended', ended_reason: 'result_view_expired', token_hash: null,
-        phone_number: null, sms_code: null, sms_text: null,
+        authorization_status: 'result_available', ended_reason: null, token_hash: tokenHash(token),
+        phone_number: '+14155550123', sms_code: '482913', sms_text: 'too late body',
       });
     } finally { await app.close(); }
   });
 
-  test('结果查看窗口到期时删除号码、验证码、短信正文和访问凭据', async () => {
+  test('链接 24 小时到期时删除号码、验证码、短信正文和访问凭据', async () => {
     let now = new Date('2026-08-09T00:00:00.000Z');
     const activationId = `result-cleanup-${randomUUID()}`;
     const heroSms = scriptedHeroSms({
@@ -1988,12 +1992,13 @@ if (!databaseUrl) {
         activationId, service: 'openai', country: 1, receivedAt: now.toISOString(), code: '482913', text: 'cleanup body',
       } });
 
-      now = new Date('2026-08-09T00:07:59.999Z');
-      const beforeExpiry = await app.inject({ method: 'GET', url: `/a/${token}` });
-      assert.equal(beforeExpiry.statusCode, 200);
-      assert.match(beforeExpiry.body, /482913|415 555 0123/);
-
+      // 超过旧五分钟查看期后链接仍可访问：结果可查看状态持续到领取期限（领取 + 24 小时）。
       now = new Date('2026-08-09T00:08:00.000Z');
+      const afterFormerViewWindow = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(afterFormerViewWindow.statusCode, 200);
+      assert.match(afterFormerViewWindow.body, /482913|415 555 0123/);
+
+      now = new Date('2026-08-10T00:00:00.000Z');
       const afterExpiry = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(afterExpiry.statusCode, 404);
       const state = await database.pool.query<{ status: string; ended_reason: string | null; token_hash: string | null; phone_number: string | null; sms_code: string | null; sms_text: string | null }>(
@@ -2004,7 +2009,7 @@ if (!databaseUrl) {
          WHERE activation.provider_activation_id = $1`, [activationId],
       );
       assert.deepEqual(state.rows[0], {
-        status: 'ended', ended_reason: 'result_view_expired', token_hash: null,
+        status: 'ended', ended_reason: 'acquisition_expired', token_hash: null,
         phone_number: null, sms_code: null, sms_text: null,
       });
     } finally { await app.close(); }
@@ -2048,10 +2053,14 @@ if (!databaseUrl) {
       await app.close();
       const restarted = await openApplication(heroSms, () => now);
       try {
+        // 号码窗口已结束但链接仍在 24 小时领取期限内：敏感交付数据保留，接收者仍可查看验证码。
         const sensitive = await restarted.database.pool.query<{ phone_number: string | null; sms_code: string | null; sms_text: string | null }>(
           'SELECT phone_number, sms_code, sms_text FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
         );
-        assert.deepEqual(sensitive.rows[0], { phone_number: null, sms_code: null, sms_text: null });
+        assert.deepEqual(sensitive.rows[0], { phone_number: '+14155550123', sms_code: '482913', sms_text: 'Your code is 482913' });
+        const page = await restarted.app.inject({ method: 'GET', url: `/a/${token}` });
+        assert.equal(page.statusCode, 200);
+        assert.match(page.body, /482913|复制验证码/);
       } finally { await restarted.app.close(); }
     } finally {
       await app.close().catch(() => undefined);
@@ -2219,7 +2228,7 @@ if (!databaseUrl) {
       try {
         const recipient = await recovered.app.inject({ method: 'GET', url: `/a/${token}` });
         assert.match(recipient.body, /短信已收到，暂时无法显示验证码，请联系发送者/);
-        assert.match(recipient.body, /验证码可查看至：/);
+        assert.doesNotMatch(recipient.body, /验证码可查看至/);
         assert.doesNotMatch(recipient.body, /剩余号码获取额度|已收到验证码/);
         assert.match(recipient.body, /location\.reload/);
         assert.doesNotMatch(recipient.body, /OpenAI unusual delivery body/);
@@ -2238,7 +2247,8 @@ if (!databaseUrl) {
           assert.match(page.body, /731904|复制验证码/);
         } finally { await structured.app.close(); }
 
-        now = new Date('2026-08-10T00:20:00.001Z');
+        // 链接 24 小时领取期限到期：结果可查看结束，敏感交付数据清除，管理员不再看到短信正文。
+        now = new Date('2026-08-11T00:00:00.001Z');
         const expired = await openApplication(heroSms, () => now);
         try {
           const expiredSession = await login(expired.app);
@@ -2280,7 +2290,7 @@ if (!databaseUrl) {
       const page = await recovered.app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(page.body, /短信已收到，暂时无法显示验证码，请联系发送者/);
       assert.match(page.body, /415 555 0123|复制号码/);
-      assert.match(page.body, /验证码可查看至：/);
+      assert.doesNotMatch(page.body, /验证码可查看至/);
       assert.doesNotMatch(page.body, /剩余号码获取额度|已收到验证码/);
       assert.doesNotMatch(page.body, /可换号时间/);
     } finally { await recovered.app.close(); }
@@ -2291,7 +2301,7 @@ if (!databaseUrl) {
     try {
       const page = await structured.app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(page.body, /731904|复制验证码/);
-      assert.match(page.body, /data-countdown="2026-08-10T00:24:00.000Z"/);
+      assert.doesNotMatch(page.body, /验证码可查看至/);
     } finally { await structured.app.close(); }
   });
 
@@ -3347,7 +3357,11 @@ if (!databaseUrl) {
       const recipient = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(recipient.statusCode, 200);
       assert.match(recipient.body, /482913|复制验证码|415 555 0123/);
+      // 结果可查看没有独立倒计时：超过旧五分钟查看期后链接仍可访问。
       now = new Date('2026-08-21T00:05:00.000Z');
+      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 200);
+      // 领取期限（领取 + 24 小时）到期后接收者访问被删除。
+      now = new Date('2026-08-21T23:50:00.000Z');
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
     } finally { await app.close(); }
   });
@@ -3888,7 +3902,8 @@ if (!databaseUrl) {
       assert.doesNotMatch(page.body, /更换号码|获取下一个号码/);
       assert.match(page.body, /data-countdown="2026-08-02T00:19:59.999Z"/);
 
-      // 跨截止的当前号码窗口内到达的短信仍进入完整五分钟结果窗口。
+      // 跨截止的当前号码窗口内到达的短信仍持久化并转为结果可查看，但链接已过领取期限：
+      // 接收者不可再访问，敏感数据在首次访问时立即清除。
       now = new Date('2026-08-02T00:07:00.000Z');
       const webhook = await app.inject({
         method: 'POST', url: `/${config.heroSmsWebhookPath}`, remoteAddress: '127.0.0.1',
@@ -3896,8 +3911,17 @@ if (!databaseUrl) {
       });
       assert.equal(webhook.statusCode, 200);
       const result = await app.inject({ method: 'GET', url: `/a/${token}` });
-      assert.match(result.body, /482913|复制验证码/);
-      assert.match(result.body, /data-countdown="2026-08-02T00:12:00.000Z"/);
+      assert.equal(result.statusCode, 404);
+      assert.doesNotMatch(result.body, /482913/);
+      const expired = await database.pool.query<{ status: string; ended_reason: string | null; token_hash: string | null; sms_code: string | null; phone_number: string | null }>(
+        `SELECT auth.status, auth.ended_reason, auth.token_hash, activation.sms_code, activation.phone_number
+         FROM activation_authorizations auth
+         JOIN supplier_activations activation ON activation.authorization_id = auth.id
+         WHERE activation.provider_activation_id = $1`, [activationId],
+      );
+      assert.deepEqual(expired.rows[0], {
+        status: 'ended', ended_reason: 'acquisition_expired', token_hash: null, sms_code: null, phone_number: null,
+      });
 
       now = new Date('2026-08-02T00:12:00.001Z');
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
@@ -5055,7 +5079,7 @@ if (!databaseUrl) {
       assert.match(pageStateD.body, /仍长时间未收到验证码，可点击结束使用并联系管理员/);
       assert.match(pageStateD.body, /<button[^>]*type="submit"[^>]*>结束使用<\/button>/);
 
-      // 5. 短信送达结果查看期只读行为与结构化验证码结果
+      // 5. 短信送达后结果可查看只读行为与结构化验证码结果
       await app.inject({
         method: 'POST',
         url: `/${config.heroSmsWebhookPath}`,
@@ -5072,7 +5096,7 @@ if (!databaseUrl) {
       assert.match(pageResultAvailable.body, /aria-label="验证码"/);
       assert.match(pageResultAvailable.body, /987654/);
       assert.match(pageResultAvailable.body, /复制验证码/);
-      assert.match(pageResultAvailable.body, /验证码可查看至：/);
+      assert.doesNotMatch(pageResultAvailable.body, /验证码可查看至/);
       assert.doesNotMatch(pageResultAvailable.body, /<section class="section-action"|剩余号码获取额度|已收到验证码/);
 
       // 6. 后端拒绝短信送达后的换号或结束使用提交
@@ -5205,7 +5229,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('短信比点击获取验证码更早到达时直接展示验证码与结果查看期，按钮不出现、等待起点留空，伪造终态提交不写不改状态', async () => {
+  test('短信比点击获取验证码更早到达时直接展示验证码，按钮不出现、等待起点留空，伪造终态提交不写不改状态', async () => {
     let now = new Date('2026-08-05T12:00:00.000Z');
     const activationId = `verify-early-sms-${randomUUID()}`;
     const heroSms = scriptedHeroSms({
@@ -5223,7 +5247,7 @@ if (!databaseUrl) {
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
 
-      // 未点按钮时短信送达：验证码与结果查看期原地展示，按钮与等待动画均不出现
+      // 未点按钮时短信送达：验证码原地展示，按钮与等待动画均不出现，也没有结果查看期倒计时
       await app.inject({
         method: 'POST',
         url: `/${config.heroSmsWebhookPath}`,
@@ -5233,7 +5257,7 @@ if (!databaseUrl) {
       const delivered = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(delivered.body, /654321/);
       assert.match(delivered.body, /复制验证码/);
-      assert.match(delivered.body, /验证码可查看至：/);
+      assert.doesNotMatch(delivered.body, /验证码可查看至/);
       assert.doesNotMatch(delivered.body, /点击获取验证码|正在监听短信验证码/);
       const deliveredRow = await database.pool.query<{ verification_requested_at: Date | null; sms_received_at: Date | null }>(
         'SELECT verification_requested_at, sms_received_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
@@ -5643,19 +5667,23 @@ if (!databaseUrl) {
       assert.equal(replacing.statusCode, 202);
 
       // 管理详情页刷新触发对账：供应商仍在等待短信 → 重发取消 → 供应商确认取消。
+      // 换号确认路由会火并唤醒取消确认调度器：对账可能由详情页同步完成，
+      // 也可能由后台调度器异步完成，因此换号收尾结果用轮询等待而非立即断言。
       await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
 
-      const state = await database.pool.query<{ status: string }>(
-        'SELECT status FROM supplier_activations WHERE provider_activation_id = $1', [firstActivationId],
-      );
-      assert.equal(state.rows[0]?.status, 'cancelled');
-      // 换号收尾：确认取消后自动获取后继号码并回到等待短信。
-      const successor = await database.pool.query<{ status: string }>(
-        `SELECT status FROM supplier_activations
-         WHERE authorization_id = (SELECT authorization_id FROM supplier_activations WHERE provider_activation_id = $1)
-           AND provider_activation_id <> $1`, [firstActivationId],
-      );
-      assert.equal(successor.rows[0]?.status, 'waiting_sms');
+      await waitFor(async () => {
+        const state = await database.pool.query<{ status: string }>(
+          'SELECT status FROM supplier_activations WHERE provider_activation_id = $1', [firstActivationId],
+        );
+        if (state.rows[0]?.status !== 'cancelled') return false;
+        // 换号收尾：确认取消后自动获取后继号码并回到等待短信。
+        const successor = await database.pool.query<{ status: string }>(
+          `SELECT status FROM supplier_activations
+           WHERE authorization_id = (SELECT authorization_id FROM supplier_activations WHERE provider_activation_id = $1)
+             AND provider_activation_id <> $1`, [firstActivationId],
+        );
+        return successor.rows[0]?.status === 'waiting_sms';
+      }, 2_000);
     } finally { await app.close(); }
   });
 
@@ -5697,6 +5725,16 @@ if (!databaseUrl) {
       assert.equal(replacing.statusCode, 202);
 
       await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
+
+      // 换号确认路由会火并唤醒取消确认调度器：对账可能由详情页同步完成，
+      // 也可能由后台调度器异步完成，因此回退结果用轮询等待而非立即断言。
+      await waitFor(async () => {
+        const state = await database.pool.query<{ status: string; cancellation_retry_after: Date | null }>(
+          'SELECT status, cancellation_retry_after FROM supplier_activations WHERE provider_activation_id = $1',
+          [activationId],
+        );
+        return state.rows[0]?.status === 'waiting_sms';
+      }, 2_000);
 
       const state = await database.pool.query<{ status: string; cancellation_retry_after: Date | null }>(
         'SELECT status, cancellation_retry_after FROM supplier_activations WHERE provider_activation_id = $1',
@@ -7158,7 +7196,7 @@ if (!databaseUrl) {
 
       now = new Date('2026-08-30T20:02:05.000Z');
       assert.equal(await replace(tokens[0]!), 202);
-      await waitFor(() => statusIds.includes(firstId), 1_000);
+      await waitFor(() => statusIds.includes(firstId), 2_000);
       // 第一条到期时间改为 +2 秒（其重试期限此刻已由首次对账推到 +60 秒）。
       await database.pool.query(
         `UPDATE supplier_activations SET cancellation_retry_after = $2
@@ -7167,11 +7205,11 @@ if (!databaseUrl) {
       );
       // 第二条进入取消确认中（到期 = now）：先对账第二条。
       assert.equal(await replace(tokens[1]!), 202);
-      await waitFor(() => statusIds.includes(secondId), 1_000);
+      await waitFor(() => statusIds.includes(secondId), 2_000);
       // 推进时间越过第一条的到期点：第二条对账完成后，调度器无需任何唤醒
       // 自动安排数据库中的下一个到期记录（第一条 +2 秒）。
       now = new Date('2026-08-30T20:02:08.000Z');
-      await waitFor(() => statusIds.filter((id) => id === firstId).length >= 2, 3_000);
+      await waitFor(() => statusIds.filter((id) => id === firstId).length >= 2, 5_000);
       await new Promise((resolve) => setTimeout(resolve, 200));
       assert.deepEqual(statusIds, [firstId, secondId, firstId], '对账完成后按最早到期时间自动安排下一条');
       assert.equal(statusIds.filter((id) => id === secondId).length, 1, '第二条重试期限未到不重复对账');

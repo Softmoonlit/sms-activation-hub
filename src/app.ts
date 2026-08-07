@@ -500,14 +500,10 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
 
     let verificationMarkup = '';
     if (view.smsDelivered) {
-      const resultViewUntil = view.resultViewUntil?.toISOString();
-      const resultViewRemainingMarkup = resultViewUntil
-        ? `<p class="result-view-expiry">验证码可查看至：<span data-countdown="${escapeHtml(resultViewUntil)}" data-format="clock" data-expired-text="00:00（查看期已结束）">${escapeHtml(resultViewUntil)}</span></p>`
-        : '';
       const delivery = view.verificationCode
         ? `<p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
         : '<p>短信已收到，暂时无法显示验证码，请联系发送者</p>';
-      verificationMarkup = `${delivery}${resultViewRemainingMarkup}`;
+      verificationMarkup = delivery;
     } else if (view.verificationRequestedAt || !view.currentNumberAction) {
       // 已宣告开始等待，或处于非等待短信的过渡态（如结果待人工对账）：维持现有等待短信动画。
       verificationMarkup = `<div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
@@ -546,15 +542,11 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
       ? ''
       : `<section class="section-action">${quotaMarkup(view.remainingNumberCount)}${actionPrompt}${actionButton}</section>`;
 
-    const refreshDelay = view.resultViewRemainingMs;
-    const refreshScript = view.smsDelivered && refreshDelay !== undefined
-      ? `<script>setTimeout(()=>location.reload(),${Math.max(1000, Math.ceil(refreshDelay))});</script>`
-      : '';
     const pollingScript = (!view.smsDelivered || !view.verificationCode)
       ? '<script>setTimeout(()=>location.reload(),5000)</script>'
       : '';
 
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}${currentNumberSection}${guideMarkup}${verificationSection}${actionSection}</section></main>${countdownScript}${pollingScript}${refreshScript}`);
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}${currentNumberSection}${guideMarkup}${verificationSection}${actionSection}</section></main>${countdownScript}${pollingScript}`);
   }
   if (view.state === 'claimed' && view.acquisitionState) {
     const status = view.acquisitionState === 'manual' ? '号码状态待发送者处理' : '正在确认号码获取结果，请稍候';

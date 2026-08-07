@@ -822,12 +822,11 @@ export class Database {
 
   async expireDueAuthorizations(now: Date): Promise<void> {
     await this.transaction(async (client) => {
-      const due = await client.query<{ id: string; status: AuthorizationStatus }>(
-        `SELECT id, status FROM activation_authorizations
+      const due = await client.query<{ id: string }>(
+        `SELECT id FROM activation_authorizations
          WHERE number_acquisition_expires_at IS NOT NULL
            AND number_acquisition_expires_at <= $1
-           AND status NOT IN ('result_available', 'ended')
-           AND NOT (status = 'ended' AND end_prompt_until > $1)
+           AND status IN ('in_progress', 'result_available')
            AND NOT (
              status = 'in_progress' AND EXISTS (
                SELECT 1 FROM supplier_activations activation
@@ -848,15 +847,14 @@ export class Database {
       );
       if (!due.rowCount) return;
       const ids = due.rows.map((row) => row.id);
-      await client.query(
+      const expired = await client.query<{ id: string }>(
         `UPDATE activation_authorizations
          SET status = 'ended',
              ended_at = COALESCE(ended_at, $2),
              ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
              token_hash = NULL, last_activity_at = $2
          WHERE id = ANY($1::uuid[])
-           AND status NOT IN ('result_available', 'ended')
-           AND NOT (status = 'ended' AND end_prompt_until > $2)
+           AND status IN ('in_progress', 'result_available')
            AND NOT (
              status = 'in_progress' AND EXISTS (
                SELECT 1 FROM supplier_activations activation
@@ -870,14 +868,24 @@ export class Database {
                WHERE request.authorization_id = activation_authorizations.id
                  AND request.status IN ('requesting', 'reconciling', 'manual')
              )
-           )`,
+           )
+         RETURNING id`,
         [ids, now],
+      );
+      const expiredIds = expired.rows.map((row) => row.id);
+      if (expiredIds.length === 0) return;
+      // 到期即清除敏感交付数据：结果可查看不再有独立查看期，链接 24 小时到期是唯一自动清除路径。
+      await client.query(
+        `UPDATE supplier_activations
+         SET phone_number = NULL, sms_code = NULL, sms_text = NULL
+         WHERE authorization_id = ANY($1::uuid[])`,
+        [expiredIds],
       );
     });
   }
 
   async expireAuthorization(id: string, now: Date): Promise<void> {
-    await this.pool.query(
+    const expired = await this.pool.query<{ id: string }>(
       `UPDATE activation_authorizations
        SET status = 'ended',
            ended_at = COALESCE(ended_at, $2),
@@ -885,8 +893,7 @@ export class Database {
            token_hash = NULL, last_activity_at = $2
        WHERE id = $1 AND number_acquisition_expires_at IS NOT NULL
          AND number_acquisition_expires_at <= $2
-         AND status NOT IN ('result_available', 'ended')
-         AND NOT (status = 'ended' AND end_prompt_until > $2)
+         AND status IN ('in_progress', 'result_available')
          AND NOT (
            status = 'in_progress' AND EXISTS (
              SELECT 1 FROM supplier_activations activation
@@ -903,6 +910,14 @@ export class Database {
          )`,
       [id, now],
     );
+    if (expired.rowCount) {
+      await this.pool.query(
+        `UPDATE supplier_activations
+         SET phone_number = NULL, sms_code = NULL, sms_text = NULL
+         WHERE authorization_id = $1`,
+        [id],
+      );
+    }
   }
 
   async close(): Promise<void> {

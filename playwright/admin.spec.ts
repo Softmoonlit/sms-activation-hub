@@ -347,7 +347,7 @@ test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部
     // 3. 换号按钮不足两分钟禁用
     await expect(page.getByRole('button', { name: '更换号码' })).toBeDisabled();
 
-    // 4. 短信送达后（验证码显示状态）：极早送达时按钮与等待动画均不出现、验证码与复制验证码与结果查看期倒计时原地可见
+    // 4. 短信送达后（验证码显示状态）：极早送达时按钮与等待动画均不出现，仅验证码与复制验证码原地可见，无结果查看期倒计时
     const webhook = await app.inject({
       method: 'POST', url: `/${config.heroSmsWebhookPath}`,
       payload: {
@@ -359,7 +359,7 @@ test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部
     await page.reload();
     await expect(page.locator('#verification-code')).toBeVisible();
     await expect(page.getByRole('button', { name: '复制验证码' })).toBeVisible();
-    await expect(page.getByText(/^验证码可查看至：/)).toBeVisible();
+    await expect(page.getByText(/^验证码可查看至：/)).toHaveCount(0);
     await expect(page.getByRole('button', { name: '点击获取验证码' })).toHaveCount(0);
     await expect(page.getByText('把号码填入验证界面，并点继续，然后点击下方按钮获取验证码')).toHaveCount(0);
     await expect(page.getByText('正在监听短信验证码...')).toHaveCount(0);
@@ -476,7 +476,7 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
     await page.clock.setFixedTime(new Date('2026-08-01T00:02:30.000Z'));
     await page.reload();
     await expect(page.getByText('654321', { exact: true })).toBeVisible();
-    await expect(page.getByText(/^验证码可查看至：05:00$/)).toBeVisible();
+    await expect(page.getByText(/^验证码可查看至：/)).toHaveCount(0);
     await expect(page.locator('.section-action')).toHaveCount(0);
     await expect(page.getByText(/剩余号码获取额度/)).toHaveCount(0);
     await expect(page.locator('.steps-guide')).toHaveCount(0);
