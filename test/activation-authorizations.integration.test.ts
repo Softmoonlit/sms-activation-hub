@@ -4823,20 +4823,20 @@ if (!databaseUrl) {
       assert.match(pageStateA.body, /号码有效至：还剩/);
       assert.match(pageStateA.body, /💡 使用说明/);
       assert.match(pageStateA.body, /aria-label="验证码"/);
-      // 尚未点开始接收验证码：显示过渡提示与按钮，等待动画不显示
+      // 尚未点击获取验证码：显示过渡提示与按钮，等待动画不显示
       assert.match(pageStateA.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
-      assert.match(pageStateA.body, /开始接收验证码/);
+      assert.match(pageStateA.body, /点击获取验证码/);
       assert.doesNotMatch(pageStateA.body, /正在监听短信验证码/);
       assert.match(pageStateA.body, /剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
       assert.match(pageStateA.body, /后可换号/);
       assert.match(pageStateA.body, /<button[^>]*disabled[^>]*>更换号码<\/button>/);
 
-      // 点开始接收验证码后：等待动画出现、过渡提示与按钮消失（状态 A'：已宣告等待）
+      // 点击获取验证码后：等待动画出现、过渡提示与按钮消失（状态 A'：已宣告等待）
       const recorded = await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
       assert.equal(recorded.statusCode, 303);
       const pageStateA2 = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(pageStateA2.body, /正在监听短信验证码/);
-      assert.doesNotMatch(pageStateA2.body, /开始接收验证码|请把号码填入目标服务后/);
+      assert.doesNotMatch(pageStateA2.body, /点击获取验证码|请把号码填入目标服务后/);
 
       // 2. 达到允许取消时间，处于前两个号码可操作状态（状态 B：可以换号）
       now = new Date('2026-08-04T14:32:00.000Z');
@@ -4900,7 +4900,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('取号后未点开始接收验证码时显示过渡提示与按钮，点按钮后写入等待起点并切换为等待动画，重复提交幂等不覆盖', async () => {
+  test('取号后未点击获取验证码时显示过渡提示与按钮，点按钮后写入等待起点并切换为等待动画，重复提交幂等不覆盖', async () => {
     let now = new Date('2026-08-05T10:00:00.000Z');
     const activationId = `verify-start-${randomUUID()}`;
     const heroSms = scriptedHeroSms({
@@ -4923,7 +4923,7 @@ if (!databaseUrl) {
       const before = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(before.statusCode, 200);
       assert.match(before.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
-      assert.match(before.body, /开始接收验证码/);
+      assert.match(before.body, /点击获取验证码/);
       assert.match(before.body, /action="\/a\/[^\/]+\/verification-request"/);
       assert.doesNotMatch(before.body, /正在监听短信验证码/);
       assert.match(before.body, /415 555 0123/);
@@ -4941,7 +4941,7 @@ if (!databaseUrl) {
       assert.equal(recorded.headers.location, `/a/${token}`);
       const after = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(after.body, /正在监听短信验证码/);
-      assert.doesNotMatch(after.body, /开始接收验证码|请把号码填入目标服务后/);
+      assert.doesNotMatch(after.body, /点击获取验证码|请把号码填入目标服务后/);
       const recordedRow = await database.pool.query<{ verification_requested_at: Date | null }>(
         'SELECT verification_requested_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
       );
@@ -4958,7 +4958,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('开始接收验证码不消耗候选位置或获取额度，未点按钮仍可按取号两分钟规则换号，后继号码按钮重新出现且两号码计时独立', async () => {
+  test('点击获取验证码不消耗候选位置或获取额度，未点按钮仍可按取号两分钟规则换号，后继号码按钮重新出现且两号码计时独立', async () => {
     let now = new Date('2026-08-05T11:00:00.000Z');
     const activationIds: string[] = [];
     const heroSms = scriptedHeroSms({
@@ -5008,7 +5008,7 @@ if (!databaseUrl) {
       const successor = await app.inject({ method: 'GET', url: `/a/${secondAuthorization}` });
       assert.match(successor.body, /20 7946 0123/);
       assert.match(successor.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
-      assert.match(successor.body, /开始接收验证码/);
+      assert.match(successor.body, /点击获取验证码/);
       assert.doesNotMatch(successor.body, /正在监听短信验证码/);
       const successorRow = await database.pool.query<{ verification_requested_at: Date | null }>(
         'SELECT verification_requested_at FROM supplier_activations WHERE provider_activation_id = $1', [activationIds[1]!],
@@ -5017,7 +5017,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('短信比开始接收验证码更早到达时直接展示验证码与结果查看期，按钮不出现、等待起点留空，伪造终态提交不写不改状态', async () => {
+  test('短信比点击获取验证码更早到达时直接展示验证码与结果查看期，按钮不出现、等待起点留空，伪造终态提交不写不改状态', async () => {
     let now = new Date('2026-08-05T12:00:00.000Z');
     const activationId = `verify-early-sms-${randomUUID()}`;
     const heroSms = scriptedHeroSms({
@@ -5046,7 +5046,7 @@ if (!databaseUrl) {
       assert.match(delivered.body, /654321/);
       assert.match(delivered.body, /复制验证码/);
       assert.match(delivered.body, /验证码可查看至：/);
-      assert.doesNotMatch(delivered.body, /开始接收验证码|请把号码填入目标服务后|正在监听短信验证码/);
+      assert.doesNotMatch(delivered.body, /点击获取验证码|请把号码填入目标服务后|正在监听短信验证码/);
       const deliveredRow = await database.pool.query<{ verification_requested_at: Date | null; sms_received_at: Date | null }>(
         'SELECT verification_requested_at, sms_received_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
       );
@@ -5090,7 +5090,7 @@ if (!databaseUrl) {
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
       await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
 
-      // 第一个号码：点开始接收验证码后满两分钟确认换号
+      // 第一个号码：点击获取验证码后满两分钟确认换号
       now = new Date('2026-08-06T09:00:00.000Z');
       await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
       now = new Date('2026-08-06T09:02:00.000Z');

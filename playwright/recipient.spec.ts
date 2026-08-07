@@ -112,9 +112,9 @@ test('三个独立浏览器通过同一授权链接完成领取、换号和结�
     await expect(page.locator('.section-verification-result')).toBeVisible();
     await expect(page.getByText('复制上方号码并填入，同时切换对应国家代码，点击短信（即从Whatsapp切换到短信），最后点击继续；系统将自动接收并显示验证码。')).toBeVisible();
     await expect(page.getByText(/^号码有效至：还剩 20:00$/)).toBeVisible();
-    // 取号后尚未点开始接收验证码：显示过渡提示与按钮，等待动画不出现
+    // 取号后尚未点击获取验证码：显示过渡提示与按钮，等待动画不出现
     await expect(page.getByText('请把号码填入目标服务后，点击下方按钮开始接收验证码')).toBeVisible();
-    await expect(page.getByRole('button', { name: '开始接收验证码' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '点击获取验证码' })).toBeVisible();
     await expect(page.getByText('正在监听短信验证码...')).toHaveCount(0);
     await expect(page.getByText('剩余号码获取额度：2 · 实际能否获取取决于供应商库存')).toBeVisible();
     await expect(page.getByText(/^02:00 后可换号$/)).toBeVisible();
@@ -133,7 +133,7 @@ test('三个独立浏览器通过同一授权链接完成领取、换号和结�
     await page.getByRole('button', { name: '复制号码' }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('4155550123');
 
-    // 未点开始接收验证码时满两分钟：换号入口按取号时刻正常可用，按钮态不锁住换号资格
+    // 未点击获取验证码时满两分钟：换号入口按取号时刻正常可用，按钮态不锁住换号资格
     now = new Date('2026-08-01T00:02:00.000Z');
     await page.clock.setFixedTime(now);
     await page.reload();
@@ -148,12 +148,12 @@ test('三个独立浏览器通过同一授权链接完成领取、换号和结�
     await expect(page.getByText('20 7946 0123', { exact: true })).toBeVisible();
     await expect(page.getByText('(+44)', { exact: true })).toBeVisible();
     await expect(page.getByText('剩余号码获取额度：1 · 实际能否获取取决于供应商库存')).toBeVisible();
-    // 后继号码的等待起点独立：新号码上开始接收验证码按钮重新出现，点按钮后原地切换为等待动画
+    // 后继号码的等待起点独立：新号码上点击获取验证码按钮重新出现，点按钮后原地切换为等待动画
     await expect(page.getByText('请把号码填入目标服务后，点击下方按钮开始接收验证码')).toBeVisible();
-    await expect(page.getByRole('button', { name: '开始接收验证码' })).toBeVisible();
-    await page.getByRole('button', { name: '开始接收验证码' }).click();
+    await expect(page.getByRole('button', { name: '点击获取验证码' })).toBeVisible();
+    await page.getByRole('button', { name: '点击获取验证码' }).click();
     await expect(page.getByText('正在监听短信验证码...')).toBeVisible();
-    await expect(page.getByRole('button', { name: '开始接收验证码' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '点击获取验证码' })).toHaveCount(0);
     // 跨浏览器换号只取消一次当前号码；号码获取累计两次（浏览器 B 领取一次 + 浏览器 C 换号一次）。
     assert.equal(cancelCount, 1);
     assert.equal(acquisitionCount, 2);

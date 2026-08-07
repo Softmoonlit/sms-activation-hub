@@ -360,7 +360,7 @@ test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部
     await expect(page.locator('#verification-code')).toBeVisible();
     await expect(page.getByRole('button', { name: '复制验证码' })).toBeVisible();
     await expect(page.getByText(/^验证码可查看至：/)).toBeVisible();
-    await expect(page.getByRole('button', { name: '开始接收验证码' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '点击获取验证码' })).toHaveCount(0);
     await expect(page.getByText('请把号码填入目标服务后，点击下方按钮开始接收验证码')).toHaveCount(0);
     await expect(page.getByText('正在监听短信验证码...')).toHaveCount(0);
     html = await page.content();
@@ -407,20 +407,20 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
     assert.ok(firstHintLayout.buttonTop >= firstHintLayout.hintBottom, '首次提示不应挤压获取号码按钮');
     await assertNoOverflow(page, '初始状态');
 
-    // 领取号码后：过渡提示与开始接收验证码按钮可见、等待动画不出现，长文案不溢出
+    // 领取号码后：过渡提示与点击获取验证码按钮可见、等待动画不出现，长文案不溢出
     await page.getByRole('button', { name: '获取号码' }).click();
     await expect(page.getByText('+44 20 7946 0777', { exact: true })).toBeVisible();
     await expect(page.getByText(/^号码有效至：还剩 20:00$/)).toBeVisible();
     await expect(page.getByText(/^02:00 后可换号$/)).toBeVisible();
     await expect(page.getByText('请把号码填入目标服务后，点击下方按钮开始接收验证码')).toBeVisible();
-    await expect(page.getByRole('button', { name: '开始接收验证码' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '点击获取验证码' })).toBeVisible();
     await expect(page.getByText('正在监听短信验证码...')).toHaveCount(0);
     await assertNoOverflow(page, '号码显示状态');
 
-    // 点开始接收验证码后：等待动画原地承接，按钮与过渡提示消失，不遮挡换号倒计时
-    await page.getByRole('button', { name: '开始接收验证码' }).click();
+    // 点击获取验证码后：等待动画原地承接，按钮与过渡提示消失，不遮挡换号倒计时
+    await page.getByRole('button', { name: '点击获取验证码' }).click();
     await expect(page.getByText('正在监听短信验证码...')).toBeVisible();
-    await expect(page.getByRole('button', { name: '开始接收验证码' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '点击获取验证码' })).toHaveCount(0);
     await expect(page.getByText('请把号码填入目标服务后，点击下方按钮开始接收验证码')).toHaveCount(0);
     await assertNoOverflow(page, '等待动画状态');
 

@@ -71,7 +71,7 @@ export interface AuthorizationDetail {
     phoneNumber?: string;
     verificationCode?: string;
     unrecognizedSmsText?: string;
-    /** 接收者点击“开始接收验证码”的观测时刻；为空表示尚未宣告等待。 */
+    /** 接收者点击“点击获取验证码”按钮的观测时刻；为空表示尚未宣告等待。 */
     verificationRequestedAt?: Date;
     /** 接收者确认换号或确认结束使用而放弃当前号码的观测时刻。 */
     abandonedAt?: Date;
@@ -98,7 +98,7 @@ export interface AuthorizationDetail {
     acquiredAt: Date;
     refundConfirmed?: number;
     refundPending: boolean;
-    /** 接收者点击“开始接收验证码”的观测时刻；为空表示尚未宣告等待。 */
+    /** 接收者点击“点击获取验证码”按钮的观测时刻；为空表示尚未宣告等待。 */
     verificationRequestedAt?: Date;
     /** 接收者确认换号或确认结束使用而放弃当前号码的观测时刻。 */
     abandonedAt?: Date;

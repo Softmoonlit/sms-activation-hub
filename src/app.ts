@@ -502,8 +502,8 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
       // 已宣告开始等待，或处于非等待短信的过渡态（如结果待人工对账）：维持现有等待短信动画。
       verificationMarkup = `<div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
     } else {
-      // 仅等待短信、尚未宣告等待：显示过渡提示与开始接收验证码按钮，等待动画不显示。
-      verificationMarkup = `<div class="verification-request-pending"><p class="action-prompt">请把号码填入目标服务后，点击下方按钮开始接收验证码</p><form method="post" action="/a/${encodeURIComponent(token)}/verification-request"><button type="submit">开始接收验证码</button></form></div>`;
+      // 仅等待短信、尚未宣告等待：显示过渡提示与点击获取验证码按钮，等待动画不显示。
+      verificationMarkup = `<div class="verification-request-pending"><p class="action-prompt">请把号码填入目标服务后，点击下方按钮开始接收验证码</p><form method="post" action="/a/${encodeURIComponent(token)}/verification-request"><button type="submit">点击获取验证码</button></form></div>`;
     }
     const verificationSection = `<section class="section-verification-result" aria-label="验证码">${verificationMarkup}</section>`;
 
