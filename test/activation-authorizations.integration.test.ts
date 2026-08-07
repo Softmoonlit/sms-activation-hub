@@ -5011,20 +5011,20 @@ if (!databaseUrl) {
       assert.match(pageStateA.body, /号码有效至：还剩/);
       assert.match(pageStateA.body, /💡 使用说明/);
       assert.match(pageStateA.body, /aria-label="验证码"/);
-      // 尚未点击获取验证码：显示过渡提示与按钮，等待动画不显示
-      assert.match(pageStateA.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
+      // 尚未点击获取验证码：显示点击获取验证码按钮，等待动画不显示
+      assert.match(pageStateA.body, /把号码填入验证界面，并点继续，然后点击下方按钮获取验证码/);
       assert.match(pageStateA.body, /点击获取验证码/);
       assert.doesNotMatch(pageStateA.body, /正在监听短信验证码/);
       assert.match(pageStateA.body, /剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
       assert.match(pageStateA.body, /后可换号/);
       assert.match(pageStateA.body, /<button[^>]*disabled[^>]*>更换号码<\/button>/);
 
-      // 点击获取验证码后：等待动画出现、过渡提示与按钮消失（状态 A'：已宣告等待）
+      // 点击获取验证码后：等待动画出现、按钮消失（状态 A'：已宣告等待）
       const recorded = await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
       assert.equal(recorded.statusCode, 303);
       const pageStateA2 = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(pageStateA2.body, /正在监听短信验证码/);
-      assert.doesNotMatch(pageStateA2.body, /点击获取验证码|请把号码填入目标服务后/);
+      assert.doesNotMatch(pageStateA2.body, /点击获取验证码/);
 
       // 2. 达到允许取消时间，处于前两个号码可操作状态（状态 B：可以换号）
       now = new Date('2026-08-04T14:32:00.000Z');
@@ -5105,12 +5105,12 @@ if (!databaseUrl) {
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
 
-      // 取号成功：号码区下方显示过渡提示与按钮，等待动画不显示
+      // 取号成功：号码区下方显示使用说明与按钮，等待动画不显示
       const claim = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
       assert.equal(claim.statusCode, 303);
       const before = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(before.statusCode, 200);
-      assert.match(before.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
+      assert.match(before.body, /把号码填入验证界面，并点继续，然后点击下方按钮获取验证码/);
       assert.match(before.body, /点击获取验证码/);
       assert.match(before.body, /action="\/a\/[^\/]+\/verification-request"/);
       assert.doesNotMatch(before.body, /正在监听短信验证码/);
@@ -5123,13 +5123,13 @@ if (!databaseUrl) {
       );
       assert.equal(beforeRow.rows[0]?.verification_requested_at, null);
 
-      // 点按钮：写入等待起点、303 回链接、等待动画出现、按钮与过渡提示消失
+      // 点按钮：写入等待起点、303 回链接、等待动画出现、按钮消失
       const recorded = await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
       assert.equal(recorded.statusCode, 303);
       assert.equal(recorded.headers.location, `/a/${token}`);
       const after = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(after.body, /正在监听短信验证码/);
-      assert.doesNotMatch(after.body, /点击获取验证码|请把号码填入目标服务后/);
+      assert.doesNotMatch(after.body, /点击获取验证码/);
       const recordedRow = await database.pool.query<{ verification_requested_at: Date | null }>(
         'SELECT verification_requested_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
       );
@@ -5195,7 +5195,7 @@ if (!databaseUrl) {
       });
       const successor = await app.inject({ method: 'GET', url: `/a/${secondAuthorization}` });
       assert.match(successor.body, /20 7946 0123/);
-      assert.match(successor.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
+      assert.match(successor.body, /把号码填入验证界面，并点继续，然后点击下方按钮获取验证码/);
       assert.match(successor.body, /点击获取验证码/);
       assert.doesNotMatch(successor.body, /正在监听短信验证码/);
       const successorRow = await database.pool.query<{ verification_requested_at: Date | null }>(
@@ -5234,7 +5234,7 @@ if (!databaseUrl) {
       assert.match(delivered.body, /654321/);
       assert.match(delivered.body, /复制验证码/);
       assert.match(delivered.body, /验证码可查看至：/);
-      assert.doesNotMatch(delivered.body, /点击获取验证码|请把号码填入目标服务后|正在监听短信验证码/);
+      assert.doesNotMatch(delivered.body, /点击获取验证码|正在监听短信验证码/);
       const deliveredRow = await database.pool.query<{ verification_requested_at: Date | null; sms_received_at: Date | null }>(
         'SELECT verification_requested_at, sms_received_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
       );
@@ -5291,7 +5291,7 @@ if (!databaseUrl) {
 
       // 第二个号码：等待起点为空、按钮重新出现；点按钮后写自己的等待起点
       const secondPage = await app.inject({ method: 'GET', url: `/a/${token}` });
-      assert.match(secondPage.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
+      assert.match(secondPage.body, /把号码填入验证界面，并点继续，然后点击下方按钮获取验证码/);
       await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
 
       // 第三个号码（已用尽额度）：确认结束使用
