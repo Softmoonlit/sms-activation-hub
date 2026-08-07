@@ -2058,6 +2058,89 @@ if (!databaseUrl) {
     }
   });
 
+  test('webhook 非白名单来源记“拒绝（非白名单）”审计日志并以 404 返回', async () => {
+    const { app } = await openApplication(scriptedHeroSms(), () => new Date('2026-08-09T00:00:00.000Z'));
+    try {
+      const captured = await withCapturedStdout(async () => {
+        const response = await app.inject({
+          method: 'POST', url: `/${config.heroSmsWebhookPath}`, remoteAddress: '192.0.2.10',
+          payload: { activationId: 'no-whitelist-1', service: 'openai', country: 1, receivedAt: '2026-08-09T00:03:00.000Z', code: '000000', text: 'body' },
+        });
+        assert.equal(response.statusCode, 404);
+      });
+      assert.match(captured.output, /\[herosms\]\[warn\] webhook 来源 192\.0\.2\.10 拒绝（非白名单），HTTP 404/);
+      assert.doesNotMatch(captured.output, /激活 no-whitelist-1/, '非白名单拒绝在解析 body 之前返回，不应带 activationId');
+    } finally { await app.close(); }
+  });
+
+  test('webhook 命中每分钟限流阈值记“触发限流”审计日志并返回 429', async () => {
+    const database = new Database(databaseUrl!);
+    const now = () => new Date('2026-08-09T00:00:00.000Z');
+    const app = await createApp({ ...config, heroSmsWebhookRequestsPerMinute: 2, sessionSecret: `${config.sessionSecret}-${randomUUID()}` }, database, {
+      heroSms: scriptedHeroSms(), now,
+    });
+    try {
+      const captured = await withCapturedStdout(async () => {
+        const payload = { activationId: 'rate-limited-1', service: 'openai', country: 1, receivedAt: '2026-08-09T00:03:00.000Z', code: '000000', text: 'body' };
+        assert.equal((await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload })).statusCode, 200);
+        assert.equal((await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload })).statusCode, 200);
+        const third = await app.inject({ method: 'POST', url: `/${config.heroSmsWebhookPath}`, payload });
+        assert.equal(third.statusCode, 429);
+      });
+      assert.match(captured.output, /\[herosms\]\[warn\] webhook 来源 127\.0\.0\.1 触发限流，HTTP 429/);
+    } finally { await app.close(); }
+  });
+
+  test('webhook body 缺字段或时间解析失败记“body 无效”审计日志（含可解析 activationId）并以 400 返回', async () => {
+    const { app } = await openApplication(scriptedHeroSms(), () => new Date('2026-08-09T00:00:00.000Z'));
+    try {
+      const captured = await withCapturedStdout(async () => {
+        const missingTime = await app.inject({
+          method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+          payload: { activationId: 'bad-body-1', service: 'openai', country: 1, code: '000000', text: 'body' },
+        });
+        assert.equal(missingTime.statusCode, 400);
+        const badTime = await app.inject({
+          method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+          payload: { activationId: 'bad-body-2', service: 'openai', country: 1, receivedAt: 'not-a-date', text: 'body' },
+        });
+        assert.equal(badTime.statusCode, 400);
+      });
+      assert.match(captured.output, /\[herosms\]\[error\] webhook 来源 127\.0\.0\.1 激活 bad-body-1 body 无效，HTTP 400/);
+      assert.match(captured.output, /\[herosms\]\[error\] webhook 来源 127\.0\.0\.1 激活 bad-body-2 body 无效，HTTP 400/);
+    } finally { await app.close(); }
+  });
+
+  test('webhook 放行业务接受与业务忽略各记一行审计日志，含 activationId 与结果分类', async () => {
+    let now = new Date('2026-08-09T00:00:00.000Z');
+    const activationId = `audit-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({ activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) }),
+    });
+    const { app } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+
+      const captured = await withCapturedStdout(async () => {
+        const ignored = await app.inject({
+          method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+          payload: { activationId: 'unknown-activation-1', service: 'openai', country: 1, receivedAt: '2026-08-09T00:03:00.000Z', code: '111111', text: 'ignored body' },
+        });
+        assert.equal(ignored.statusCode, 200);
+        const accepted = await app.inject({
+          method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+          payload: { activationId, service: 'openai', country: 1, receivedAt: '2026-08-09T00:03:00.000Z', code: '482913', text: 'Your code is 482913' },
+        });
+        assert.equal(accepted.statusCode, 200);
+      });
+      assert.match(captured.output, /\[herosms\]\[info\] webhook 来源 127\.0\.0\.1 激活 unknown-activation-1 业务忽略，HTTP 200/);
+      assert.match(captured.output, /\[herosms\]\[info\] webhook 来源 127\.0\.0\.1 激活 audit-[\w-]+ 业务接受，HTTP 200/);
+    } finally { await app.close(); }
+  });
+
   test('轮询恢复遗漏的异常短信，管理员仅在号码有效窗口内查看正文，后续结构化验证码自动更新', async () => {
     let now = new Date('2026-08-10T00:00:00.000Z');
     const activationId = `poll-${randomUUID()}`;

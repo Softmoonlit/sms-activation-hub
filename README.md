@@ -124,6 +124,8 @@ docker compose -f compose.prod.yaml up -d --build
 docker compose -f compose.prod.yaml logs -f
 ```
 
+排查短信链路问题（webhook 是否被丢弃、轮询兜底是否捡回等）的标准只读流程见 [`docs/ops/log-inspection.md`](docs/ops/log-inspection.md)。
+
 ### 5. 冒烟验证（WSL2 / VPS 均适用）
 
 等待容器健康检查通过后（约 30 秒），验证基本 HTTP 响应：

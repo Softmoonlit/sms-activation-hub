@@ -55,6 +55,14 @@ interface ReplacementBody {
   replacement?: string;
 }
 
+/** webhook 接收入口审计日志：每次请求记一行极简 stdout（沿用 [herosms][level] 前缀风格），
+ *  含来源 IP、可解析时的 activationId、结果分类与最终 HTTP 码；
+ *  事后可凭应用自身日志判定某次送达是未推送、非白名单丢弃、限流、body 无效还是业务接受/忽略。
+ *  级别沿用状态查询日志口径：正常业务结果 info，未知来源/限流等可恢复异常 warn，body 契约破坏 error。 */
+function logWebhook(ip: string, level: 'info' | 'warn' | 'error', outcome: string, statusCode: number, activationId?: string): void {
+  process.stdout.write(`[herosms][${level}] webhook 来源 ${ip}${activationId ? ` 激活 ${activationId}` : ''} ${outcome}，HTTP ${statusCode}\n`);
+}
+
 const activationStatusLabels: Record<string, string> = {
   acquisition_confirming: '获取结果确认中', waiting_sms: '等待短信', cancellation_confirming: '取消确认中',
   cancelled: '已取消', manual_reconciliation: '结果待人工对账', sms_delivered: '短信已送达',
@@ -916,12 +924,18 @@ export async function createApp(config: AppConfig, database = new Database(confi
 
   const webhookRequests = new Map<string, { minute: number; count: number }>();
   app.post<{ Body: HeroSmsWebhookBody }>(`/${config.heroSmsWebhookPath}`, { bodyLimit: 16 * 1024 }, async (request, reply) => {
-    if (!config.heroSmsWebhookAllowedIps.includes(request.ip)) return reply.code(404).send();
+    if (!config.heroSmsWebhookAllowedIps.includes(request.ip)) {
+      logWebhook(request.ip, 'warn', '拒绝（非白名单）', 404);
+      return reply.code(404).send();
+    }
     const minute = Math.floor((dependencies.now?.() ?? new Date()).getTime() / 60_000);
     const rate = webhookRequests.get(request.ip);
     const count = rate?.minute === minute ? rate.count + 1 : 1;
     webhookRequests.set(request.ip, { minute, count });
-    if (count > config.heroSmsWebhookRequestsPerMinute) return reply.code(429).send();
+    if (count > config.heroSmsWebhookRequestsPerMinute) {
+      logWebhook(request.ip, 'warn', '触发限流', 429);
+      return reply.code(429).send();
+    }
 
     const body = request.body;
     const activationId = typeof body?.activationId === 'string' && body.activationId.trim() ? body.activationId.trim() : undefined;
@@ -931,11 +945,13 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const countryId = typeof body?.country === 'number' ? body.country : typeof body?.country === 'string' ? Number(body.country) : NaN;
     const receivedAt = parseSupplierDate(body?.receivedAt);
     if (!activationId || !serviceCode || text === undefined || !Number.isSafeInteger(countryId) || countryId < 0 || !receivedAt) {
+      logWebhook(request.ip, 'error', 'body 无效', 400, activationId);
       return reply.code(400).send();
     }
-    await activationAuthorizations.receiveHeroSmsWebhook({
+    const outcome = await activationAuthorizations.receiveHeroSmsWebhook({
       activationId, serviceCode, text, countryId, receivedAt, ...(code ? { code } : {}),
     });
+    logWebhook(request.ip, 'info', outcome === 'accepted' ? '业务接受' : '业务忽略', 200, activationId);
     void scheduleNextAuthorizationExpiry().catch(retryAuthorizationExpiryScheduling);
     const finishTask = new Promise<void>((resolve) => {
       setImmediate(() => {
