@@ -418,6 +418,8 @@ export class Database {
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_code TEXT;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_text TEXT;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_received_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS verification_requested_at TIMESTAMPTZ;
+      ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS abandoned_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS completion_claimed_at TIMESTAMPTZ;
       ALTER TABLE supplier_activations ADD COLUMN IF NOT EXISTS sms_poll_after TIMESTAMPTZ;

@@ -291,6 +291,35 @@ function adminShell(path: string, csrfToken: string, listPage: AuthorizationList
 
 const COUNTDOWN_SCRIPT = `<script>(()=>{const elements=document.querySelectorAll('[data-countdown]');if(!elements.length)return;const clock=(seconds)=>String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');const update=()=>{let reload=false;elements.forEach((el)=>{const target=Date.parse(el.dataset.countdown);const expired=target<=Date.now();const seconds=Math.max(0,Math.floor((target-Date.now())/1000));const fmt=el.dataset.format;if(fmt==='minutes-seconds'){if(expired){el.textContent='已到期';}else{const h=Math.floor(seconds/3600);const m=Math.floor(seconds%3600/60);const s=seconds%60;el.textContent=(h>0?h+'小时 ':'')+m+'分 '+(s<10?'0':'')+s+'秒';}}else if(fmt==='clock'){el.textContent=expired?(el.dataset.expiredText||'00:00'):clock(seconds);}else if(fmt==='cancel-countdown'){if(expired){el.textContent='已可'+(el.dataset.action==='end'?String.fromCharCode(32467,26463):String.fromCharCode(25442,21495));if(!el.dataset.reloaded){el.dataset.reloaded='true';reload=true;}}else{el.textContent=clock(seconds);}}});if(reload){setTimeout(()=>location.reload(),500);}};update();setInterval(update,1000);})();</script>`;
 
+// 人读等待耗时：满一分钟“等 N 分 M 秒”，不足一分钟“等不到 1 分钟”，避免与正在流逝的剩余倒计时混淆。
+function waitDurationLabel(start: Date, end: Date): string {
+  const seconds = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+  if (seconds < 60) return '等不到 1 分钟';
+  return `等 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+
+// 供应商激活卡片的接码耗时观测内联追加段：等待起点、短信送达或放弃时刻与等待耗时；
+// 等待起点为空记未记录（短信已送达仍单独显示送达时刻），非接收者主动放弃（超时等）不套耗时指标。
+function activationObservationMarkup(activation: {
+  verificationRequestedAt?: Date;
+  abandonedAt?: Date;
+  smsReceivedAt?: Date;
+}, currentDate: Date): string {
+  const parts: string[] = [];
+  const requested = activation.verificationRequestedAt;
+  parts.push(requested ? `等待起点 ${escapeHtml(formatDateTime(requested, currentDate))}` : '等待起点未记录');
+  if (activation.smsReceivedAt) parts.push(`短信送达 ${escapeHtml(formatDateTime(activation.smsReceivedAt, currentDate))}`);
+  if (activation.abandonedAt) parts.push(`放弃时刻 ${escapeHtml(formatDateTime(activation.abandonedAt, currentDate))}`);
+  if (requested && activation.smsReceivedAt) {
+    parts.push(`等多久收到：${waitDurationLabel(requested, activation.smsReceivedAt)}`);
+  } else if (requested && activation.abandonedAt) {
+    parts.push(`等多久放弃：${waitDurationLabel(requested, activation.abandonedAt)}`);
+  } else if (!requested) {
+    parts.push('等待耗时未记录');
+  }
+  return parts.length ? `，${parts.join('，')}` : '';
+}
+
 function authorizationDetailPage(path: string, csrfToken: string, detail: AuthorizationDetail, currentDate: Date): string {
   const isUnclaimedDetail = detail.status === '待领取' && !detail.claimedAt && detail.candidates.length === 0 && detail.activations.length === 0;
 
@@ -302,14 +331,14 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
       : escapeHtml(formatDateTime(detail.activation.numberExpiresAt, currentDate)))
     : '';
   const currentActivationRow = detail.activation
-    ? `<li class="activation-current"><strong>位置 ${detail.activation.position} · ${escapeHtml(detail.activation.countryName)}：</strong>${activationStatusLabel(detail.activation.revocationFinalizing ? '撤销收尾' : detail.activation.status)}，号码有效至：${numberRemaining}${detail.activation.phoneNumber ? `，<strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}` : ''}${detail.activation.verificationCode ? `，<strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}` : ''}，激活 ID ${escapeHtml(detail.activation.providerActivationId)}，费用 ${detail.activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(detail.activation.currency))}</li>`
+    ? `<li class="activation-current"><strong>位置 ${detail.activation.position} · ${escapeHtml(detail.activation.countryName)}：</strong>${activationStatusLabel(detail.activation.revocationFinalizing ? '撤销收尾' : detail.activation.status)}，号码有效至：${numberRemaining}${detail.activation.phoneNumber ? `，<strong>完整号码：</strong>${escapeHtml(detail.activation.phoneNumber)}` : ''}${detail.activation.verificationCode ? `，<strong>验证码：</strong>${escapeHtml(detail.activation.verificationCode)}` : ''}，激活 ID ${escapeHtml(detail.activation.providerActivationId)}，费用 ${detail.activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(detail.activation.currency))}${activationObservationMarkup(detail.activation, currentDate)}</li>`
     : '';
   const acquisitionRow = !detail.activation && detail.acquisition
     ? `<li><strong>位置 ${detail.acquisition.position} · ${escapeHtml(detail.acquisition.countryName)}：</strong>${activationStatusLabel(detail.acquisition.status)}</li>`
     : '';
   const historyRows = detail.activations
     .filter((activation) => !detail.activation || activation.providerActivationId !== detail.activation.providerActivationId)
-    .map((activation) => `<li><strong>位置 ${activation.position} · ${escapeHtml(activation.countryName)}：</strong>${activationStatusLabel(activation.status)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt, currentDate))}，激活 ID ${escapeHtml(activation.providerActivationId)}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理 ⚠️' : ''}</li>`).join('');
+    .map((activation) => `<li><strong>位置 ${activation.position} · ${escapeHtml(activation.countryName)}：</strong>${activationStatusLabel(activation.status)}，获取时间 ${escapeHtml(formatDateTime(activation.acquiredAt, currentDate))}，激活 ID ${escapeHtml(activation.providerActivationId)}，费用 ${activation.activationCost.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}${activation.refundConfirmed !== undefined ? `，已确认退款 ${activation.refundConfirmed.toFixed(2)} ${escapeHtml(formatCurrency(activation.currency))}` : ''}${activation.refundPending ? '，退款确认待处理 ⚠️' : ''}，<strong>完整号码：</strong>${activation.phoneNumber ? escapeHtml(activation.phoneNumber) : '（已删除）'}${activationObservationMarkup(activation, currentDate)}</li>`).join('');
   const unusedPositionRows = detail.candidates
     .filter((candidate) => !candidate.used)
     .map((candidate) => {
@@ -469,8 +498,12 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
         ? `<p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
         : '<p>短信已收到，暂时无法显示验证码，请联系发送者</p>';
       verificationMarkup = `${delivery}${resultViewRemainingMarkup}`;
-    } else {
+    } else if (view.verificationRequestedAt || !view.currentNumberAction) {
+      // 已宣告开始等待，或处于非等待短信的过渡态（如结果待人工对账）：维持现有等待短信动画。
       verificationMarkup = `<div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
+    } else {
+      // 仅等待短信、尚未宣告等待：显示过渡提示与开始接收验证码按钮，等待动画不显示。
+      verificationMarkup = `<div class="verification-request-pending"><p class="action-prompt">请把号码填入目标服务后，点击下方按钮开始接收验证码</p><form method="post" action="/a/${encodeURIComponent(token)}/verification-request"><button type="submit">开始接收验证码</button></form></div>`;
     }
     const verificationSection = `<section class="section-verification-result" aria-label="验证码">${verificationMarkup}</section>`;
 
@@ -1051,6 +1084,13 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     if (result.state === 'unavailable') return reply.type('text/html; charset=utf-8').send(unavailableRecipientPage());
     return reply.type('text/html; charset=utf-8').send(recipientPage(request.params.token, result));
+  });
+
+  app.post<{ Params: { token: string } }>('/a/:token/verification-request', async (request, reply) => {
+    const result = await activationAuthorizations.recordVerificationRequest(request.params.token);
+    if (result.state === 'not-found') return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
+    // 已记录或非等待短信态均安全 303 回当前页：幂等不覆盖、不写不改状态。
+    return reply.redirect(`/a/${request.params.token}`, 303);
   });
 
   app.post<{ Params: { token: string } }>('/a/:token/numbers', async (request, reply) => {

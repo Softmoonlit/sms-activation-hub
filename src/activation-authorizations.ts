@@ -71,6 +71,12 @@ export interface AuthorizationDetail {
     phoneNumber?: string;
     verificationCode?: string;
     unrecognizedSmsText?: string;
+    /** 接收者点击“开始接收验证码”的观测时刻；为空表示尚未宣告等待。 */
+    verificationRequestedAt?: Date;
+    /** 接收者确认换号或确认结束使用而放弃当前号码的观测时刻。 */
+    abandonedAt?: Date;
+    /** 短信送达时刻；独立于验证码识别。 */
+    smsReceivedAt?: Date;
   };
   candidates: Array<{
     position: number;
@@ -92,6 +98,14 @@ export interface AuthorizationDetail {
     acquiredAt: Date;
     refundConfirmed?: number;
     refundPending: boolean;
+    /** 接收者点击“开始接收验证码”的观测时刻；为空表示尚未宣告等待。 */
+    verificationRequestedAt?: Date;
+    /** 接收者确认换号或确认结束使用而放弃当前号码的观测时刻。 */
+    abandonedAt?: Date;
+    /** 短信送达时刻；独立于验证码识别。 */
+    smsReceivedAt?: Date;
+    /** 完整号码；领域已删除时为 undefined，展示占位文本。 */
+    phoneNumber?: string;
   }>;
   costs: Array<{ currency: string; activationCost: number; confirmedRefund: number; netCost: number }>;
 }
@@ -118,6 +132,7 @@ export interface RecipientAuthorizationView {
   resultViewRemainingMs?: number;
   quotaExhaustedPromptUntil?: Date;
   smsDelivered?: boolean;
+  verificationRequestedAt?: Date;
   verificationCode?: string;
 }
 
@@ -539,6 +554,7 @@ export class ActivationAuthorizations {
       sms_code: string | null; sms_text: string | null; phone_number: string | null; used_count: string; acquisition_status: 'requesting' | 'reconciling' | 'manual' | null;
       acquisition_country_name: string | null; acquisition_position: number | null; cancel_available_at: Date | null;
       authorization_revocation_cancellation_pending: boolean | null;
+      verification_requested_at: Date | null; abandoned_at: Date | null; sms_received_at: Date | null;
     }>(
       `SELECT auth.id, auth.token_suffix, auth.status AS authorization_status,
               auth.created_at, auth.claimed_at,
@@ -558,7 +574,8 @@ export class ActivationAuthorizations {
               acquisition.status AS acquisition_status, acquisition.country_name AS acquisition_country_name,
               acquisition.candidate_position AS acquisition_position,
               activation.cancel_available_at,
-              activation.authorization_revocation_cancellation_pending
+              activation.authorization_revocation_cancellation_pending,
+              activation.verification_requested_at, activation.abandoned_at, activation.sms_received_at
        FROM activation_authorizations auth
        LEFT JOIN LATERAL (
          SELECT * FROM supplier_activations item WHERE item.authorization_id = auth.id ORDER BY item.acquired_at DESC LIMIT 1
@@ -603,9 +620,11 @@ export class ActivationAuthorizations {
       this.database.pool.query<{
         position: number; country_name: string; provider_activation_id: string; status: NonNullable<AuthorizationDetail['activation']>['status']; activation_cost: string; currency: string;
         acquired_at: Date; refund_amount: string | null; refund_reconciliation_status: 'pending' | 'resolved';
+        verification_requested_at: Date | null; abandoned_at: Date | null; sms_received_at: Date | null; phone_number: string | null;
       }>(
         `SELECT candidate.position, candidate.country_name, activation.provider_activation_id, activation.status, activation.activation_cost::text, activation.currency, activation.acquired_at,
-                refund.amount::text AS refund_amount, activation.refund_reconciliation_status
+                refund.amount::text AS refund_amount, activation.refund_reconciliation_status,
+                activation.verification_requested_at, activation.abandoned_at, activation.sms_received_at, activation.phone_number
          FROM supplier_activations activation
          JOIN authorization_candidate_countries candidate
            ON candidate.authorization_id = activation.authorization_id AND candidate.position = activation.candidate_position
@@ -616,6 +635,10 @@ export class ActivationAuthorizations {
     const activations = activationResult.rows.map((activation) => ({
       position: activation.position, countryName: activation.country_name, providerActivationId: activation.provider_activation_id, status: activation.status, activationCost: Number(activation.activation_cost),
       currency: activation.currency, acquiredAt: activation.acquired_at,
+      ...(optionalDate(activation.verification_requested_at) ? { verificationRequestedAt: activation.verification_requested_at! } : {}),
+      ...(optionalDate(activation.abandoned_at) ? { abandonedAt: activation.abandoned_at! } : {}),
+      ...(optionalDate(activation.sms_received_at) ? { smsReceivedAt: activation.sms_received_at! } : {}),
+      ...(activation.phone_number ? { phoneNumber: activation.phone_number } : {}),
       ...(activation.refund_amount ? { refundConfirmed: Number(activation.refund_amount) } : {}),
       refundPending: activation.refund_reconciliation_status === 'pending',
     }));
@@ -686,6 +709,9 @@ export class ActivationAuthorizations {
         ...(deliveryDataVisible && row.phone_number ? { phoneNumber: row.phone_number } : {}),
         ...(deliveryDataVisible && row.sms_code ? { verificationCode: row.sms_code } : {}),
         ...(!row.sms_code && deliveryDataVisible && row.sms_text ? { unrecognizedSmsText: row.sms_text } : {}),
+        ...(optionalDate(row.verification_requested_at) ? { verificationRequestedAt: row.verification_requested_at! } : {}),
+        ...(optionalDate(row.abandoned_at) ? { abandonedAt: row.abandoned_at! } : {}),
+        ...(optionalDate(row.sms_received_at) ? { smsReceivedAt: row.sms_received_at! } : {}),
       } } : {}),
     };
   }
@@ -738,6 +764,7 @@ export class ActivationAuthorizations {
       acquired_at: Date | null; cancel_available_at: Date | null; number_expires_at: Date | null; used_count: string; candidate_count: string;
       acquisition_status: 'requesting' | 'reconciling' | 'manual' | null; activation_status: string | null; end_use_pending: boolean | null; sms_code: string | null;
       last_activation_status: string | null; last_activation_timed_out_at: Date | null;
+      verification_requested_at: Date | null;
     }>(
       `SELECT auth.id, auth.status, auth.ended_reason, auth.number_acquisition_expires_at,
               COALESCE(auth.result_view_until, (
@@ -749,6 +776,7 @@ export class ActivationAuthorizations {
               candidate.country_name, activation.phone_number, activation.acquired_at,
               activation.cancel_available_at, activation.expires_at AS number_expires_at,
               activation.status AS activation_status, activation.end_use_pending, activation.sms_code,
+              activation.verification_requested_at,
               (SELECT count(*) FROM authorization_candidate_countries candidate_count WHERE candidate_count.authorization_id = auth.id)::text AS candidate_count,
               (SELECT count(*) FROM authorization_candidate_countries used WHERE used.authorization_id = auth.id AND used.used_at IS NOT NULL)::text AS used_count,
               acquisition.status AS acquisition_status, last_activation.status AS last_activation_status,
@@ -829,7 +857,36 @@ export class ActivationAuthorizations {
       ...(authorization.last_activation_status === 'timed_out' && remainingNumberCount > 0 ? { nextNumberAvailable: true } : {}),
       ...(authorization.status === 'result_available' ? { smsDelivered: true } : {}),
       ...(authorization.sms_code ? { verificationCode: authorization.sms_code } : {}),
+      ...(optionalDate(authorization.verification_requested_at) ? { verificationRequestedAt: authorization.verification_requested_at! } : {}),
     };
+  }
+
+  /** 记录接收者“已开始等待验证码”的观测时刻：仅当前号码处于等待短信且等待起点列为空时写入，
+   *  重复提交幂等忽略、非等待短信态安全返回；不消耗候选位置或获取额度、不改变任何领域状态。 */
+  async recordVerificationRequest(token: string): Promise<{ state: 'recorded' | 'ignored' | 'not-found' }> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { state: 'not-found' };
+    const target = await this.database.pool.query<{ id: string }>(
+      'SELECT id FROM activation_authorizations WHERE token_hash = $1', [tokenHash(token)],
+    );
+    if (!target.rows[0]) return { state: 'not-found' };
+    await this.expireResultView(target.rows[0].id);
+    await this.reconcileTimedOutActivations(target.rows[0].id);
+    const recorded = await this.database.transaction(async (client) => {
+      const authorizationResult = await client.query<{ id: string }>(
+        'SELECT id FROM activation_authorizations WHERE token_hash = $1 FOR UPDATE',
+        [tokenHash(token)],
+      );
+      const authorization = authorizationResult.rows[0];
+      if (!authorization) return false;
+      const updated = await client.query(
+        `UPDATE supplier_activations
+         SET verification_requested_at = $2
+         WHERE authorization_id = $1 AND status = 'waiting_sms' AND verification_requested_at IS NULL`,
+        [authorization.id, this.now()],
+      );
+      return updated.rowCount === 1;
+    });
+    return { state: recorded ? 'recorded' : 'ignored' };
   }
 
   async receiveHeroSmsWebhook(event: HeroSmsWebhookEvent): Promise<'accepted' | 'ignored'> {
@@ -1474,13 +1531,15 @@ export class ActivationAuthorizations {
       if (!current || current.cancel_available_at > now || (current.cancellation_retry_after !== null && current.cancellation_retry_after > now)) return { kind: 'too-early' };
       // 转态时即写入对账租约：事务提交后请求供应商期间，并发对账不会抢 claim 同一激活；
       // 换号/结束使用调用完成后释放租约，由对账按实际到期时间接管。
+      // 接收者确认放弃当前号码的瞬间同时写放弃时刻：只观测，不改变取消对账等现有领域流程。
       const claimToken = randomBytes(16).toString('base64url');
       const updated = await client.query(
         `UPDATE supplier_activations
          SET status = 'cancellation_confirming', replacement_pending = $2, end_use_pending = $3,
-             cancellation_reconciliation_claimed_at = $4, cancellation_reconciliation_claim_token = $5
+             cancellation_reconciliation_claimed_at = $4, cancellation_reconciliation_claim_token = $5,
+             abandoned_at = $6
          WHERE authorization_id = $1 AND status = 'waiting_sms'`,
-        [authorization.id, !endingUse, endingUse, now, claimToken],
+        [authorization.id, !endingUse, endingUse, now, claimToken, now],
       );
       return updated.rowCount === 1
         ? { kind: 'cancel', activationId: current.provider_activation_id, claimToken }

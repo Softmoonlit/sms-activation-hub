@@ -4823,10 +4823,20 @@ if (!databaseUrl) {
       assert.match(pageStateA.body, /号码有效至：还剩/);
       assert.match(pageStateA.body, /💡 使用说明/);
       assert.match(pageStateA.body, /aria-label="验证码"/);
-      assert.match(pageStateA.body, /正在监听短信验证码.../);
+      // 尚未点开始接收验证码：显示过渡提示与按钮，等待动画不显示
+      assert.match(pageStateA.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
+      assert.match(pageStateA.body, /开始接收验证码/);
+      assert.doesNotMatch(pageStateA.body, /正在监听短信验证码/);
       assert.match(pageStateA.body, /剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
       assert.match(pageStateA.body, /后可换号/);
       assert.match(pageStateA.body, /<button[^>]*disabled[^>]*>更换号码<\/button>/);
+
+      // 点开始接收验证码后：等待动画出现、过渡提示与按钮消失（状态 A'：已宣告等待）
+      const recorded = await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
+      assert.equal(recorded.statusCode, 303);
+      const pageStateA2 = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(pageStateA2.body, /正在监听短信验证码/);
+      assert.doesNotMatch(pageStateA2.body, /开始接收验证码|请把号码填入目标服务后/);
 
       // 2. 达到允许取消时间，处于前两个号码可操作状态（状态 B：可以换号）
       now = new Date('2026-08-04T14:32:00.000Z');
@@ -4887,6 +4897,397 @@ if (!databaseUrl) {
         payload: 'replacement=confirm',
       });
       assert.equal(forbiddenConfirm.statusCode, 409);
+    } finally { await app.close(); }
+  });
+
+  test('取号后未点开始接收验证码时显示过渡提示与按钮，点按钮后写入等待起点并切换为等待动画，重复提交幂等不覆盖', async () => {
+    let now = new Date('2026-08-05T10:00:00.000Z');
+    const activationId = `verify-start-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+        activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+
+      // 取号成功：号码区下方显示过渡提示与按钮，等待动画不显示
+      const claim = await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+      assert.equal(claim.statusCode, 303);
+      const before = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(before.statusCode, 200);
+      assert.match(before.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
+      assert.match(before.body, /开始接收验证码/);
+      assert.match(before.body, /action="\/a\/[^\/]+\/verification-request"/);
+      assert.doesNotMatch(before.body, /正在监听短信验证码/);
+      assert.match(before.body, /415 555 0123/);
+      assert.match(before.body, /号码有效至：还剩/);
+
+      // 数据库等待起点为空
+      const beforeRow = await database.pool.query<{ verification_requested_at: Date | null }>(
+        'SELECT verification_requested_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
+      );
+      assert.equal(beforeRow.rows[0]?.verification_requested_at, null);
+
+      // 点按钮：写入等待起点、303 回链接、等待动画出现、按钮与过渡提示消失
+      const recorded = await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
+      assert.equal(recorded.statusCode, 303);
+      assert.equal(recorded.headers.location, `/a/${token}`);
+      const after = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(after.body, /正在监听短信验证码/);
+      assert.doesNotMatch(after.body, /开始接收验证码|请把号码填入目标服务后/);
+      const recordedRow = await database.pool.query<{ verification_requested_at: Date | null }>(
+        'SELECT verification_requested_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
+      );
+      assert.equal(recordedRow.rows[0]?.verification_requested_at?.toISOString(), '2026-08-05T10:00:00.000Z');
+
+      // 一分钟后重复提交：幂等忽略、不覆盖、不重置计时
+      now = new Date('2026-08-05T10:01:00.000Z');
+      const repeated = await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
+      assert.equal(repeated.statusCode, 303);
+      const repeatedRow = await database.pool.query<{ verification_requested_at: Date | null }>(
+        'SELECT verification_requested_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
+      );
+      assert.equal(repeatedRow.rows[0]?.verification_requested_at?.toISOString(), '2026-08-05T10:00:00.000Z');
+    } finally { await app.close(); }
+  });
+
+  test('开始接收验证码不消耗候选位置或获取额度，未点按钮仍可按取号两分钟规则换号，后继号码按钮重新出现且两号码计时独立', async () => {
+    let now = new Date('2026-08-05T11:00:00.000Z');
+    const activationIds: string[] = [];
+    const heroSms = scriptedHeroSms({
+      getNumber: async (_serviceCode, countryId) => {
+        const activationId = `verify-quota-${activationIds.length + 1}-${randomUUID()}`;
+        activationIds.push(activationId);
+        return {
+          activationId, phoneNumber: countryId === 1 ? '+14155550123' : '+442079460123',
+          activationCost: 0.8, currency: 'USD', activationTime: now,
+          activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+
+      // 未点按钮时消耗额度的动作只有取号：剩余额度保持 2
+      await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
+      const quotaPage = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(quotaPage.body, /剩余号码获取额度：2 · 实际能否获取取决于供应商库存/);
+      const candidateRow = await database.pool.query<{ used_count: string }>(
+        'SELECT count(*)::text AS used_count FROM authorization_candidate_countries WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_hash = $1) AND used_at IS NOT NULL',
+        [tokenHash(token)],
+      );
+      assert.equal(candidateRow.rows[0]?.used_count, '1');
+
+      // 未点按钮的另一个授权满两分钟：换号入口按取号时刻正常可用，按钮态不锁换号资格
+      const secondCreated = await createAuthorization(app, session);
+      const secondAuthorization = secondCreated.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(secondAuthorization);
+      await app.inject({ method: 'POST', url: `/a/${secondAuthorization}/numbers` });
+      now = new Date('2026-08-05T11:02:00.000Z');
+      const replaceReady = await app.inject({ method: 'GET', url: `/a/${secondAuthorization}` });
+      assert.match(replaceReady.body, /长时间未收到验证码，可点击更换号码/);
+      assert.match(replaceReady.body, /<button[^>]*type="submit"[^>]*>更换号码<\/button>/);
+      // 未点按钮的号码换号确认后取得后继号码：新号码等待起点为空、按钮重新出现
+      await app.inject({
+        method: 'POST', url: `/a/${secondAuthorization}/replacement/confirm`,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      const successor = await app.inject({ method: 'GET', url: `/a/${secondAuthorization}` });
+      assert.match(successor.body, /20 7946 0123/);
+      assert.match(successor.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
+      assert.match(successor.body, /开始接收验证码/);
+      assert.doesNotMatch(successor.body, /正在监听短信验证码/);
+      const successorRow = await database.pool.query<{ verification_requested_at: Date | null }>(
+        'SELECT verification_requested_at FROM supplier_activations WHERE provider_activation_id = $1', [activationIds[1]!],
+      );
+      assert.equal(successorRow.rows[0]?.verification_requested_at, null);
+    } finally { await app.close(); }
+  });
+
+  test('短信比开始接收验证码更早到达时直接展示验证码与结果查看期，按钮不出现、等待起点留空，伪造终态提交不写不改状态', async () => {
+    let now = new Date('2026-08-05T12:00:00.000Z');
+    const activationId = `verify-early-sms-${randomUUID()}`;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => ({
+        activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now,
+        activationEndTime: new Date(now.getTime() + 1_200_000),
+      }),
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+
+      // 未点按钮时短信送达：验证码与结果查看期原地展示，按钮与等待动画均不出现
+      await app.inject({
+        method: 'POST',
+        url: `/${config.heroSmsWebhookPath}`,
+        headers: { 'x-forwarded-for': '127.0.0.1', 'content-type': 'application/json' },
+        payload: { activationId, service: config.openAiServiceCode, country: 1, receivedAt: '2026-08-05T12:00:30.000Z', code: '654321', text: 'Your OpenAI code is 654321' },
+      });
+      const delivered = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(delivered.body, /654321/);
+      assert.match(delivered.body, /复制验证码/);
+      assert.match(delivered.body, /验证码可查看至：/);
+      assert.doesNotMatch(delivered.body, /开始接收验证码|请把号码填入目标服务后|正在监听短信验证码/);
+      const deliveredRow = await database.pool.query<{ verification_requested_at: Date | null; sms_received_at: Date | null }>(
+        'SELECT verification_requested_at, sms_received_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
+      );
+      assert.equal(deliveredRow.rows[0]?.verification_requested_at, null);
+      assert.equal(deliveredRow.rows[0]?.sms_received_at?.toISOString(), '2026-08-05T12:00:30.000Z');
+
+      // 结果查看期伪造提交：安全 303 回当前页、不写入、状态不变
+      const forged = await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
+      assert.equal(forged.statusCode, 303);
+      assert.equal(forged.headers.location, `/a/${token}`);
+      const afterForge = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(afterForge.body, /654321/);
+      const forgedRow = await database.pool.query<{ verification_requested_at: Date | null }>(
+        'SELECT verification_requested_at FROM supplier_activations WHERE provider_activation_id = $1', [activationId],
+      );
+      assert.equal(forgedRow.rows[0]?.verification_requested_at, null);
+    } finally { await app.close(); }
+  });
+
+  test('确认换号与确认结束使用均写放弃时刻，后继号码等待起点为空且两号码计时彼此独立', async () => {
+    let now = new Date('2026-08-06T09:00:00.000Z');
+    const activationIds: string[] = [];
+    const heroSms = scriptedHeroSms({
+      getNumber: async (_serviceCode, countryId) => {
+        const activationId = `abandon-${activationIds.length + 1}-${randomUUID()}`;
+        activationIds.push(activationId);
+        return {
+          activationId,
+          phoneNumber: countryId === 1 ? '+14155550123' : countryId === 2 ? '+442079460123' : '+33142278186',
+          activationCost: 0.8, currency: 'USD', activationTime: now,
+          activationEndTime: new Date(now.getTime() + 1_200_000),
+        };
+      },
+      cancelActivation: async () => 'cancelled',
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+      await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+
+      // 第一个号码：点开始接收验证码后满两分钟确认换号
+      now = new Date('2026-08-06T09:00:00.000Z');
+      await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
+      now = new Date('2026-08-06T09:02:00.000Z');
+      const replaced = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(replaced.statusCode, 303);
+
+      // 第二个号码：等待起点为空、按钮重新出现；点按钮后写自己的等待起点
+      const secondPage = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.match(secondPage.body, /请把号码填入目标服务后，点击下方按钮开始接收验证码/);
+      await app.inject({ method: 'POST', url: `/a/${token}/verification-request` });
+
+      // 第三个号码（已用尽额度）：确认结束使用
+      now = new Date('2026-08-06T09:04:00.000Z');
+      const ended = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(ended.statusCode, 303);
+      now = new Date('2026-08-06T09:06:00.000Z');
+      const endUse = await app.inject({
+        method: 'POST', url: `/a/${token}/replacement/confirm`,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'replacement=confirm',
+      });
+      assert.equal(endUse.statusCode, 303);
+
+      // 三个号码各自独立的等待起点与放弃时刻：两条计时互不覆盖
+      const rows = await database.pool.query<{
+        provider_activation_id: string; verification_requested_at: Date | null; abandoned_at: Date | null;
+      }>(
+        'SELECT provider_activation_id, verification_requested_at, abandoned_at FROM supplier_activations WHERE provider_activation_id = ANY($1::text[]) ORDER BY acquired_at',
+        [activationIds],
+      );
+      assert.deepEqual(rows.rows.map((row) => ({
+        activation: row.provider_activation_id.slice(0, 8),
+        verificationRequestedAt: row.verification_requested_at?.toISOString() ?? null,
+        abandonedAt: row.abandoned_at?.toISOString() ?? null,
+      })), [
+        { activation: activationIds[0]!.slice(0, 8), verificationRequestedAt: '2026-08-06T09:00:00.000Z', abandonedAt: '2026-08-06T09:02:00.000Z' },
+        { activation: activationIds[1]!.slice(0, 8), verificationRequestedAt: '2026-08-06T09:02:00.000Z', abandonedAt: '2026-08-06T09:04:00.000Z' },
+        { activation: activationIds[2]!.slice(0, 8), verificationRequestedAt: null, abandonedAt: '2026-08-06T09:06:00.000Z' },
+      ]);
+    } finally { await app.close(); }
+  });
+
+  test('管理员撤销与授权到期收尾驱动的取消不写放弃时刻', async () => {
+    let now = new Date('2026-08-07T00:00:00.000Z');
+    const revokeActivationId = `abandon-revoke-${randomUUID()}`;
+    let revokeCancelCalls = 0;
+    let getNumberCalls = 0;
+    let expiryCancelCalls = 0;
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        getNumberCalls += 1;
+        if (getNumberCalls === 1) {
+          return {
+            activationId: revokeActivationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD',
+            activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000),
+          };
+        }
+        // 第二个授权：领取发生在 08-07 12:00，领取截止 = 08-08 12:00；
+        // 供应商取得时间恰为截止时刻，不交付并留给授权到期收尾取消。
+        now = new Date('2026-08-08T12:00:00.000Z');
+        return {
+          activationId: `abandon-expiry-${randomUUID()}`, phoneNumber: '+442079460123', activationCost: 0.8, currency: 'USD',
+          activationTime: new Date('2026-08-08T12:00:00.000Z'), activationEndTime: new Date('2026-08-08T12:20:00.000Z'),
+        };
+      },
+      cancelActivation: async (activationId) => {
+        if (activationId === revokeActivationId) revokeCancelCalls += 1;
+        else expiryCancelCalls += 1;
+        return 'cancelled';
+      },
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    let expiryToken = '';
+    try {
+      await resetAuthorizationTables(database);
+      const session = await login(app);
+
+      // 管理员撤销：确认后由撤销专用取消路径收尾，不写放弃时刻
+      const firstCreated = await createAuthorization(app, session);
+      const firstToken = firstCreated.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(firstToken);
+      await app.inject({ method: 'POST', url: `/a/${firstToken}/numbers` });
+      now = new Date('2026-08-07T00:02:00.000Z');
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      const firstId = authorizationIdFromHome(home.body, firstToken);
+      await post(app, session, `/${config.adminPath}/authorizations/${firstId}/revoke`, {});
+      assert.equal(revokeCancelCalls, 1);
+      const revokeRow = await database.pool.query<{ status: string; abandoned_at: Date | null }>(
+        'SELECT status, abandoned_at FROM supplier_activations WHERE provider_activation_id = $1', [revokeActivationId],
+      );
+      assert.equal(revokeRow.rows[0]?.status, 'cancelled');
+      assert.equal(revokeRow.rows[0]?.abandoned_at, null, '管理员撤销驱动的取消不得写放弃时刻');
+
+      // 授权到期收尾：领取跨过截止不交付后，重启由到期取消任务收尾，不写放弃时刻
+      const secondCreated = await createAuthorization(app, session);
+      expiryToken = secondCreated.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1] ?? ''; assert.ok(expiryToken);
+      now = new Date('2026-08-07T12:00:00.000Z');
+      const response = await app.inject({ method: 'POST', url: `/a/${expiryToken}/numbers` });
+      assert.equal(response.statusCode, 404);
+      assert.equal(expiryCancelCalls, 0, '供应商尚未允许取消时应保留持久取消任务');
+    } finally { await app.close(); }
+
+    now = new Date('2026-08-08T12:02:00.000Z');
+    const restarted = await openApplication(heroSms, () => now);
+    try {
+      assert.equal(expiryCancelCalls, 1);
+      const expiryRow = await restarted.database.pool.query<{ status: string; abandoned_at: Date | null }>(
+        `SELECT activation.status, activation.abandoned_at
+         FROM supplier_activations activation
+         JOIN activation_authorizations auth ON auth.id = activation.authorization_id
+         WHERE auth.token_hash = $1`, [tokenHash(expiryToken)],
+      );
+      assert.equal(expiryRow.rows[0]?.status, 'cancelled');
+      assert.equal(expiryRow.rows[0]?.abandoned_at, null, '授权到期收尾驱动的取消不得写放弃时刻');
+    } finally { await restarted.app.close(); }
+  });
+
+  test('管理员详情供应商激活卡片展示等待起点、送达或放弃时刻与等待耗时：成功号等多久收到、放弃号等多久放弃、未点按钮号未记录、超时不套指标、历史号码占位', async () => {
+    const now = new Date('2026-08-10T00:00:00.000Z');
+    await resetTablesBeforeApplication();
+    const { app, database } = await openApplication(scriptedHeroSms(), () => now);
+    try {
+      const session = await login(app);
+      const created = await createAuthorization(app, session);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      const token = links[0]!;
+      const authorization = await database.pool.query<{ id: string }>(
+        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+      );
+      const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
+      await database.pool.query("UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'acquisition_expired', token_hash = NULL WHERE id = $1", [authorizationId, now]);
+      const activationIds = ['success', 'abandoned', 'unrecorded', 'timedout'].map((suffix) => `${suffix}-${randomUUID()}`);
+      for (const [index] of activationIds.entries()) {
+        await database.pool.query(
+          `INSERT INTO authorization_candidate_countries (authorization_id, position, country_id, country_name, used_at)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [authorizationId, index + 1, index + 1, ['美国', '英国', '法国', '德国'][index], now],
+        );
+      }
+      // 成功号：已点按钮 + 短信送达；放弃号：已点按钮 + 换号确认放弃；
+      // 未记录号：未点按钮但短信已送达；超时号：已点按钮但无送达无放弃；
+      // 其中放弃号与超时号号码已被领域删除（phone_number 为空），成功号保留号码作为敏感窗口事实。
+      for (const [index, activationId] of activationIds.entries()) {
+        await database.pool.query(
+          `INSERT INTO supplier_activations
+             (authorization_id, candidate_position, country_id, provider_activation_id, status, activation_cost, currency,
+              acquired_at, cancel_available_at, expires_at, phone_number,
+              verification_requested_at, abandoned_at, sms_received_at, timeout_final_status_confirmed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'USD', $7, $7, $8, $9, $10, $11, $12, $13)`,
+          [
+            authorizationId, index + 1, index + 1, activationId,
+            index === 0 ? 'sms_delivered' : index === 1 ? 'cancelled' : index === 2 ? 'completed' : 'timed_out',
+            [0.8, 1.25, 2, 3][index], new Date(now.getTime() + index), new Date('2026-08-10T00:20:00.000Z'),
+            index === 0 ? '+14155550123' : null,
+            index === 0 ? now : index === 1 ? new Date(now.getTime() + 60_000) : index === 2 ? null : new Date(now.getTime() + 120_000),
+            index === 1 ? new Date(now.getTime() + 180_000) : null,
+            index === 0 ? new Date(now.getTime() + 300_000) : index === 2 ? new Date(now.getTime() + 240_000) : null,
+            // 超时号已确认最终状态：初始化不会再把它改判为 manual_reconciliation，避免与短信已送达行撞唯一部分索引
+            index === 3 ? now : null,
+          ],
+        );
+      }
+
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
+      assert.equal(detail.statusCode, 200);
+
+      // 成功号：等待起点、短信送达时刻与“等多久收到”，完整号码可见
+      assert.match(detail.body, /位置 1 · 美国：<\/strong>📨 短信已送达，获取时间 08-10 08:00，激活 ID success-/);
+      assert.match(detail.body, /完整号码：<\/strong>\+14155550123/);
+      assert.match(detail.body, /等待起点 08-10 08:00，短信送达 08-10 08:05，等多久收到：等 5 分 0 秒/);
+
+      // 放弃号：等待起点、放弃时刻与“等多久放弃”，号码已删除显示占位
+      assert.match(detail.body, /位置 2 · 英国：<\/strong>↩️ 已取消，获取时间 08-10 08:00，激活 ID abandoned-/);
+      assert.match(detail.body, /完整号码：<\/strong>（已删除）/);
+      assert.match(detail.body, /等待起点 08-10 08:01，放弃时刻 08-10 08:03，等多久放弃：等 2 分 0 秒/);
+
+      // 未记录号：等待起点与等待耗时均标未记录，短信送达时刻单独展示
+      assert.match(detail.body, /位置 3 · 法国：<\/strong>✅ 已完成，获取时间 08-10 08:00，激活 ID unrecorded-/);
+      assert.match(detail.body, /等待起点未记录，短信送达 08-10 08:04，等待耗时未记录/);
+
+      // 超时号：不套等多久收到或等多久放弃指标，只展示状态与已有时间字段
+      assert.match(detail.body, /位置 4 · 德国：<\/strong>⏰ 已超时，获取时间 08-10 08:00，激活 ID timedout-/);
+      assert.match(detail.body, /等待起点 08-10 08:02/);
+      const timedOutRow = detail.body.match(/<li><strong>位置 4 · 德国：<\/strong>[\s\S]*?<\/li>/)?.[0];
+      assert.ok(timedOutRow);
+      assert.doesNotMatch(timedOutRow, /等多久收到|等多久放弃/);
+
+      // 列表页不加等待耗时或相关时间戳
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.doesNotMatch(home.body, /等多久收到|等多久放弃|等待起点|等待耗时/);
     } finally { await app.close(); }
   });
 

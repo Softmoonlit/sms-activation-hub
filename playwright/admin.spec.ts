@@ -24,10 +24,11 @@ const heroSms: HeroSms = {
   balance: async () => 10,
   services: async () => [{ code: 'openai', name: 'OpenAI' }],
   countries: async () => [{ id: 1, name: '美国' }, { id: 2, name: '英国' }, { id: 3, name: '法国' }],
+  // 预算内可取库存必须落在每号最高价（0.11）内，否则领取会以无库存失败
   offers: async (): Promise<HeroSmsOffer[]> => [
-    { serviceCode: 'openai', countryId: 1, defaultPrice: 1.2, totalStock: 1, map: { '1.2': 1 } },
-    { serviceCode: 'openai', countryId: 2, defaultPrice: 0.6, totalStock: 1, map: { '0.6': 1 } },
-    { serviceCode: 'openai', countryId: 3, defaultPrice: 0.9, totalStock: 1, map: { '0.9': 1 } },
+    { serviceCode: 'openai', countryId: 1, defaultPrice: 0.08, totalStock: 1, map: { '0.08': 1 } },
+    { serviceCode: 'openai', countryId: 2, defaultPrice: 0.09, totalStock: 1, map: { '0.09': 1 } },
+    { serviceCode: 'openai', countryId: 3, defaultPrice: 0.10, totalStock: 1, map: { '0.10': 1 } },
   ],
   getNumber: async (_serviceCode, countryId) => {
     latestActivationId = `admin-pw-${randomUUID()}`;
@@ -346,7 +347,7 @@ test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部
     // 3. 换号按钮不足两分钟禁用
     await expect(page.getByRole('button', { name: '更换号码' })).toBeDisabled();
 
-    // 4. 短信送达后（验证码显示状态）
+    // 4. 短信送达后（验证码显示状态）：极早送达时按钮与等待动画均不出现、验证码与复制验证码与结果查看期倒计时原地可见
     const webhook = await app.inject({
       method: 'POST', url: `/${config.heroSmsWebhookPath}`,
       payload: {
@@ -357,6 +358,11 @@ test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部
     assert.equal(webhook.statusCode, 200);
     await page.reload();
     await expect(page.locator('#verification-code')).toBeVisible();
+    await expect(page.getByRole('button', { name: '复制验证码' })).toBeVisible();
+    await expect(page.getByText(/^验证码可查看至：/)).toBeVisible();
+    await expect(page.getByRole('button', { name: '开始接收验证码' })).toHaveCount(0);
+    await expect(page.getByText('请把号码填入目标服务后，点击下方按钮开始接收验证码')).toHaveCount(0);
+    await expect(page.getByText('正在监听短信验证码...')).toHaveCount(0);
     html = await page.content();
     assertNoSensitiveAdminInfo(html, '验证码显示页面');
 
@@ -401,12 +407,22 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
     assert.ok(firstHintLayout.buttonTop >= firstHintLayout.hintBottom, '首次提示不应挤压获取号码按钮');
     await assertNoOverflow(page, '初始状态');
 
-    // 领取号码后
+    // 领取号码后：过渡提示与开始接收验证码按钮可见、等待动画不出现，长文案不溢出
     await page.getByRole('button', { name: '获取号码' }).click();
     await expect(page.getByText('+44 20 7946 0777', { exact: true })).toBeVisible();
     await expect(page.getByText(/^号码有效至：还剩 20:00$/)).toBeVisible();
     await expect(page.getByText(/^02:00 后可换号$/)).toBeVisible();
+    await expect(page.getByText('请把号码填入目标服务后，点击下方按钮开始接收验证码')).toBeVisible();
+    await expect(page.getByRole('button', { name: '开始接收验证码' })).toBeVisible();
+    await expect(page.getByText('正在监听短信验证码...')).toHaveCount(0);
     await assertNoOverflow(page, '号码显示状态');
+
+    // 点开始接收验证码后：等待动画原地承接，按钮与过渡提示消失，不遮挡换号倒计时
+    await page.getByRole('button', { name: '开始接收验证码' }).click();
+    await expect(page.getByText('正在监听短信验证码...')).toBeVisible();
+    await expect(page.getByRole('button', { name: '开始接收验证码' })).toHaveCount(0);
+    await expect(page.getByText('请把号码填入目标服务后，点击下方按钮开始接收验证码')).toHaveCount(0);
+    await assertNoOverflow(page, '等待动画状态');
 
     // 秒数变化时倒计时和操作按钮保持稳定，不挤压相邻区域
     const waitingPrompt = page.getByText(/^02:00 后可换号$/);
@@ -812,6 +828,67 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
 
     await desktopContext.close();
     await mobileContext.close();
+  } finally {
+    await app.close();
+  }
+});
+
+test('管理员详情供应商激活卡片显示接码耗时观测：成功号等多久收到、放弃号等多久放弃、未点按钮号未记录、历史已删除号码占位', async ({ browser }) => {
+  const database = new Database(databaseUrl!);
+  const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-10T00:00:00.000Z') });
+  await resetAuthorizationTables(database);
+  await app.listen({ host: '127.0.0.1', port: 32124 });
+  try {
+    const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
+    const token = await createAuthorization(app, cookie, csrf);
+    const authorization = await database.pool.query<{ id: string }>(
+      'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+    );
+    const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
+    const now = new Date('2026-08-10T00:00:00.000Z');
+    await database.pool.query("UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'acquisition_expired', token_hash = NULL WHERE id = $1", [authorizationId, now]);
+    // 成功号保留号码；放弃号与未记录号号码已被领域删除（历史卡片应显示占位文本）
+    for (const [index, row] of [
+      { key: 'success', status: 'sms_delivered', phone: '+442079460777', requested: now, abandoned: null, sms: new Date(now.getTime() + 300_000) },
+      { key: 'abandoned', status: 'cancelled', phone: null, requested: new Date(now.getTime() + 60_000), abandoned: new Date(now.getTime() + 180_000), sms: null },
+      { key: 'unrecorded', status: 'completed', phone: null, requested: null, abandoned: null, sms: new Date(now.getTime() + 240_000) },
+    ].entries()) {
+      await database.pool.query(
+        `INSERT INTO authorization_candidate_countries (authorization_id, position, country_id, country_name, used_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [authorizationId, index + 1, index + 1, ['美国', '英国', '法国'][index], now],
+      );
+      await database.pool.query(
+        `INSERT INTO supplier_activations
+           (authorization_id, candidate_position, country_id, provider_activation_id, status, activation_cost, currency,
+            acquired_at, cancel_available_at, expires_at, phone_number, verification_requested_at, abandoned_at, sms_received_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'USD', $7, $7, $8, $9, $10, $11, $12)`,
+        [
+          authorizationId, index + 1, index + 1, `detail-obs-${row.key}-${randomUUID()}`, row.status,
+          [0.8, 1.25, 2][index], new Date(now.getTime() + index), new Date('2026-08-10T00:20:00.000Z'),
+          row.phone, row.requested, row.abandoned, row.sms,
+        ],
+      );
+    }
+
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const page = await context.newPage();
+    await context.addCookies([
+      { name: 'admin_session', value: sessionValue, domain: '127.0.0.1', path: '/' },
+      { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
+    ]);
+    await page.goto(`${origin}/${config.adminPath}/authorizations/${authorizationId}`);
+
+    // 成功号：等待起点 + 短信送达时刻 + 等多久收到 + 完整号码
+    await expect(page.getByText(/等待起点 08-10 08:00，短信送达 08-10 08:05，等多久收到：等 5 分 0 秒/)).toBeVisible();
+    await expect(page.getByText('完整号码：+442079460777')).toBeVisible();
+    // 放弃号：等待起点 + 放弃时刻 + 等多久放弃 + 号码已删除占位
+    await expect(page.getByText(/等待起点 08-10 08:01，放弃时刻 08-10 08:03，等多久放弃：等 2 分 0 秒/)).toBeVisible();
+    await expect(page.getByText(/完整号码：（已删除）/)).toHaveCount(2);
+    // 未记录号：等待起点与耗时均未记录，短信送达时刻单独展示
+    await expect(page.getByText(/等待起点未记录，短信送达 08-10 08:04，等待耗时未记录/)).toBeVisible();
+
+    await context.close();
   } finally {
     await app.close();
   }

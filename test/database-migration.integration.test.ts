@@ -395,4 +395,125 @@ if (!databaseUrl) {
       await adminDatabase.close();
     }
   });
+
+  test('等待起点与放弃时刻列以 ADD COLUMN IF NOT EXISTS 增量迁移，新建库与存在表两种起点均不丢数据', async () => {
+    const schemaName = `observation_columns_${randomUUID().replaceAll('-', '')}`;
+    const adminDatabase = new Database(databaseUrl);
+    await adminDatabase.pool.query(`CREATE SCHEMA ${schemaName}`);
+
+    const scopedUrl = new URL(databaseUrl);
+    scopedUrl.searchParams.set('options', `-csearch_path=${schemaName}`);
+    const database = new Database(scopedUrl.toString());
+    const createdAt = new Date('2026-08-01T00:00:00.000Z');
+    const newSchemaAuthorizationId = randomUUID();
+    const legacySchemaAuthorizationId = randomUUID();
+
+    try {
+      // 新建库起点：initialize 创建全部结构，两个观测列直接可达
+      await database.initialize();
+      await database.saveCandidateSettings([
+        { countryId: 1, countryName: '美国' },
+        { countryId: 2, countryName: '英国' },
+        { countryId: 3, countryName: '法国' },
+      ], 0.11);
+      await database.pool.query(
+        `INSERT INTO activation_authorizations
+          (id, token_hash, token_suffix, status, created_at, claimed_at,
+           number_acquisition_expires_at, last_activity_at)
+         VALUES ($1, 'new-schema-token-hash', 'NEWSCHEM', 'in_progress', $2::timestamptz, $2::timestamptz,
+                 $2::timestamptz + INTERVAL '24 hours', $2::timestamptz)`,
+        [newSchemaAuthorizationId, createdAt],
+      );
+      await database.pool.query(
+        `INSERT INTO authorization_candidate_countries
+          (authorization_id, position, country_id, country_name, used_at)
+         VALUES ($1, 1, 1, '美国', $2)`,
+        [newSchemaAuthorizationId, createdAt],
+      );
+      await database.pool.query(
+        `INSERT INTO supplier_activations
+          (authorization_id, candidate_position, country_id, provider_activation_id,
+           status, activation_cost, currency, acquired_at, cancel_available_at, expires_at,
+           verification_requested_at, abandoned_at)
+         VALUES ($1, 1, 1, 'new-schema-activation', 'cancelled', 0.8, 'USD', $2::timestamptz,
+                 $2::timestamptz + INTERVAL '2 minutes', $2::timestamptz + INTERVAL '20 minutes',
+                 $2::timestamptz, $2::timestamptz + INTERVAL '90 seconds')`,
+        [newSchemaAuthorizationId, createdAt],
+      );
+
+      // 新建库起点：两个观测列直接可写可读
+      const freshColumns = await database.pool.query<{ column_name: string }>(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'supplier_activations' AND column_name IN ('verification_requested_at', 'abandoned_at')`,
+        [schemaName],
+      );
+      assert.deepEqual(new Set(freshColumns.rows.map((row) => row.column_name)), new Set(['verification_requested_at', 'abandoned_at']));
+
+      // 存在表起点：删除两列模拟旧库，先插入不依赖新列的既有数据，再重新 initialize 增量补列
+      await database.pool.query(
+        'ALTER TABLE supplier_activations DROP COLUMN verification_requested_at, DROP COLUMN abandoned_at',
+      );
+      await database.pool.query(
+        `INSERT INTO activation_authorizations
+          (id, token_hash, token_suffix, status, created_at, claimed_at,
+           number_acquisition_expires_at, last_activity_at)
+         VALUES ($1, 'legacy-schema-token-hash', 'LEGSCHEM', 'in_progress', $2::timestamptz, $2::timestamptz,
+                 $2::timestamptz + INTERVAL '24 hours', $2::timestamptz)`,
+        [legacySchemaAuthorizationId, createdAt],
+      );
+      await database.pool.query(
+        `INSERT INTO authorization_candidate_countries
+          (authorization_id, position, country_id, country_name, used_at)
+         VALUES ($1, 1, 1, '美国', $2)`,
+        [legacySchemaAuthorizationId, createdAt],
+      );
+      await database.pool.query(
+        `INSERT INTO supplier_activations
+          (authorization_id, candidate_position, country_id, provider_activation_id,
+           status, activation_cost, currency, acquired_at, cancel_available_at, expires_at)
+         VALUES ($1, 1, 1, 'legacy-schema-activation', 'cancelled', 1.25, 'USD', $2::timestamptz,
+                 $2::timestamptz + INTERVAL '2 minutes', $2::timestamptz + INTERVAL '20 minutes')`,
+        [legacySchemaAuthorizationId, createdAt],
+      );
+
+      await database.initialize();
+
+      // 两个新列以增量迁移重新可达
+      const columns = await database.pool.query<{ column_name: string }>(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'supplier_activations' AND column_name IN ('verification_requested_at', 'abandoned_at')`,
+        [schemaName],
+      );
+      assert.deepEqual(new Set(columns.rows.map((row) => row.column_name)), new Set(['verification_requested_at', 'abandoned_at']));
+
+      // 新旧两条起点插入的数据均完整保留：旧库行业务字段不丢，新库行观测列值不丢
+      const activations = await database.pool.query<{
+        provider_activation_id: string; status: string; activation_cost: string;
+        verification_requested_at: Date | null; abandoned_at: Date | null;
+      }>(
+        `SELECT provider_activation_id, status, activation_cost::text AS activation_cost,
+                verification_requested_at, abandoned_at
+         FROM supplier_activations
+         WHERE provider_activation_id IN ('new-schema-activation', 'legacy-schema-activation')
+         ORDER BY provider_activation_id`,
+      );
+      assert.deepEqual(activations.rows, [
+        {
+          provider_activation_id: 'legacy-schema-activation', status: 'cancelled', activation_cost: '1.25',
+          verification_requested_at: null, abandoned_at: null,
+        },
+        {
+          provider_activation_id: 'new-schema-activation', status: 'cancelled', activation_cost: '0.8',
+          // 列被 DROP 重建后旧行观测值随列删除而清空，仅业务字段保留：增量迁移不丢既有数据
+          verification_requested_at: null, abandoned_at: null,
+        },
+      ]);
+    } finally {
+      await database.close();
+      await adminDatabase.pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
+      await adminDatabase.close();
+    }
+  });
 }
