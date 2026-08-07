@@ -2141,6 +2141,63 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
+  test('webhook 接受 HeroSMS 数字形态 activationId：样例数字实时落库、审计日志记录激活 ID，字符串形态行为不变', async () => {
+    let now = new Date('2026-08-09T00:00:00.000Z');
+    // 生产回看链接 jqg8xAtw 的激活 697086083 即为数字形态（HeroSMS 文档样例 "activationId": 123456）；
+    // 字符串形态对照样例使用带前缀 ID，确保两条路径行为一致。
+    const cases = [
+      { label: 'numeric', activationId: 697086083 },
+      { label: 'string', activationId: `string-form-${randomUUID()}` },
+    ];
+    const pendingIds = cases.map((item) => String(item.activationId));
+    const heroSms = scriptedHeroSms({
+      getNumber: async () => {
+        const activationId = pendingIds.shift(); assert.ok(activationId);
+        return { activationId, phoneNumber: '+14155550123', activationCost: 0.8, currency: 'USD', activationTime: now, activationEndTime: new Date(now.getTime() + 1_200_000) };
+      },
+    });
+    const { app, database } = await openApplication(heroSms, () => now);
+    try {
+      const session = await login(app);
+      const captured = await withCapturedStdout(async () => {
+        for (const item of cases) {
+          now = new Date('2026-08-09T00:00:00.000Z');
+          const created = await createAuthorization(app, session);
+          const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
+          await app.inject({ method: 'POST', url: `/a/${token}/numbers` });
+
+          now = new Date('2026-08-09T00:03:00.000Z');
+          const delivered = await app.inject({
+            method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+            payload: { activationId: item.activationId, service: 'openai', country: 1, receivedAt: now.toISOString(), code: '482913', text: `Your code is 482913 (${item.label})` },
+          });
+          assert.equal(delivered.statusCode, 200, `${item.label} 形态应放行进入业务层`);
+
+          const page = await app.inject({ method: 'GET', url: `/a/${token}` });
+          assert.equal(page.statusCode, 200);
+          assert.match(page.body, /482913|复制验证码/);
+          const state = await database.pool.query<{ authorization_status: string; events: string }>(
+            `SELECT auth.status AS authorization_status,
+                    (SELECT count(*) FROM hero_sms_events event WHERE event.provider_activation_id = activation.provider_activation_id)::text AS events
+             FROM supplier_activations activation JOIN activation_authorizations auth ON auth.id = activation.authorization_id
+             WHERE activation.provider_activation_id = $1`, [String(item.activationId)],
+          );
+          assert.deepEqual(state.rows[0], { authorization_status: 'result_available', events: '1' }, `${item.label} 形态应实时落库一条事件`);
+        }
+
+        // 数字形态下 body 其余字段缺失时，400 审计日志也应记录激活 ID（数字原值转字符串）。
+        const invalid = await app.inject({
+          method: 'POST', url: `/${config.heroSmsWebhookPath}`,
+          payload: { activationId: 697086083, service: 'openai', country: 1, code: '000000', text: '缺少 receivedAt' },
+        });
+        assert.equal(invalid.statusCode, 400);
+      });
+      assert.match(captured.output, /\[herosms\]\[info\] webhook 来源 127\.0\.0\.1 激活 697086083 业务接受，HTTP 200/);
+      assert.match(captured.output, new RegExp(`\\[herosms\\]\\[info\\] webhook 来源 127\\.0\\.0\\.1 激活 ${cases[1]!.activationId} 业务接受，HTTP 200`));
+      assert.match(captured.output, /\[herosms\]\[error\] webhook 来源 127\.0\.0\.1 激活 697086083 body 无效，HTTP 400/);
+    } finally { await app.close(); }
+  });
+
   test('轮询恢复遗漏的异常短信，管理员仅在号码有效窗口内查看正文，后续结构化验证码自动更新', async () => {
     let now = new Date('2026-08-10T00:00:00.000Z');
     const activationId = `poll-${randomUUID()}`;

@@ -938,7 +938,13 @@ export async function createApp(config: AppConfig, database = new Database(confi
     }
 
     const body = request.body;
-    const activationId = typeof body?.activationId === 'string' && body.activationId.trim() ? body.activationId.trim() : undefined;
+    // activationId 同时接受数字与字符串形态（HeroSMS 实际推送为数字，文档样例 "activationId": 123456）：
+    // 数字原值转字符串后参与校验与下游处理，字符串形态行为不变；与 country 字段双形态处理方式对齐。
+    const activationId = typeof body?.activationId === 'number'
+      ? String(body.activationId)
+      : typeof body?.activationId === 'string' && body.activationId.trim()
+        ? body.activationId.trim()
+        : undefined;
     const serviceCode = typeof body?.service === 'string' && body.service.trim() ? body.service.trim() : undefined;
     const text = typeof body?.text === 'string' && body.text.length <= 10_000 ? body.text : undefined;
     const code = typeof body?.code === 'string' && body.code.trim() && body.code.length <= 256 ? body.code.trim() : undefined;
