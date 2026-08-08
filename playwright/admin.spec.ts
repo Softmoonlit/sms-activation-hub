@@ -651,6 +651,7 @@ test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选�
     await resetAuthorizationTables(database);
     const links = await createBatch(app, cookie, csrf, '25');
     // 挑选含字母的尾号作为搜索目标，保证可构造出与原串不同的大小写变体
+    // 兜底纯数字尾号（概率极低）：无字母可翻转时下方守卫断言会明确失败，此时失败消息提示的是本批不含字母而非大小写翻转问题
     const searchSuffix = links.map((link) => link.slice(-3)).find((suffix) => /[A-Za-z]/.test(suffix)) ?? links[0]!.slice(-3);
 
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });

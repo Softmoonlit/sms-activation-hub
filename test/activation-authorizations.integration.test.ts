@@ -4727,6 +4727,7 @@ if (!databaseUrl) {
       assert.match(byIdentifier.body, /没有符合条件的激活授权。/);
 
       // 搜索与状态筛选组合保留：忽略大小写仍与状态筛选组合生效
+      // 依赖前提：AAA 与 aaa 两条同批创建、未发生状态转移，均属待领取桶；改动状态流转时需同步此组合断言
       const combined = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=unclaimed&suffix=AAA`, headers: { cookie: session.cookie } });
       assert.deepEqual(new Set(listArticles(combined.body).map((article) => article.suffix)), equivalenceClass);
     } finally { await app.close(); }
