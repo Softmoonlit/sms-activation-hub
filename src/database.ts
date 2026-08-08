@@ -105,7 +105,7 @@ function completeDefaultCandidateLocationsFromRows(
 
 export class AuthorizationTokenSuffixCollisionError extends Error {
   constructor(readonly suffix: string) {
-    super(`授权链接末 8 位已存在：${suffix}`);
+    super(`授权链接末 3 位已存在：${suffix}`);
   }
 }
 
@@ -312,9 +312,9 @@ export class Database {
 
       ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_expires_at_check;
       ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_check;
+      -- 尾号缩短为末 3 位后不再施加长度 CHECK：新数据长度由 token.slice(-3) 单一写入点保证，
+      -- 历史 8 位尾号原样留存，与新 3 位在同一 token_suffix 列按整串唯一天然共存。
       ALTER TABLE activation_authorizations DROP CONSTRAINT IF EXISTS activation_authorizations_token_suffix_check;
-      ALTER TABLE activation_authorizations ADD CONSTRAINT activation_authorizations_token_suffix_check
-        CHECK (token_suffix IS NULL OR length(token_suffix) = 8);
 
       CREATE UNIQUE INDEX IF NOT EXISTS activation_authorizations_token_hash_idx
         ON activation_authorizations (token_hash)

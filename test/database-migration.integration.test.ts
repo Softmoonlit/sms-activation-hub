@@ -516,4 +516,67 @@ if (!databaseUrl) {
       await adminDatabase.close();
     }
   });
+
+  test('尾号长度 CHECK 已删除：新 3 位与历史 8 位后缀在同一唯一索引中按整串共存', async () => {
+    const schemaName = `token_suffix_3_${randomUUID().replaceAll('-', '')}`;
+    const adminDatabase = new Database(databaseUrl);
+    await adminDatabase.pool.query(`CREATE SCHEMA ${schemaName}`);
+
+    const scopedUrl = new URL(databaseUrl);
+    scopedUrl.searchParams.set('options', `-csearch_path=${schemaName}`);
+    const database = new Database(scopedUrl.toString());
+    const createdAt = new Date('2026-08-01T00:00:00.000Z');
+    const historicalId = randomUUID();
+
+    try {
+      await database.initialize();
+
+      // 模拟迁移前的旧库形态：8 位长度 CHECK 存在，且已留存一条 8 位尾号历史记录
+      await database.pool.query(`
+        ALTER TABLE activation_authorizations
+          ADD CONSTRAINT activation_authorizations_token_suffix_check
+          CHECK (token_suffix IS NULL OR length(token_suffix) = 8);
+      `);
+      await database.pool.query(
+        `INSERT INTO activation_authorizations (id, token_hash, token_suffix, status, created_at, last_activity_at)
+         VALUES ($1, 'historical-token-hash', 'HISTORY8', 'ended', $2, $2)`,
+        [historicalId, createdAt],
+      );
+
+      // 再次 initialize：长度 CHECK 被删除且不再重建，迁移应成功
+      await database.initialize();
+
+      const constraints = await database.pool.query<{ conname: string }>(
+        `SELECT conname FROM pg_constraint
+         WHERE conrelid = 'activation_authorizations'::regclass AND contype = 'c'`,
+      );
+      const constraintNames = constraints.rows.map((row) => row.conname);
+      assert.ok(!constraintNames.includes('activation_authorizations_token_suffix_check'), '长度 CHECK 应被删除且不再重建');
+
+      // 历史 8 位尾号原样留存、不被截断或迁移
+      const historical = await database.pool.query<{ token_suffix: string | null }>(
+        'SELECT token_suffix FROM activation_authorizations WHERE id = $1', [historicalId],
+      );
+      assert.equal(historical.rows[0]?.token_suffix, 'HISTORY8', '历史 8 位尾号应原样留存');
+
+      // 新 3 位尾号可写入，与历史 8 位在唯一索引中按整串共存
+      const batchIds = await database.createUnclaimedAuthorizationBatch([
+        { tokenHash: 'a'.repeat(64), tokenSuffix: 'NEW', createdAt },
+        { tokenHash: 'b'.repeat(64), tokenSuffix: 'ABc', createdAt },
+      ]);
+      assert.equal(batchIds.length, 2);
+
+      // 唯一索引仍按整串生效：重复 3 位后缀被拒
+      await assert.rejects(
+        database.createUnclaimedAuthorizationBatch([
+          { tokenHash: 'c'.repeat(64), tokenSuffix: 'NEW', createdAt },
+        ]),
+        (error: unknown) => error instanceof Error && error.message.includes('授权链接末 3 位已存在'),
+      );
+    } finally {
+      await database.close();
+      await adminDatabase.pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
+      await adminDatabase.close();
+    }
+  });
 }

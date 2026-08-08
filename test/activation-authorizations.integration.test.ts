@@ -103,8 +103,8 @@ async function createBatch(app: FastifyInstance, session: { cookie: string; csrf
 
 function authorizationIdFromHome(body: string, token: string): string {
   // 与 listArticles 共用同一卡片结构解析，避免两处正则各自漂移
-  const article = listArticles(body).find((item) => item.suffix === token.slice(-8));
-  assert.ok(article, `后台列表应包含链接末 8 位 ${token.slice(-8)}`);
+  const article = listArticles(body).find((item) => item.suffix === token.slice(-3));
+  assert.ok(article, `后台列表应包含链接末 3 位 ${token.slice(-3)}`);
   return article.id;
 }
 
@@ -244,11 +244,11 @@ if (!databaseUrl) {
         claimed_at: Date | null;
       }>(
         'SELECT token_hash, token_suffix, claimed_at FROM activation_authorizations WHERE token_suffix = ANY($1::text[])',
-        [links.map((link) => link.slice(-8))],
+        [links.map((link) => link.slice(-3))],
       );
       assert.equal(stored.rows.length, 10);
       assert.ok(stored.rows.every((row) => row.token_hash && row.token_suffix && row.claimed_at === null));
-      const candidates = await database.pool.query('SELECT 1 FROM authorization_candidate_countries WHERE authorization_id IN (SELECT id FROM activation_authorizations WHERE token_suffix = ANY($1::text[]))', [links.map((link) => link.slice(-8))]);
+      const candidates = await database.pool.query('SELECT 1 FROM authorization_candidate_countries WHERE authorization_id IN (SELECT id FROM activation_authorizations WHERE token_suffix = ANY($1::text[]))', [links.map((link) => link.slice(-3))]);
       assert.equal(candidates.rowCount, 0);
 
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
@@ -316,17 +316,17 @@ if (!databaseUrl) {
     }
   });
 
-  test('末 8 位碰撞时重新生成 token，批量写入仍保持唯一', async () => {
-    const collidingSuffix = 'COLLIDE1';
+  test('末 3 位碰撞时重新生成 token，批量写入仍保持唯一', async () => {
+    const collidingSuffix = 'COL';
     const tokens = [
-      `${'A'.repeat(35)}${collidingSuffix}`,
-      `${'B'.repeat(35)}${collidingSuffix}`,
-      `${'C'.repeat(35)}FRESH001`,
-      `${'D'.repeat(35)}FRESH002`,
+      `${'A'.repeat(40)}${collidingSuffix}`,
+      `${'B'.repeat(40)}${collidingSuffix}`,
+      `${'C'.repeat(40)}RE1`,
+      `${'D'.repeat(40)}RE2`,
     ];
     let index = 0;
     const { app, database } = await openApplication(scriptedHeroSms(), undefined, {
-      tokenGenerator: { generate: () => tokens[index++] ?? `${'E'.repeat(35)}FRESH003` },
+      tokenGenerator: { generate: () => tokens[index++] ?? `${'E'.repeat(40)}RE3` },
     });
     try {
       const session = await login(app);
@@ -336,7 +336,7 @@ if (!databaseUrl) {
       assert.equal(second.statusCode, 201);
       const links = [...second.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
       assert.equal(links.length, 2);
-      assert.equal(new Set(links.map((link) => link.slice(-8))).size, 2);
+      assert.equal(new Set(links.map((link) => link.slice(-3))).size, 2);
       assert.equal(index, 4, '碰撞应只重新生成发生碰撞的 token');
       const collisionRows = await database.pool.query<{ count: string }>('SELECT count(*)::text AS count FROM activation_authorizations WHERE token_suffix = $1', [collidingSuffix]);
       assert.equal(collisionRows.rows[0]?.count, '1');
@@ -388,7 +388,7 @@ if (!databaseUrl) {
         status: string; claimed_at: Date | null; number_acquisition_expires_at: Date | null;
       }>(
         'SELECT status, claimed_at, number_acquisition_expires_at FROM activation_authorizations WHERE token_suffix = $1',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(authorization.rows.length, 1);
       assert.equal(authorization.rows[0]?.status, 'in_progress');
@@ -402,7 +402,7 @@ if (!databaseUrl) {
          FROM authorization_candidate_countries
          WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
          ORDER BY position`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(candidates.rows, [
         { position: 1, country_id: 1, country_name: '美国', used_at: null },
@@ -428,7 +428,7 @@ if (!databaseUrl) {
       const retained = await database.pool.query<{ country_id: number; country_name: string }>(
         `SELECT country_id, country_name FROM authorization_candidate_countries
          WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1) ORDER BY position`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(retained.rows, [
         { country_id: 1, country_name: '美国' },
@@ -441,7 +441,7 @@ if (!databaseUrl) {
       assert.equal(expired.statusCode, 404);
       const expiredAuthorization = await database.pool.query<{ status: string; ended_reason: string | null; token_hash: string | null }>(
         'SELECT status, ended_reason, token_hash FROM activation_authorizations WHERE token_suffix = $1',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(expiredAuthorization.rows[0], { status: 'ended', ended_reason: 'acquisition_expired', token_hash: null });
     } finally {
@@ -494,13 +494,13 @@ if (!databaseUrl) {
          JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id
          WHERE auth.token_suffix = ANY($1::text[])
          GROUP BY auth.token_suffix`,
-        [tokens.map((token) => token.slice(-8))],
+        [tokens.map((token) => token.slice(-3))],
       );
       const copiedBySuffix = new Map(copied.rows.map((row) => [row.token_suffix, row]));
-      assert.deepEqual(copiedBySuffix.get(tokens[0]!.slice(-8))?.positions, [1, 2, 3, 4, 5, 6, 7, 8]);
-      assert.deepEqual(copiedBySuffix.get(tokens[0]!.slice(-8))?.country_ids, [1, 2, 3, 1, 2, 3, 1, 2]);
-      assert.deepEqual(copiedBySuffix.get(tokens[1]!.slice(-8))?.positions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-      assert.deepEqual(copiedBySuffix.get(tokens[1]!.slice(-8))?.country_ids, [2, 3, 1, 2, 3, 1, 2, 3, 1, 2]);
+      assert.deepEqual(copiedBySuffix.get(tokens[0]!.slice(-3))?.positions, [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.deepEqual(copiedBySuffix.get(tokens[0]!.slice(-3))?.country_ids, [1, 2, 3, 1, 2, 3, 1, 2]);
+      assert.deepEqual(copiedBySuffix.get(tokens[1]!.slice(-3))?.positions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      assert.deepEqual(copiedBySuffix.get(tokens[1]!.slice(-3))?.country_ids, [2, 3, 1, 2, 3, 1, 2, 3, 1, 2]);
     } finally {
       await cleanupBatchAuthorizations(database);
       await app.close();
@@ -538,14 +538,14 @@ if (!databaseUrl) {
         status: string; claimed_at: Date | null; number_acquisition_expires_at: Date | null;
       }>(
         'SELECT status, claimed_at, number_acquisition_expires_at FROM activation_authorizations WHERE token_suffix = $1',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(authorization.rows[0], {
         status: 'unclaimed', claimed_at: null, number_acquisition_expires_at: null,
       });
       const candidates = await database.pool.query(
         'SELECT 1 FROM authorization_candidate_countries WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(candidates.rowCount, 0);
 
@@ -569,7 +569,7 @@ if (!databaseUrl) {
          FROM activation_authorizations auth
          JOIN authorization_candidate_countries candidate ON candidate.authorization_id = auth.id
          WHERE auth.token_suffix = $1 ORDER BY candidate.position`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(afterRepair.rows, [
         { status: 'in_progress', country_name: '美国' },
@@ -614,7 +614,7 @@ if (!databaseUrl) {
         status: string; claimed_at: Date | null; number_acquisition_expires_at: Date | null;
       }>(
         'SELECT status, claimed_at, number_acquisition_expires_at FROM activation_authorizations WHERE token_suffix = $1',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual({
         status: authorization.rows[0]?.status,
@@ -626,12 +626,12 @@ if (!databaseUrl) {
       });
       const candidates = await database.pool.query<{ count: string }>(
         'SELECT count(*)::text AS count FROM authorization_candidate_countries WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(candidates.rows[0]?.count, '3');
       const activations = await database.pool.query<{ count: string }>(
         'SELECT count(*)::text AS count FROM supplier_activations WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(activations.rows[0]?.count, '1');
 
@@ -719,7 +719,7 @@ if (!databaseUrl) {
         `SELECT provider_activation_id, status FROM supplier_activations
          WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
          ORDER BY acquired_at`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(activations.rows, [
         { provider_activation_id: firstActivationId, status: 'cancelled' },
@@ -729,18 +729,18 @@ if (!databaseUrl) {
         `SELECT count(*) FILTER (WHERE used_at IS NOT NULL)::text AS used, count(*)::text AS total
          FROM authorization_candidate_countries
          WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(candidates.rows[0], { used: '2', total: '3' }, '并发换号恰好消耗两个候选位置');
       const activeCount = await database.pool.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM supplier_activations
          WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
            AND status IN ('acquisition_confirming', 'waiting_sms', 'cancellation_confirming', 'manual_reconciliation', 'sms_delivered', 'completion_confirming')`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(activeCount.rows[0]?.count, '1', '并发换号后仍只有一个当前激活');
       const authorization = await database.pool.query<{ status: string }>(
-        'SELECT status FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+        'SELECT status FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-3)],
       );
       assert.equal(authorization.rows[0]?.status, 'in_progress');
     } finally {
@@ -759,11 +759,11 @@ if (!databaseUrl) {
       assert.equal(created.statusCode, 201);
       const token = created.body.match(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/)?.[1];
       assert.ok(token);
-      const suffix = token.slice(-8);
+      const suffix = token.slice(-3);
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const id = authorizationIdFromHome(home.body, token);
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}`, headers: { cookie: session.cookie } });
-      assert.match(detail.body, new RegExp(`链接末 8 位：${suffix}`));
+      assert.match(detail.body, new RegExp(`链接末 3 位：${suffix}`));
       assert.match(detail.body, /授权状态：📋 待领取/);
       assert.match(detail.body, /创建时间/);
       assert.doesNotMatch(detail.body, /获取额度|候选地区|供应商激活|成本|新号码获取截止时间|结束原因|结束时间|领取时间/);
@@ -810,12 +810,12 @@ if (!databaseUrl) {
 
       const stored = await database.pool.query<{ token_hash: string; token_suffix: string; created_at: Date }>(
         'SELECT token_hash, token_suffix, created_at FROM activation_authorizations WHERE token_suffix = $1',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(stored.rows.length, 1);
       assert.notEqual(stored.rows[0]?.token_hash, token);
       assert.equal(stored.rows[0]?.token_hash.length, 64);
-      assert.equal(stored.rows[0]?.token_suffix, token.slice(-8));
+      assert.equal(stored.rows[0]?.token_suffix, token.slice(-3));
       assert.equal(stored.rows[0]?.created_at.toISOString(), fixedNow.toISOString());
 
       const firstGet = await app.inject({ method: 'GET', url: `/a/${token}` });
@@ -1233,7 +1233,7 @@ if (!databaseUrl) {
         `SELECT candidate.used_at FROM authorization_candidate_countries candidate
          JOIN activation_authorizations auth ON auth.id = candidate.authorization_id
          WHERE auth.token_suffix = $1 ORDER BY candidate.position`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(candidates.rows.map((candidate) => candidate.used_at), [null, null, null]);
     } finally { await app.close(); }
@@ -1453,7 +1453,7 @@ if (!databaseUrl) {
         `SELECT candidate.used_at FROM authorization_candidate_countries candidate
          JOIN activation_authorizations auth ON auth.id = candidate.authorization_id
          WHERE auth.token_suffix = $1 ORDER BY candidate.position`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(candidates.rows.map((candidate) => candidate.used_at !== null), [true, false, false]);
     } finally { await app.close(); }
@@ -1493,7 +1493,7 @@ if (!databaseUrl) {
         `SELECT count(*)::text AS count FROM authorization_candidate_countries
          WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
            AND used_at IS NOT NULL`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(unused.rows[0]?.count, '0');
 
@@ -1533,7 +1533,7 @@ if (!databaseUrl) {
           `SELECT count(*)::text AS count FROM authorization_candidate_countries
            WHERE authorization_id = (SELECT id FROM activation_authorizations WHERE token_suffix = $1)
              AND used_at IS NOT NULL`,
-          [token.slice(-8)],
+          [token.slice(-3)],
         );
         assert.equal(unused.rows[0]?.count, '0');
 
@@ -2851,7 +2851,7 @@ if (!databaseUrl) {
          FROM activation_authorizations auth
          JOIN supplier_activations activation ON activation.authorization_id = auth.id
          WHERE auth.token_suffix = $1`,
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.deepEqual(state.rows[0], { authorization_status: 'result_available', activation_count: '1', sms_code: '482913' });
     } finally {
@@ -3194,7 +3194,7 @@ if (!databaseUrl) {
       // 模拟修复部署前已经确认第三次超时、但授权仍错误停在“进行中”的数据。
       await database.pool.query(
         "UPDATE activation_authorizations SET status = 'in_progress' WHERE token_suffix = $1",
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
     } finally { await timedOut.close(); }
 
@@ -3508,7 +3508,7 @@ if (!databaseUrl) {
           `SELECT activation.status FROM supplier_activations activation
            JOIN activation_authorizations auth ON auth.id = activation.authorization_id
            WHERE auth.token_suffix = $1`,
-          [secondToken.slice(-8)],
+          [secondToken.slice(-3)],
         );
         if (activation.rows[0]?.status === 'cancelled') break;
         if (Date.now() - cancelConfirmedStartedAt > 5_000) throw new Error('第二个请求未完成取消确认');
@@ -3603,7 +3603,7 @@ if (!databaseUrl) {
 
       const state = await database.pool.query<{ status: string; ended_reason: string | null; token_hash: string | null }>(
         'SELECT status, ended_reason, token_hash FROM activation_authorizations WHERE token_suffix = $1',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(state.rows[0]?.status, 'ended');
       assert.equal(state.rows[0]?.ended_reason, 'acquisition_expired');
@@ -3884,7 +3884,7 @@ if (!databaseUrl) {
       assert.equal(cancelCalls, 0, '拒绝获取不得触发供应商取消');
       const preserved = await database.pool.query<{ status: string; token_hash: string | null }>(
         'SELECT status, token_hash FROM activation_authorizations WHERE token_suffix = $1',
-        [token.slice(-8)],
+        [token.slice(-3)],
       );
       assert.equal(preserved.rows[0]?.status, 'in_progress');
       assert.ok(preserved.rows[0]?.token_hash, '拒绝获取不得清理链接凭据');
@@ -4030,7 +4030,7 @@ if (!databaseUrl) {
       const confirmation = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id}/revoke`, headers: { cookie: session.cookie } });
       assert.equal(confirmation.statusCode, 200);
       assert.match(confirmation.body, /撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。/);
-      assert.match(confirmation.body, new RegExp(`链接末 8 位：${token.slice(-8)}`));
+      assert.match(confirmation.body, new RegExp(`链接末 3 位：${token.slice(-3)}`));
       assert.match(confirmation.body, /<strong>授权状态：<\/strong>进行中/);
       assert.match(confirmation.body, /<strong>当前激活状态：<\/strong>waiting_sms/);
       assert.match(confirmation.body, /<strong>当前地区：<\/strong>美国/);
@@ -4239,7 +4239,7 @@ if (!databaseUrl) {
       assert.equal(claimed.statusCode, 303);
 
       const authorization = await database.pool.query<{ id: string }>(
-        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-3)],
       );
       const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
       await database.pool.query(
@@ -4388,7 +4388,7 @@ if (!databaseUrl) {
       const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
       const token = links[0]!;
       const authorization = await database.pool.query<{ id: string }>(
-        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-3)],
       );
       const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
       await database.pool.query("UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'acquisition_expired', token_hash = NULL WHERE id = $1", [authorizationId, now]);
@@ -4469,7 +4469,7 @@ if (!databaseUrl) {
       const authorizationIds: string[] = [];
       for (const token of tokens) {
         const authorization = await database.pool.query<{ id: string }>(
-          'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+          'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-3)],
         );
         const id = authorization.rows[0]?.id;
         assert.ok(id);
@@ -4585,7 +4585,7 @@ if (!databaseUrl) {
         assert.equal(created.statusCode, 201);
         const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
         assert.equal(links.length, quantity);
-        const expectedSuffixes = new Set(links.map((link) => link.slice(-8)));
+        const expectedSuffixes = new Set(links.map((link) => link.slice(-3)));
         const totalPages = Math.ceil(quantity / 20);
         const lastPageSize = quantity % 20 === 0 ? 20 : quantity % 20;
 
@@ -4605,7 +4605,7 @@ if (!databaseUrl) {
 
         const seen = new Set<string>();
         for (const article of firstArticles) {
-          assert.match(article.suffix, /^[A-Za-z0-9_-]{8}$/);
+          assert.match(article.suffix, /^[A-Za-z0-9_-]{3}$/);
           assert.equal(article.status, '📋 待领取');
           assert.ok(expectedSuffixes.has(article.suffix));
           assert.ok(!seen.has(article.suffix), `后缀 ${article.suffix} 在分页中重复`);
@@ -4658,7 +4658,7 @@ if (!databaseUrl) {
         ['in_progress', links[0]!], ['result_available', links[1]!], ['ended', links[2]!],
       ];
       for (const [status, link] of transitions) {
-        const updated = await database.pool.query('UPDATE activation_authorizations SET status = $2 WHERE token_suffix = $1', [link.slice(-8), status]);
+        const updated = await database.pool.query('UPDATE activation_authorizations SET status = $2 WHERE token_suffix = $1', [link.slice(-3), status]);
         assert.equal(updated.rowCount, 1);
       }
 
@@ -4675,14 +4675,14 @@ if (!databaseUrl) {
         assert.ok(articles.every((article) => article.status === expectedStatusLabel), `状态 ${status} 应显示 ${expectedStatusLabel}`);
         assert.match(response.body, new RegExp(`<option value="${status}" selected>`));
       };
-      await assertFilter('unclaimed', [links[3]!.slice(-8)], '📋 待领取');
-      await assertFilter('in_progress', [links[0]!.slice(-8)], '🔄 进行中');
-      await assertFilter('result_available', [links[1]!.slice(-8)], '✅ 结果可查看');
-      await assertFilter('ended', [links[2]!.slice(-8)], '🏁 已结束');
+      await assertFilter('unclaimed', [links[3]!.slice(-3)], '📋 待领取');
+      await assertFilter('in_progress', [links[0]!.slice(-3)], '🔄 进行中');
+      await assertFilter('result_available', [links[1]!.slice(-3)], '✅ 结果可查看');
+      await assertFilter('ended', [links[2]!.slice(-3)], '🏁 已结束');
     } finally { await app.close(); }
   });
 
-  test('库存列表按末 8 位大小写敏感精确搜索，接收者标识不能命中', async () => {
+  test('库存列表按末 3 位大小写敏感精确搜索，接收者标识不能命中', async () => {
     const { app, database } = await openApplication();
     await resetAuthorizationTables(database);
     try {
@@ -4692,39 +4692,86 @@ if (!databaseUrl) {
       const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
       assert.equal(links.length, 3);
       // 改写后缀以精确控制大小写差异（Base64URL 实际字符，不做模糊匹配）
-      const suffixes = ['AAAA1111', 'aaaa1111', 'BBBB2222'];
+      const suffixes = ['AAA', 'aaa', 'BBB'];
       for (const [index, link] of links.entries()) {
-        const updated = await database.pool.query('UPDATE activation_authorizations SET token_suffix = $2 WHERE token_suffix = $1', [link.slice(-8), suffixes[index]!]);
+        const updated = await database.pool.query('UPDATE activation_authorizations SET token_suffix = $2 WHERE token_suffix = $1', [link.slice(-3), suffixes[index]!]);
         assert.equal(updated.rowCount, 1);
       }
 
       const search = async (suffix: string): Promise<InjectionResponse> =>
         app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${suffix}`, headers: { cookie: session.cookie } });
 
-      const upper = await search('AAAA1111');
+      const upper = await search('AAA');
       assert.equal(upper.statusCode, 200);
-      assert.deepEqual(listArticles(upper.body).map((article) => article.suffix), ['AAAA1111']);
+      assert.deepEqual(listArticles(upper.body).map((article) => article.suffix), ['AAA']);
 
       // 大小写敏感：小写变体命中不同记录，混合大小写命中不了任何记录
-      const lower = await search('aaaa1111');
-      assert.deepEqual(listArticles(lower.body).map((article) => article.suffix), ['aaaa1111']);
-      const mixedCase = await search('AAAa1111');
+      const lower = await search('aaa');
+      assert.deepEqual(listArticles(lower.body).map((article) => article.suffix), ['aaa']);
+      const mixedCase = await search('AaA');
       assert.equal(listArticles(mixedCase.body).length, 0);
       assert.match(mixedCase.body, /没有符合条件的激活授权。/);
 
-      const other = await search('BBBB2222');
-      assert.deepEqual(listArticles(other.body).map((article) => article.suffix), ['BBBB2222']);
+      const other = await search('BBB');
+      assert.deepEqual(listArticles(other.body).map((article) => article.suffix), ['BBB']);
 
-      // 其他文本标识不能命中末 8 位搜索
+      // 其他文本标识不能命中末 3 位搜索
       const individual = await createAuthorization(app, session);
       assert.equal(individual.statusCode, 201);
-      const byIdentifier = await search('ABCD1234');
+      const byIdentifier = await search('ZZZ');
       assert.equal(listArticles(byIdentifier.body).length, 0);
       assert.match(byIdentifier.body, /没有符合条件的激活授权。/);
 
       // 搜索与状态筛选组合保留
-      const combined = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=unclaimed&suffix=AAAA1111`, headers: { cookie: session.cookie } });
-      assert.deepEqual(listArticles(combined.body).map((article) => article.suffix), ['AAAA1111']);
+      const combined = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=unclaimed&suffix=AAA`, headers: { cookie: session.cookie } });
+      assert.deepEqual(listArticles(combined.body).map((article) => article.suffix), ['AAA']);
+    } finally { await app.close(); }
+  });
+
+  test('库存列表筛选长度放开：历史 8 位尾号仍精确命中，非法字符被拒不施加筛选', async () => {
+    const { app, database } = await openApplication();
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '2');
+      assert.equal(created.statusCode, 201);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 2);
+      // 模拟历史授权：8 位旧尾号原样留存（迁移不截断、不迁移），与新 3 位共存
+      const historicalSuffix = 'HISTORY8';
+      const updated = await database.pool.query(
+        'UPDATE activation_authorizations SET token_suffix = $2 WHERE token_suffix = $1',
+        [links[0]!.slice(-3), historicalSuffix],
+      );
+      assert.equal(updated.rowCount, 1);
+
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(home.statusCode, 200);
+      assert.deepEqual(
+        new Set(listArticles(home.body).map((article) => article.suffix)),
+        new Set([historicalSuffix, links[1]!.slice(-3)]),
+        '历史 8 位与新 3 位尾号应共存于列表',
+      );
+      // 筛选框不再限制固定长度，保留 base64url 字符集 pattern
+      assert.ok(home.body.includes('<label>链接末 3 位<input name="suffix"'), '筛选框标签应为链接末 3 位');
+      assert.ok(!home.body.includes('maxlength="8"'), '筛选输入框不应再有固定长度限制');
+      assert.ok(home.body.includes('pattern="[A-Za-z0-9_-]+"'), '筛选输入框应保留 base64url 字符集 pattern');
+
+      // 历史 8 位尾号按整串精确命中
+      const byHistorical = await app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${historicalSuffix}`, headers: { cookie: session.cookie } });
+      assert.equal(byHistorical.statusCode, 200);
+      assert.deepEqual(listArticles(byHistorical.body).map((article) => article.suffix), [historicalSuffix]);
+
+      // 新 3 位尾号按整串精确命中
+      const shortSuffix = links[1]!.slice(-3);
+      const byShort = await app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${shortSuffix}`, headers: { cookie: session.cookie } });
+      assert.deepEqual(listArticles(byShort.body).map((article) => article.suffix), [shortSuffix]);
+
+      // 非法（非 base64url）字符被拒不施加筛选：静默回退为不筛选，返回全部记录
+      const byIllegal = await app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${encodeURIComponent('AB C')}`, headers: { cookie: session.cookie } });
+      assert.equal(byIllegal.statusCode, 200);
+      assert.equal(listArticles(byIllegal.body).length, 2, '非法字符应被拒绝并回退为不施加筛选');
+      assert.match(byIllegal.body, /第 1 \/ 1 页/);
     } finally { await app.close(); }
   });
 
@@ -4738,7 +4785,7 @@ if (!databaseUrl) {
       assert.equal(created.statusCode, 201);
       const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
       assert.equal(links.length, 3);
-      const [oldest, middle, newest] = links.map((link) => link.slice(-8));
+      const [oldest, middle, newest] = links.map((link) => link.slice(-3));
       const base = new Date('2026-08-01T00:00:00.000Z');
       await database.pool.query('UPDATE activation_authorizations SET last_activity_at = $2 WHERE token_suffix = $1', [newest!, new Date(base.getTime() + 30 * 60 * 1000)]);
       await database.pool.query('UPDATE activation_authorizations SET last_activity_at = $2 WHERE token_suffix = $1', [middle!, new Date(base.getTime() + 20 * 60 * 1000)]);
@@ -4764,12 +4811,12 @@ if (!databaseUrl) {
       assert.equal(secondLinks.length, 3);
       const tie = new Date('2026-08-01T02:00:00.000Z');
       for (const link of secondLinks) {
-        await database.pool.query('UPDATE activation_authorizations SET last_activity_at = $2 WHERE token_suffix = $1', [link.slice(-8), tie]);
+        await database.pool.query('UPDATE activation_authorizations SET last_activity_at = $2 WHERE token_suffix = $1', [link.slice(-3), tie]);
       }
       const third = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const thirdSuffixes = listArticles(third.body).map((article) => article.suffix);
       assert.equal(thirdSuffixes.length, 6);
-      assert.deepEqual(new Set(thirdSuffixes.slice(0, 3)), new Set(secondLinks.map((link) => link.slice(-8))));
+      assert.deepEqual(new Set(thirdSuffixes.slice(0, 3)), new Set(secondLinks.map((link) => link.slice(-3))));
       assert.deepEqual(thirdSuffixes.slice(3), [newest, middle, oldest]);
       const fourth = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       assert.deepEqual(listArticles(fourth.body).map((article) => article.suffix), thirdSuffixes);
@@ -4790,7 +4837,7 @@ if (!databaseUrl) {
       const session = await login(app);
       const created = await createAuthorization(app, session);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      const idResult = await database.pool.query<{ id: string }>('SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)]);
+      const idResult = await database.pool.query<{ id: string }>('SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-3)]);
       const authorizationId = idResult.rows[0]?.id; assert.ok(authorizationId);
       const activityAt = async (): Promise<string> => {
         const result = await database.pool.query<{ last_activity_at: Date | null }>('SELECT last_activity_at FROM activation_authorizations WHERE id = $1', [authorizationId]);
@@ -4847,7 +4894,7 @@ if (!databaseUrl) {
       const created = await createBatch(app, session, '1');
       assert.equal(created.statusCode, 201);
       const token = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token);
-      const suffix = token.slice(-8);
+      const suffix = token.slice(-3);
       // 模拟旧模型撤销历史：没有保存后缀，也没有任何访问凭据
       const updated = await database.pool.query(
         "UPDATE activation_authorizations SET token_suffix = NULL, token_hash = NULL, status = 'ended', ended_at = $2, ended_reason = 'admin_revoked' WHERE token_suffix = $1",
@@ -4861,14 +4908,14 @@ if (!databaseUrl) {
       assert.equal(home.statusCode, 200);
       const articles = listArticles(home.body);
       assert.equal(articles.length, 1);
-      assert.equal(articles[0]?.suffix, '链接末 8 位未知', '不得伪造缺失的后缀');
+      assert.equal(articles[0]?.suffix, '链接末 3 位未知', '不得伪造缺失的后缀');
       assert.equal(articles[0]?.status, '🏁 已结束');
       assert.ok([...home.body.matchAll(/href="([^"]+)"/g)].every((match) => !match[1]!.includes('/a/')), '列表不得提供公开链接入口');
 
       // 详情页仍可打开，同样不伪造后缀
       const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
       assert.equal(detail.statusCode, 200);
-      assert.match(detail.body, /链接末 8 位：未知/);
+      assert.match(detail.body, /链接末 3 位：未知/);
       assert.match(detail.body, /授权状态：🏁 已结束（管理员撤销 · 08-01 08:00）/);
     } finally { await app.close(); }
   });
@@ -4889,13 +4936,13 @@ if (!databaseUrl) {
       const created = await createBatch(app, session, '1');
       assert.equal(created.statusCode, 201);
       const token1 = created.body.match(/\/a\/([A-Za-z0-9_-]{43})/)?.[1]; assert.ok(token1);
-      const suffix1 = token1.slice(-8);
+      const suffix1 = token1.slice(-3);
       const home1 = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       const id1 = authorizationIdFromHome(home1.body, token1);
 
       const detail1 = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${id1}`, headers: { cookie: session.cookie } });
       assert.equal(detail1.statusCode, 200);
-      assert.match(detail1.body, new RegExp(`链接末 8 位：${suffix1}`));
+      assert.match(detail1.body, new RegExp(`链接末 3 位：${suffix1}`));
       assert.match(detail1.body, /授权状态：📋 待领取/);
       assert.match(detail1.body, /创建时间/);
       assert.match(detail1.body, /撤销授权/);
@@ -5429,7 +5476,7 @@ if (!databaseUrl) {
       const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
       const token = links[0]!;
       const authorization = await database.pool.query<{ id: string }>(
-        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+        'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-3)],
       );
       const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
       await database.pool.query("UPDATE activation_authorizations SET status = 'ended', ended_at = $2, ended_reason = 'acquisition_expired', token_hash = NULL WHERE id = $1", [authorizationId, now]);
@@ -6203,7 +6250,7 @@ if (!databaseUrl) {
       statusCalls.length = 0;
       const session = await login(app);
       const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
-      const authorizationId = listArticles(home.body).find((article) => article.suffix === tokens[0]!.slice(-8))?.id;
+      const authorizationId = listArticles(home.body).find((article) => article.suffix === tokens[0]!.slice(-3))?.id;
       assert.ok(authorizationId);
       // 详情刷新（立即对账入口）在期限前不得处理未到期记录。
       await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${authorizationId}`, headers: { cookie: session.cookie } });
@@ -6217,7 +6264,7 @@ if (!databaseUrl) {
         [secondId],
       );
       statusCalls.length = 0;
-      const secondAuthorizationId = listArticles(home.body).find((article) => article.suffix === tokens[1]!.slice(-8))?.id;
+      const secondAuthorizationId = listArticles(home.body).find((article) => article.suffix === tokens[1]!.slice(-3))?.id;
       assert.ok(secondAuthorizationId);
       await post(app, session, `/${config.adminPath}/authorizations/${secondAuthorizationId}/revoke`, {});
       assert.deepEqual(statusCalls, [secondId], '撤销立即对账只处理已到期记录');

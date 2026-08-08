@@ -170,7 +170,7 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
   try {
     const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
     const token = await createAuthorization(app, cookie, csrf);
-    const suffix = token.slice(-8);
+    const suffix = token.slice(-3);
 
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
@@ -179,7 +179,7 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
       { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
     ]);
 
-    // 首页按链接末 8 位找到新建的授权
+    // 首页按链接末 3 位找到新建的授权
     await page.goto(`${origin}/${config.adminPath}`);
     const card = page.locator('article.authorization').filter({ hasText: suffix });
     await expect(card).toBeVisible();
@@ -198,7 +198,7 @@ test('桌面视口管理员可以查看授权详情页和撤销确认页', async
     // 进入撤销确认页
     await page.getByRole('link', { name: '撤销授权' }).click();
     await expect(page.locator('h1', { hasText: '确认撤销授权' })).toBeVisible();
-    await expect(page.getByText(`链接末 8 位：${suffix}`)).toBeVisible();
+    await expect(page.getByText(`链接末 3 位：${suffix}`)).toBeVisible();
     await expect(page.getByText('授权状态：')).toBeVisible();
     await expect(page.getByText('撤销后：')).toBeVisible();
     // 撤销确认框包含危险按钮
@@ -650,7 +650,7 @@ test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选�
     const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
     await resetAuthorizationTables(database);
     const links = await createBatch(app, cookie, csrf, '25');
-    const searchSuffix = links[0]!.slice(-8);
+    const searchSuffix = links[0]!.slice(-3);
 
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
@@ -689,7 +689,7 @@ test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选�
     await page.getByRole('link', { name: '上一页' }).click();
     await expect(page).toHaveURL(`${origin}/${config.adminPath}?status=unclaimed`);
 
-    // 末 8 位精确搜索（大小写敏感）与状态筛选组合
+    // 末 3 位精确搜索（大小写敏感）与状态筛选组合
     await page.locator('input[name="suffix"]').fill(searchSuffix);
     await page.getByRole('button', { name: '筛选' }).click();
     await expect(page).toHaveURL(`${origin}/${config.adminPath}?status=unclaimed&suffix=${searchSuffix}`);
@@ -757,7 +757,7 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
     ], 0.11);
     const links = await createBatch(app, cookie, csrf, '1');
     const token = links[0]!;
-    const suffix = token.slice(-8);
+    const suffix = token.slice(-3);
 
     // 1. 桌面视口 - 待领取详情导航与裁剪
     const desktopContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -769,7 +769,7 @@ test('桌面与移动视口管理员详情页：导航、待领取/领取后信�
     await desktopPage.goto(`${origin}/${config.adminPath}`);
     await desktopPage.locator('article.authorization').first().getByRole('link', { name: '查看详情' }).click();
     await expect(desktopPage.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
-    await expect(desktopPage.locator('h2', { hasText: `链接末 8 位：${suffix}` })).toBeVisible();
+    await expect(desktopPage.locator('h2', { hasText: `链接末 3 位：${suffix}` })).toBeVisible();
     await expect(desktopPage.getByText('授权状态：📋 待领取')).toBeVisible();
     await expect(desktopPage.getByText('创建时间：')).toBeVisible();
     await expect(desktopPage.getByRole('link', { name: '撤销授权' })).toBeVisible();
@@ -842,7 +842,7 @@ test('管理员详情供应商激活卡片显示接码耗时观测：成功号�
     const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
     const token = await createAuthorization(app, cookie, csrf);
     const authorization = await database.pool.query<{ id: string }>(
-      'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-8)],
+      'SELECT id FROM activation_authorizations WHERE token_suffix = $1', [token.slice(-3)],
     );
     const authorizationId = authorization.rows[0]?.id; assert.ok(authorizationId);
     const now = new Date('2026-08-10T00:00:00.000Z');

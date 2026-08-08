@@ -260,7 +260,9 @@ function parseAuthorizationListQuery(query: { page?: string; status?: string; su
   const status = ['unclaimed', 'in_progress', 'result_available', 'ended'].includes(query.status ?? '')
     ? query.status as AuthorizationListTopLevelStatus
     : undefined;
-  const suffix = /^[A-Za-z0-9_-]{8}$/.test(query.suffix ?? '') ? query.suffix : undefined;
+  // 尾号筛选不锁死固定长度：新授权为末 3 位，历史授权留存 8 位，两者均按整串精确等值匹配；
+  // 非法（非 base64url）字符被拒后静默回退为不施加筛选。
+  const suffix = /^[A-Za-z0-9_-]+$/.test(query.suffix ?? '') ? query.suffix : undefined;
   const page = /^\d+$/.test(query.page ?? '') ? Number(query.page) : undefined;
   return {
     ...(page !== undefined && Number.isSafeInteger(page) && page >= 1 ? { page } : {}),
@@ -280,16 +282,16 @@ function adminShell(path: string, csrfToken: string, listPage: AuthorizationList
     const encoded = params.toString();
     return encoded ? `?${encoded}` : '';
   };
-  const filters = `<form class="inventory-filters" method="get" action="/${path}"><label>状态<select name="status"><option value="">全部状态</option><option value="unclaimed"${listPage.status === 'unclaimed' ? ' selected' : ''}>待领取</option><option value="in_progress"${listPage.status === 'in_progress' ? ' selected' : ''}>进行中</option><option value="result_available"${listPage.status === 'result_available' ? ' selected' : ''}>结果可查看</option><option value="ended"${listPage.status === 'ended' ? ' selected' : ''}>已结束</option></select></label><label>链接末 8 位<input name="suffix" value="${escapeHtml(listPage.tokenSuffix ?? '')}" inputmode="text" maxlength="8" pattern="[A-Za-z0-9_-]{8}"></label><button type="submit">筛选</button></form>`;
+  const filters = `<form class="inventory-filters" method="get" action="/${path}"><label>状态<select name="status"><option value="">全部状态</option><option value="unclaimed"${listPage.status === 'unclaimed' ? ' selected' : ''}>待领取</option><option value="in_progress"${listPage.status === 'in_progress' ? ' selected' : ''}>进行中</option><option value="result_available"${listPage.status === 'result_available' ? ' selected' : ''}>结果可查看</option><option value="ended"${listPage.status === 'ended' ? ' selected' : ''}>已结束</option></select></label><label>链接末 3 位<input name="suffix" value="${escapeHtml(listPage.tokenSuffix ?? '')}" inputmode="text" pattern="[A-Za-z0-9_-]+"></label><button type="submit">筛选</button></form>`;
   const recent = listPage.items.length === 0
     ? `<p class="empty">${listPage.total === 0 && (listPage.status || listPage.tokenSuffix) ? '没有符合条件的激活授权。' : '尚未创建激活授权。'}</p>`
-    : `<div class="authorization-list">${listPage.items.map((authorization) => `<article class="authorization" data-authorization-id="${authorization.id}"><span class="authorization-suffix">${escapeHtml(authorization.tokenSuffix ?? '链接末 8 位未知')}</span><span class="authorization-status">${escapeHtml(authorizationStatusLabel(authorization.status))}</span><a class="authorization-detail" aria-label="查看详情" href="/${path}/authorizations/${authorization.id}">→</a></article>`).join('')}</div>`;
+    : `<div class="authorization-list">${listPage.items.map((authorization) => `<article class="authorization" data-authorization-id="${authorization.id}"><span class="authorization-suffix">${escapeHtml(authorization.tokenSuffix ?? '链接末 3 位未知')}</span><span class="authorization-status">${escapeHtml(authorizationStatusLabel(authorization.status))}</span><a class="authorization-detail" aria-label="查看详情" href="/${path}/authorizations/${authorization.id}">→</a></article>`).join('')}</div>`;
   const pagination = listPage.totalPages > 0
     ? `<nav class="pagination" aria-label="授权列表分页"><a class="pagination-previous${listPage.hasPreviousPage ? '' : ' disabled'}"${listPage.hasPreviousPage ? ` href="/${path}${listQuery({ page: listPage.page - 1 })}"` : ' aria-disabled="true"'}>上一页</a><span>第 ${listPage.page} / ${listPage.totalPages} 页</span><a class="pagination-next${listPage.hasNextPage ? '' : ' disabled'}"${listPage.hasNextPage ? ` href="/${path}${listQuery({ page: listPage.page + 1 })}"` : ' aria-disabled="true"'}>下一页</a></nav>`
     : '';
   const reconciliationMarkup = reconciliations.length === 0 ? '' : `<section class="card"><h2>号码获取对账</h2><p class="error">全局号码获取队列已暂停，处理完成后自动恢复。</p>${reconciliations.map((request) => {
     const candidates = request.candidates.map((candidate) => `<li>激活 ID ${escapeHtml(candidate.activationId)}${candidate.countryId !== undefined ? `，地区 ${candidate.countryId}` : ''}${candidate.activationTime ? `，时间 ${escapeHtml(formatDateTime(candidate.activationTime, currentDate))}` : ''}<form method="post" action="/${path}/acquisition-requests/${request.id}/candidates/${encodeURIComponent(candidate.activationId)}/link"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">关联此供应商激活</button></form></li>`).join('');
-    const recipient = `链接末 8 位：${request.tokenSuffix ?? '未知'}`;
+    const recipient = `链接末 3 位：${request.tokenSuffix ?? '未知'}`;
     return `<article class="authorization"><p><strong>${escapeHtml(recipient)}</strong> · ${request.status}</p><p>${escapeHtml(request.countryName)}，请求时间：${escapeHtml(formatDateTime(request.requestedAt, currentDate))}</p>${candidates ? `<ul>${candidates}</ul>` : '<p>当前没有可关联候选。</p>'}<form method="post" action="/${path}/acquisition-requests/${request.id}/reconcile"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">重新执行对账</button></form><form method="post" action="/${path}/acquisition-requests/${request.id}/confirm-absent"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认未产生激活</button></form></article>`;
   }).join('')}</section>`;
   const content = `<section class="dashboard">${errorMarkup}${reconciliationMarkup}<section class="card"><h2>批量创建激活授权链接</h2><p>一次可生成 1 至 50 条授权链接。</p><form class="batch-create-form" method="post" action="/${path}/authorizations/batch/preview"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">预览批量创建</button><label>创建数量<input name="quantity" type="number" min="1" max="50" step="1" value="10" required></label></form></section><section class="card inventory-card"><h2>最近激活授权</h2>${filters}${recent}${pagination}</section></section>`;
@@ -372,7 +374,7 @@ function authorizationDetailPage(path: string, csrfToken: string, detail: Author
 
   const revoke = detail.canRevoke ? `<p><a href="/${path}/authorizations/${detail.id}/revoke">撤销授权</a></p>` : '';
 
-  const identifierHeading = detail.tokenSuffix ? `链接末 8 位：${detail.tokenSuffix}` : '链接末 8 位：未知';
+  const identifierHeading = detail.tokenSuffix ? `链接末 3 位：${detail.tokenSuffix}` : '链接末 3 位：未知';
   // 头部卡片只保留授权状态、创建时间、领取时间（领取后）与撤销授权入口；
   // 领取期限可由领取时间加一天心算，获取额度由未消耗候选位置表达，均不再单独展示。
   const lifecycle = `<p>创建时间：${escapeHtml(formatDateTime(detail.createdAt, currentDate))}</p>${detail.claimedAt ? `<p>领取时间：${escapeHtml(formatDateTime(detail.claimedAt, currentDate))}</p>` : ''}`;
@@ -387,8 +389,8 @@ function authorizationRevocationConfirmationPage(path: string, csrfToken: string
     : detail.acquisition
       ? `<li><strong>当前地区：</strong>${escapeHtml(detail.acquisition.countryName)}</li><li><strong>当前激活状态：</strong>${detail.acquisition.status}</li>`
       : '<li><strong>当前激活状态：</strong>尚未获取号码</li>';
-  const identityLabel = '链接末 8 位';
-  const identityValue = detail.tokenSuffix ? `链接末 8 位：${detail.tokenSuffix}` : '链接末 8 位：未知';
+  const identityLabel = '链接末 3 位';
+  const identityValue = detail.tokenSuffix ? `链接末 3 位：${detail.tokenSuffix}` : '链接末 3 位：未知';
   const acquisitionCount = (detail.claimedAt || detail.candidates.length > 0) ? `<li><strong>已获取次数：</strong>${detail.acquisitionCount}</li>` : '';
   const content = `<section class="dashboard"><section class="card"><h2>确认撤销授权</h2><p class="error">撤销后此链接将立即失效，相关数据将被清理，此操作无法恢复。</p><ul class="summary"><li><strong>${identityLabel}：</strong>${escapeHtml(identityValue)}</li><li><strong>授权状态：</strong>${detail.status}</li>${activation}${acquisitionCount}<li><strong>撤销后：</strong>${escapeHtml(detail.revocationConsequence ?? '该激活授权已经不可撤销。')}</li></ul><form method="post" action="/${path}/authorizations/${detail.id}/revoke"><input type="hidden" name="csrf" value="${csrfToken}"><button class="danger" type="submit">确认撤销授权</button></form></section></section>`;
   return adminPage('确认撤销授权', '确认撤销授权', path, csrfToken, `/${path}/authorizations/${detail.id}`, '返回详情', content);

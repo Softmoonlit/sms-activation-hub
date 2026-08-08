@@ -370,13 +370,13 @@ export class ActivationAuthorizations {
       try {
         const ids = await this.database.createUnclaimedAuthorizationBatch(tokens.map((token) => ({
           tokenHash: tokenHash(token),
-          tokenSuffix: token.slice(-8),
+          tokenSuffix: token.slice(-3),
           createdAt,
         })));
-        return ids.map((id, index) => ({ id, token: tokens[index]!, tokenSuffix: tokens[index]!.slice(-8) }));
+        return ids.map((id, index) => ({ id, token: tokens[index]!, tokenSuffix: tokens[index]!.slice(-3) }));
       } catch (error) {
         if (error instanceof AuthorizationTokenSuffixCollisionError) {
-          const index = tokens.findIndex((token) => token.slice(-8) === error.suffix);
+          const index = tokens.findIndex((token) => token.slice(-3) === error.suffix);
           if (index < 0) throw error;
           tokens[index] = generatedToken(this.tokenGenerator);
           continue;
