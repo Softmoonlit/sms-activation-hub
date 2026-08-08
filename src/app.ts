@@ -667,8 +667,13 @@ function setAdminListFilterCookie(reply: FastifyReply, status: AuthorizationList
       httpOnly: true,
     });
   } else {
-    reply.clearCookie(ADMIN_LIST_FILTER_COOKIE, { path: '/' });
+    clearAdminListFilterCookie(reply);
   }
+}
+
+// 清除状态筛选记忆：无状态列表请求写回、退出登录与重新登录（清除残留旧记忆）共用。
+function clearAdminListFilterCookie(reply: FastifyReply): void {
+  reply.clearCookie(ADMIN_LIST_FILTER_COOKIE, { path: '/' });
 }
 
 export interface AppDependencies {
@@ -1044,7 +1049,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
       }
       cookiesForSession(reply, session.id, session.csrfToken);
       // 新登录会话从默认列表开始：清除残留的状态筛选记忆（含上一会话作废后遗留在浏览器里的旧记忆）。
-      reply.clearCookie(ADMIN_LIST_FILTER_COOKIE, { path: '/' });
+      clearAdminListFilterCookie(reply);
       return reply.redirect(adminRoot, 303);
     } catch (error) {
       if (error instanceof LoginRateLimitedError) {
@@ -1284,7 +1289,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await authentication.revokeSession(session.id);
     reply.clearCookie(ADMIN_COOKIE, { path: '/' });
     reply.clearCookie(CSRF_COOKIE, { path: '/' });
-    reply.clearCookie(ADMIN_LIST_FILTER_COOKIE, { path: '/' });
+    clearAdminListFilterCookie(reply);
     return reply.redirect(adminRoot, 303);
   });
 

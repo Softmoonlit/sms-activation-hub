@@ -4811,6 +4811,9 @@ if (!databaseUrl) {
       assert.equal(cookieValue(withParam, 'admin_list_filter'), 'in_progress');
       assert.deepEqual(listArticles(withParam.body).map((article) => article.suffix), [links[0]!.slice(-3)]);
       assert.match(withParam.body, /<option value="in_progress" selected>/);
+      const filterMaxAge = withParam.cookies.find((cookie) => cookie.name === 'admin_list_filter')?.maxAge;
+      const sessionMaxAge = withParam.cookies.find((cookie) => cookie.name === 'admin_session')?.maxAge;
+      assert.equal(filterMaxAge, sessionMaxAge, '记忆 cookie 过期语义应与登录会话 cookie 一致');
 
       // 无参数访问（模拟"返回首页"）按记忆渲染：列表按记忆筛选、下拉框选中记忆值
       const reenter = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: `${session.cookie}; admin_list_filter=in_progress` } });
@@ -4835,6 +4838,15 @@ if (!databaseUrl) {
       assert.deepEqual(listArticles(override.body).map((article) => article.suffix), [links[2]!.slice(-3)]);
       assert.match(override.body, /<option value="ended" selected>/);
       assert.equal(cookieValue(override, 'admin_list_filter'), 'ended');
+
+      // 非法 URL 状态值：URL 存在则按 URL 为准，解析失败回退为不施加筛选并清除记忆（与提交"全部状态"同语义）
+      const bogus = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=bogus`, headers: { cookie: `${session.cookie}; admin_list_filter=in_progress` } });
+      assert.equal(bogus.statusCode, 200);
+      assert.equal(listArticles(bogus.body).length, 4, '非法 URL 状态值应回退为不施加筛选');
+      assert.doesNotMatch(bogus.body, /<option value="[^"]+" selected>/, '非法 URL 状态值下拉框应回显全部状态');
+      assert.equal(memoryFilterCookie(bogus), '', '非法 URL 状态值应以清除重写记忆');
+      const afterBogus = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(listArticles(afterBogus.body).length, 4, '非法 URL 状态值清除记忆后无参数访问回到默认列表');
 
       // 提交"全部状态"（表单产生的 ?status=）→ 记忆清除，随后无参数访问回到默认全部列表
       const clear = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=&suffix=`, headers: { cookie: `${session.cookie}; admin_list_filter=ended` } });
