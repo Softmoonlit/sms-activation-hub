@@ -209,7 +209,7 @@ function htmlPage(title: string, content: string): string {
     .country { font-weight: 600; font-size: 16px; margin: 0 0 12px; color: #17202a; }
     .country .calling-code { color: #53616c; font-size: 13px; font-weight: 500; }
     .number { margin: 12px 0; color: #17202a; font-size: clamp(28px, 8vw, 40px); font-weight: 700; letter-spacing: .02em; overflow-wrap: anywhere; }
-    .number-expiry, .result-view-expiry { color: #53616c; font-size: 14px; margin: 12px 0 0; }
+    .number-expiry { color: #53616c; font-size: 14px; margin: 12px 0 0; }
     .quota-info { color: #53616c; font-size: 14px; margin: 0 0 4px; font-weight: 500; }
     .action-prompt { color: #53616c; font-size: 14px; margin: 0 0 8px; line-height: 1.55; overflow-wrap: anywhere; }
     .facts { display: grid; gap: 10px; margin: 20px 0; padding: 0; list-style: none; color: #53616c; }
