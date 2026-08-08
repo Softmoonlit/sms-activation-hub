@@ -2719,7 +2719,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('第三个号码满两分钟后显示结束使用，确认结束后进入两分钟额度提示且不获取第四个号码', async () => {
+  test('第三个号码满两分钟后显示结束使用，确认结束后进入额度用尽提示且链接保持可用至领取期限', async () => {
     let now = new Date('2026-08-12T06:00:00.000Z');
     const activationIds = [0, 1, 2].map(() => randomUUID());
     let getNumberCalls = 0;
@@ -2773,7 +2773,7 @@ if (!databaseUrl) {
 
       const prompt = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(prompt.body, /可用号码次数已用尽，请联系发送者/);
-      assert.doesNotMatch(prompt.body, /1415555015|美国|更换号码|结束使用|获取下一个号码/);
+      assert.doesNotMatch(prompt.body, /1415555015|美国|更换号码|结束使用|获取下一个号码|提示结束时间/);
       const state = await database.pool.query<{ status: string; ended_reason: string | null; end_prompt_until: Date | null; token_hash: string | null; phone_number: string | null }>(
         `SELECT auth.status, auth.ended_reason, auth.end_prompt_until, auth.token_hash, activation.phone_number
          FROM activation_authorizations auth JOIN supplier_activations activation ON activation.authorization_id = auth.id
@@ -2782,13 +2782,15 @@ if (!databaseUrl) {
       );
       assert.equal(state.rows[0]?.status, 'ended');
       assert.equal(state.rows[0]?.ended_reason, 'quota_exhausted');
-      assert.equal(state.rows[0]?.end_prompt_until?.toISOString(), '2026-08-12T06:08:00.000Z');
-      assert.ok(state.rows[0]?.token_hash);
+      assert.equal(state.rows[0]?.end_prompt_until, null, '配额用尽不再写入独立提示到期时间');
+      assert.ok(state.rows[0]?.token_hash, '配额用尽保留 token，链接持续可用');
       assert.equal(state.rows[0]?.phone_number, null);
 
-      now = new Date('2026-08-12T06:07:59.999Z');
-      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 200);
+      // 统一失效规则：不再有独立的提示期限，链接持续可用至领取期限（领取 + 24 小时）。
       now = new Date('2026-08-12T06:08:00.000Z');
+      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 200);
+      assert.match((await app.inject({ method: 'GET', url: `/a/${token}` })).body, /可用号码次数已用尽，请联系发送者/);
+      now = new Date('2026-08-13T06:00:00.000Z');
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
       const cleared = await database.pool.query<{ token_hash: string | null }>(
         'SELECT token_hash FROM activation_authorizations WHERE id = (SELECT authorization_id FROM supplier_activations WHERE provider_activation_id = $1)',
@@ -3609,7 +3611,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('第三个号码跨过领取截止后结束使用，仍以获取额度用尽结束并提供两分钟提示且不获取第四个号码', async () => {
+  test('第三个号码跨过领取截止后结束使用，仍以获取额度用尽结束但链接立即失效且不获取第四个号码', async () => {
     let now = new Date('2026-08-01T00:00:00.000Z');
     const activationIds = [0, 1, 2].map(() => randomUUID());
     let getNumberCalls = 0;
@@ -3646,33 +3648,23 @@ if (!databaseUrl) {
       assert.match(page.body, /结束使用/);
       assert.doesNotMatch(page.body, /更换号码|获取下一个号码/);
       const ended = await app.inject({ method: 'POST', url: `/a/${token}/replacement/confirm`, headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: 'replacement=confirm' });
-      assert.equal(ended.statusCode, 303);
+      // 领取期限（08-02 00:00）先于结束使用到达：统一失效规则下链接已不可访问，确认后立即失效。
+      assert.equal(ended.statusCode, 404);
       assert.equal(cancelCalls, 3);
       assert.equal(getNumberCalls, 3, '领取截止后的结束使用绝不能获取第四个号码');
 
-      const prompt = await app.inject({ method: 'GET', url: `/a/${token}` });
-      assert.match(prompt.body, /可用号码次数已用尽，请联系发送者/);
-      assert.doesNotMatch(prompt.body, /1415555015|美国|更换号码|结束使用|获取下一个号码/);
-      const state = await database.pool.query<{ status: string; ended_reason: string | null; end_prompt_until: Date | null; token_hash: string | null }>(
-        `SELECT auth.status, auth.ended_reason, auth.end_prompt_until, auth.token_hash
+      // 领取期限（08-02 00:00）先于结束使用到达：统一失效规则下链接立即不可访问，不再有独立提示期。
+      const gone = await app.inject({ method: 'GET', url: `/a/${token}` });
+      assert.equal(gone.statusCode, 404);
+      const state = await database.pool.query<{ status: string; ended_reason: string | null; token_hash: string | null }>(
+        `SELECT auth.status, auth.ended_reason, auth.token_hash
          FROM activation_authorizations auth JOIN supplier_activations activation ON activation.authorization_id = auth.id
          WHERE activation.provider_activation_id = $1`,
         [activationIds[2]],
       );
       assert.equal(state.rows[0]?.status, 'ended');
       assert.equal(state.rows[0]?.ended_reason, 'quota_exhausted');
-      assert.equal(state.rows[0]?.end_prompt_until?.toISOString(), '2026-08-02T00:07:00.000Z');
-      assert.ok(state.rows[0]?.token_hash);
-
-      now = new Date('2026-08-02T00:06:59.999Z');
-      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 200);
-      now = new Date('2026-08-02T00:07:00.000Z');
-      assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 404);
-      const cleared = await database.pool.query<{ token_hash: string | null }>(
-        'SELECT token_hash FROM activation_authorizations WHERE id = (SELECT authorization_id FROM supplier_activations WHERE provider_activation_id = $1)',
-        [activationIds[2]],
-      );
-      assert.deepEqual(cleared.rows[0], { token_hash: null });
+      assert.equal(state.rows[0]?.token_hash, null, '领取期限已过，过期收尾同步清除 token');
     } finally { await app.close(); }
   });
 

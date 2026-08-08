@@ -464,11 +464,6 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   if (view.state === 'available') {
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${firstFlowHint}${errorMarkup}${acquisitionForm()}</section></main>`);
   }
-  if (view.state === 'claimed' && view.quotaExhaustedPromptUntil) {
-    const promptUntil = view.quotaExhaustedPromptUntil.toISOString();
-    const refreshDelay = Math.max(1_000, Math.ceil(view.quotaExhaustedPromptUntil.getTime() - Date.now()));
-    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>可用号码次数已用尽，请联系发送者</p><ul class="facts"><li>提示结束时间：<span data-countdown="${escapeHtml(promptUntil)}" data-format="minutes-seconds">${escapeHtml(promptUntil)}</span></li></ul></section></main>${countdownScript}<script>setTimeout(()=>location.reload(),${refreshDelay});</script>`);
-  }
   if (view.state === 'claimed' && view.currentNumberActionInProgress) {
     const action = view.currentNumberActionInProgress === 'end' ? '正在结束使用' : '正在更换号码';
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>${action}</p></section></main><script>setTimeout(()=>location.reload(),5000)</script>`);

@@ -460,12 +460,11 @@ export class Database {
         WHERE status = 'timed_out' AND timeout_final_status_confirmed_at IS NULL;
 
       -- 旧运行时版本可能在三个候选位置都消耗且最后激活已超时后留下 in_progress 中间态；
-      -- 收缩模型下收敛为已结束并记录额度用尽原因，提示窗口期内仍保留 token。
+      -- 收缩模型下收敛为已结束并记录额度用尽原因，token 保留至领取期限由过期任务统一清除。
       UPDATE activation_authorizations auth
         SET status = 'ended',
             ended_reason = COALESCE(ended_reason, 'quota_exhausted'),
             ended_at = COALESCE(ended_at, now()),
-            end_prompt_until = COALESCE(end_prompt_until, now() + INTERVAL '2 minutes'),
             last_activity_at = now()
         WHERE auth.status = 'in_progress'
           AND NOT EXISTS (
@@ -826,7 +825,10 @@ export class Database {
         `SELECT id FROM activation_authorizations
          WHERE number_acquisition_expires_at IS NOT NULL
            AND number_acquisition_expires_at <= $1
-           AND status IN ('in_progress', 'result_available')
+           AND (
+             status IN ('in_progress', 'result_available')
+             OR (status = 'ended' AND ended_reason = 'quota_exhausted')
+           )
            AND NOT (
              status = 'in_progress' AND EXISTS (
                SELECT 1 FROM supplier_activations activation
@@ -854,7 +856,10 @@ export class Database {
              ended_reason = COALESCE(ended_reason, 'acquisition_expired'),
              token_hash = NULL, last_activity_at = $2
          WHERE id = ANY($1::uuid[])
-           AND status IN ('in_progress', 'result_available')
+           AND (
+             status IN ('in_progress', 'result_available')
+             OR (status = 'ended' AND ended_reason = 'quota_exhausted')
+           )
            AND NOT (
              status = 'in_progress' AND EXISTS (
                SELECT 1 FROM supplier_activations activation
@@ -893,7 +898,10 @@ export class Database {
            token_hash = NULL, last_activity_at = $2
        WHERE id = $1 AND number_acquisition_expires_at IS NOT NULL
          AND number_acquisition_expires_at <= $2
-         AND status IN ('in_progress', 'result_available')
+         AND (
+           status IN ('in_progress', 'result_available')
+           OR (status = 'ended' AND ended_reason = 'quota_exhausted')
+         )
          AND NOT (
            status = 'in_progress' AND EXISTS (
              SELECT 1 FROM supplier_activations activation
