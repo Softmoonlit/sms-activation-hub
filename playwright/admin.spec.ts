@@ -650,7 +650,8 @@ test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选�
     const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
     await resetAuthorizationTables(database);
     const links = await createBatch(app, cookie, csrf, '25');
-    const searchSuffix = links[0]!.slice(-3);
+    // 挑选含字母的尾号作为搜索目标，保证可构造出与原串不同的大小写变体
+    const searchSuffix = links.map((link) => link.slice(-3)).find((suffix) => /[A-Za-z]/.test(suffix)) ?? links[0]!.slice(-3);
 
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
@@ -691,10 +692,14 @@ test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选�
     await page.getByRole('link', { name: '上一页' }).click();
     await expect(page).toHaveURL(`${origin}/${config.adminPath}?status=unclaimed`);
 
-    // 末 3 位精确搜索（大小写敏感）与状态筛选组合
-    await page.locator('input[name="suffix"]').fill(searchSuffix);
+    // 末 3 位精确搜索（忽略大小写）与状态筛选组合：混合大小写变体输入命中同一条
+    const mixedCaseSuffix = searchSuffix.replace(/[A-Za-z]/g, (char) => (char === char.toUpperCase() ? char.toLowerCase() : char.toUpperCase()));
+    assert.ok(mixedCaseSuffix !== searchSuffix, '翻转大小写后应不同于原尾号');
+    await page.locator('input[name="suffix"]').fill(mixedCaseSuffix);
     await page.getByRole('button', { name: '筛选' }).click();
-    await expect(page).toHaveURL(`${origin}/${config.adminPath}?status=unclaimed&suffix=${searchSuffix}`);
+    await expect(page).toHaveURL(`${origin}/${config.adminPath}?status=unclaimed&suffix=${mixedCaseSuffix}`);
+    // 筛选框回显用户输入原样（不做大小写归一化）
+    await expect(page.locator('input[name="suffix"]')).toHaveValue(mixedCaseSuffix);
     await expect(page.locator('article.authorization')).toHaveCount(1);
     await expect(page.locator('.authorization-suffix')).toHaveText(searchSuffix);
 

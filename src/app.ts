@@ -261,7 +261,7 @@ function parseAuthorizationListQuery(query: { page?: string; status?: string; su
   const status = ['unclaimed', 'in_progress', 'result_available', 'ended'].includes(query.status ?? '')
     ? query.status as AuthorizationListTopLevelStatus
     : undefined;
-  // 尾号筛选不锁死固定长度：新授权为末 3 位，历史授权留存 8 位，两者均按整串精确等值匹配；
+  // 尾号筛选不锁死固定长度：新授权为末 3 位，历史授权留存 8 位，两者均按整串精确等值匹配（忽略大小写）；
   // 非法（非 base64url）字符被拒后静默回退为不施加筛选。
   const suffix = /^[A-Za-z0-9_-]+$/.test(query.suffix ?? '') ? query.suffix : undefined;
   const page = /^\d+$/.test(query.page ?? '') ? Number(query.page) : undefined;

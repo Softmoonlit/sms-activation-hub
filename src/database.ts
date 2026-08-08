@@ -770,7 +770,9 @@ export class Database {
     };
 
     if (status) where.push(`auth.status = ANY(${addValue(AUTHORIZATION_LIST_STATUS_BUCKETS[status])})`);
-    if (tokenSuffix) where.push(`auth.token_suffix = ${addValue(tokenSuffix)}`);
+    // 尾号筛选忽略大小写：列值与输入值同时归一化后整串等值比较，命中该尾号的全部大小写变体；
+    // 匹配语义仍是完整尾号相符，不做 LIKE/模糊匹配，查询保持参数化。
+    if (tokenSuffix) where.push(`LOWER(auth.token_suffix) = LOWER(${addValue(tokenSuffix)})`);
     const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
 
     const countResult = await this.pool.query<{ count: string }>(

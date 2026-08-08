@@ -4683,7 +4683,7 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
-  test('库存列表按末 3 位大小写敏感精确搜索，接收者标识不能命中', async () => {
+  test('库存列表按末 3 位忽略大小写精确搜索，部分匹配与接收者标识不能命中', async () => {
     const { app, database } = await openApplication();
     await resetAuthorizationTables(database);
     try {
@@ -4698,23 +4698,26 @@ if (!databaseUrl) {
         const updated = await database.pool.query('UPDATE activation_authorizations SET token_suffix = $2 WHERE token_suffix = $1', [link.slice(-3), suffixes[index]!]);
         assert.equal(updated.rowCount, 1);
       }
+      // AAA 与 aaa 属同一大小写等价类，列表按最近活动倒序，用集合断言命中集合一致
+      const equivalenceClass = new Set(['AAA', 'aaa']);
 
       const search = async (suffix: string): Promise<InjectionResponse> =>
         app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${suffix}`, headers: { cookie: session.cookie } });
 
-      const upper = await search('AAA');
-      assert.equal(upper.statusCode, 200);
-      assert.deepEqual(listArticles(upper.body).map((article) => article.suffix), ['AAA']);
-
-      // 大小写敏感：小写变体命中不同记录，混合大小写命中不了任何记录
-      const lower = await search('aaa');
-      assert.deepEqual(listArticles(lower.body).map((article) => article.suffix), ['aaa']);
-      const mixedCase = await search('AaA');
-      assert.equal(listArticles(mixedCase.body).length, 0);
-      assert.match(mixedCase.body, /没有符合条件的激活授权。/);
+      // 忽略大小写：同一尾号的任意大小写形态（大写、小写、混合）命中同一等价类
+      for (const variant of ['AAA', 'aaa', 'AaA']) {
+        const response = await search(variant);
+        assert.equal(response.statusCode, 200);
+        assert.deepEqual(new Set(listArticles(response.body).map((article) => article.suffix)), equivalenceClass, `输入 ${variant} 应命中全部大小写变体`);
+      }
 
       const other = await search('BBB');
       assert.deepEqual(listArticles(other.body).map((article) => article.suffix), ['BBB']);
+
+      // 部分匹配（只输前几位）与不存在的尾号仍命中 0 条并显示空状态
+      const partial = await search('AA');
+      assert.equal(listArticles(partial.body).length, 0);
+      assert.match(partial.body, /没有符合条件的激活授权。/);
 
       // 其他文本标识不能命中末 3 位搜索
       const individual = await createAuthorization(app, session);
@@ -4723,9 +4726,9 @@ if (!databaseUrl) {
       assert.equal(listArticles(byIdentifier.body).length, 0);
       assert.match(byIdentifier.body, /没有符合条件的激活授权。/);
 
-      // 搜索与状态筛选组合保留
+      // 搜索与状态筛选组合保留：忽略大小写仍与状态筛选组合生效
       const combined = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=unclaimed&suffix=AAA`, headers: { cookie: session.cookie } });
-      assert.deepEqual(listArticles(combined.body).map((article) => article.suffix), ['AAA']);
+      assert.deepEqual(new Set(listArticles(combined.body).map((article) => article.suffix)), equivalenceClass);
     } finally { await app.close(); }
   });
 
@@ -4762,6 +4765,10 @@ if (!databaseUrl) {
       const byHistorical = await app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${historicalSuffix}`, headers: { cookie: session.cookie } });
       assert.equal(byHistorical.statusCode, 200);
       assert.deepEqual(listArticles(byHistorical.body).map((article) => article.suffix), [historicalSuffix]);
+
+      // 历史 8 位尾号同样忽略大小写：小写变体命中原样记录
+      const byHistoricalLower = await app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${historicalSuffix.toLowerCase()}`, headers: { cookie: session.cookie } });
+      assert.deepEqual(listArticles(byHistoricalLower.body).map((article) => article.suffix), [historicalSuffix]);
 
       // 新 3 位尾号按整串精确命中
       const shortSuffix = links[1]!.slice(-3);
