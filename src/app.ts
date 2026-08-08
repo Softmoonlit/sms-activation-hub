@@ -19,6 +19,9 @@ import { escapeHtml } from './html.js';
 
 const ADMIN_COOKIE = 'admin_session';
 const CSRF_COOKIE = 'admin_csrf';
+// 状态筛选记忆：明文记录管理后台列表最近一次生效的状态筛选（unclaimed/in_progress/result_available/ended），
+// 空值或缺失即无记忆；随管理员登录会话存活，登录成功与退出登录时清除，只作用于后台根路径列表页。
+const ADMIN_LIST_FILTER_COOKIE = 'admin_list_filter';
 const HEROSMS_COMPATIBILITY_URL = 'https://hero-sms.com/stubs/handler_api.php';
 
 interface LoginBody {
@@ -257,10 +260,17 @@ function adminPage(title: string, heading: string, path: string, csrfToken: stri
   return htmlPage(title, `<main class="shell"><header><nav><a href="${navigationPath}">${navLabelWithIcon(navigationLabel)}</a></nav><h1>${headingWithIcon(heading)}</h1><form method="post" action="/${path}/logout"><input type="hidden" name="csrf" value="${csrfToken}"><button type="submit">退出登录</button></form></header>${content}</main>`);
 }
 
-function parseAuthorizationListQuery(query: { page?: string; status?: string; suffix?: string }): AuthorizationListQuery {
-  const status = ['unclaimed', 'in_progress', 'result_available', 'ended'].includes(query.status ?? '')
-    ? query.status as AuthorizationListTopLevelStatus
+function parseStatusFilter(value: string | undefined): AuthorizationListTopLevelStatus | undefined {
+  return ['unclaimed', 'in_progress', 'result_available', 'ended'].includes(value ?? '')
+    ? value as AuthorizationListTopLevelStatus
     : undefined;
+}
+
+// 状态筛选记忆合并规则：URL 的 status 参数存在（含空值）→ 以 URL 值为准并写回记忆；
+// status 参数缺失 → 采用记忆值；非法值一律静默回退为不施加筛选。
+// 返回的查询中的 status 即合并后的生效状态（undefined 表示全部状态，记忆应被清除）。
+function parseAuthorizationListQuery(query: { page?: string; status?: string; suffix?: string }, rememberedStatus: string | undefined): AuthorizationListQuery {
+  const status = query.status !== undefined ? parseStatusFilter(query.status) : parseStatusFilter(rememberedStatus);
   // 尾号筛选不锁死固定长度：新授权为末 3 位，历史授权留存 8 位，两者均按整串精确等值匹配（忽略大小写）；
   // 非法（非 base64url）字符被拒后静默回退为不施加筛选。
   const suffix = /^[A-Za-z0-9_-]+$/.test(query.suffix ?? '') ? query.suffix : undefined;
@@ -630,21 +640,35 @@ function setLoginCsrf(reply: FastifyReply, csrfToken: string): void {
   });
 }
 
+// 随管理员登录会话存活的 cookie 共同属性（过期语义与 admin_session 一致）；仅 httpOnly 因用途而异。
+const SESSION_SCOPED_COOKIE_OPTIONS = {
+  maxAge: ADMIN_SESSION_MAX_AGE_SECONDS,
+  path: '/',
+  sameSite: 'strict',
+  secure: true,
+} as const;
+
 function cookiesForSession(reply: FastifyReply, sessionId: string, csrfToken: string): void {
   reply.setCookie(ADMIN_COOKIE, sessionId, {
+    ...SESSION_SCOPED_COOKIE_OPTIONS,
     httpOnly: true,
-    maxAge: ADMIN_SESSION_MAX_AGE_SECONDS,
-    path: '/',
-    sameSite: 'strict',
-    secure: true,
   });
   reply.setCookie(CSRF_COOKIE, csrfToken, {
+    ...SESSION_SCOPED_COOKIE_OPTIONS,
     httpOnly: false,
-    maxAge: ADMIN_SESSION_MAX_AGE_SECONDS,
-    path: '/',
-    sameSite: 'strict',
-    secure: true,
   });
+}
+
+// 状态筛选记忆写回：有生效状态则随会话过期语义重写 cookie，无状态（全部状态）则清除记忆。
+function setAdminListFilterCookie(reply: FastifyReply, status: AuthorizationListTopLevelStatus | undefined): void {
+  if (status) {
+    reply.setCookie(ADMIN_LIST_FILTER_COOKIE, status, {
+      ...SESSION_SCOPED_COOKIE_OPTIONS,
+      httpOnly: true,
+    });
+  } else {
+    reply.clearCookie(ADMIN_LIST_FILTER_COOKIE, { path: '/' });
+  }
 }
 
 export interface AppDependencies {
@@ -966,10 +990,12 @@ export async function createApp(config: AppConfig, database = new Database(confi
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     if (session) {
       cookiesForSession(reply, session.id, session.csrfToken);
+      const listQuery = parseAuthorizationListQuery(request.query, request.cookies[ADMIN_LIST_FILTER_COOKIE]);
+      setAdminListFilterCookie(reply, listQuery.status);
       return reply.type('text/html; charset=utf-8').send(adminShell(
         config.adminPath,
         session.csrfToken,
-        await activationAuthorizations.list(parseAuthorizationListQuery(request.query)),
+        await activationAuthorizations.list(listQuery),
         undefined,
         await activationAuthorizations.listAcquisitionReconciliations(),
         dependencies.now?.() ?? new Date(),
@@ -1017,6 +1043,8 @@ export async function createApp(config: AppConfig, database = new Database(confi
         return loginFailure(reply, config.adminPath, 401, '密码或请求无效。');
       }
       cookiesForSession(reply, session.id, session.csrfToken);
+      // 新登录会话从默认列表开始：清除残留的状态筛选记忆（含上一会话作废后遗留在浏览器里的旧记忆）。
+      reply.clearCookie(ADMIN_LIST_FILTER_COOKIE, { path: '/' });
       return reply.redirect(adminRoot, 303);
     } catch (error) {
       if (error instanceof LoginRateLimitedError) {
@@ -1256,6 +1284,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await authentication.revokeSession(session.id);
     reply.clearCookie(ADMIN_COOKIE, { path: '/' });
     reply.clearCookie(CSRF_COOKIE, { path: '/' });
+    reply.clearCookie(ADMIN_LIST_FILTER_COOKIE, { path: '/' });
     return reply.redirect(adminRoot, 303);
   });
 

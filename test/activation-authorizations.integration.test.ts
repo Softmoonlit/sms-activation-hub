@@ -4783,6 +4783,157 @@ if (!databaseUrl) {
     } finally { await app.close(); }
   });
 
+  /** 响应中状态筛选记忆 cookie 的值：已被清除（空值）返回空串，未出现返回 undefined。 */
+  function memoryFilterCookie(response: InjectionResponse): string | undefined {
+    return response.cookies.find((cookie) => cookie.name === 'admin_list_filter')?.value;
+  }
+
+  test('管理后台状态筛选按登录会话记忆：带参写回、无参回放、URL 优先并同步、全部状态清除', async () => {
+    const { app, database } = await openApplication();
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '4');
+      assert.equal(created.statusCode, 201);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 4);
+      const transitions: Array<[string, string]> = [
+        ['in_progress', links[0]!], ['result_available', links[1]!], ['ended', links[2]!],
+      ];
+      for (const [status, link] of transitions) {
+        const updated = await database.pool.query('UPDATE activation_authorizations SET status = $2 WHERE token_suffix = $1', [link.slice(-3), status]);
+        assert.equal(updated.rowCount, 1);
+      }
+
+      // 带状态参数访问写回记忆 cookie（此时尚无记忆）
+      const withParam = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=in_progress`, headers: { cookie: session.cookie } });
+      assert.equal(withParam.statusCode, 200);
+      assert.equal(cookieValue(withParam, 'admin_list_filter'), 'in_progress');
+      assert.deepEqual(listArticles(withParam.body).map((article) => article.suffix), [links[0]!.slice(-3)]);
+      assert.match(withParam.body, /<option value="in_progress" selected>/);
+
+      // 无参数访问（模拟"返回首页"）按记忆渲染：列表按记忆筛选、下拉框选中记忆值
+      const reenter = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: `${session.cookie}; admin_list_filter=in_progress` } });
+      assert.equal(reenter.statusCode, 200);
+      assert.deepEqual(listArticles(reenter.body).map((article) => article.suffix), [links[0]!.slice(-3)]);
+      assert.match(reenter.body, /<option value="in_progress" selected>/);
+      assert.equal(cookieValue(reenter, 'admin_list_filter'), 'in_progress', '无参数访问也以最终生效值重写记忆');
+
+      // 记忆只作用于列表页：带记忆访问详情页与设置页不读写记忆 cookie
+      const firstArticle = listArticles(reenter.body)[0]!;
+      const detail = await app.inject({ method: 'GET', url: `/${config.adminPath}/authorizations/${firstArticle.id}`, headers: { cookie: `${session.cookie}; admin_list_filter=in_progress` } });
+      assert.equal(detail.statusCode, 200);
+      assert.equal(memoryFilterCookie(detail), undefined, '详情页不应写入状态筛选记忆');
+      const settings = await app.inject({ method: 'GET', url: `/${config.adminPath}/settings`, headers: { cookie: `${session.cookie}; admin_list_filter=in_progress` } });
+      assert.equal(settings.statusCode, 200);
+      assert.equal(memoryFilterCookie(settings), undefined, '设置页不应写入状态筛选记忆');
+
+      // URL 参数优先并同步记忆：记忆为 in_progress 时带 ?status=ended 访问 → 显示已结束且 cookie 更新；
+      // 该场景同时覆盖"筛选后直接刷新页面（F5）"——URL 带参且记忆已存在时以 URL 为准，结果不变
+      const override = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=ended`, headers: { cookie: `${session.cookie}; admin_list_filter=in_progress` } });
+      assert.equal(override.statusCode, 200);
+      assert.deepEqual(listArticles(override.body).map((article) => article.suffix), [links[2]!.slice(-3)]);
+      assert.match(override.body, /<option value="ended" selected>/);
+      assert.equal(cookieValue(override, 'admin_list_filter'), 'ended');
+
+      // 提交"全部状态"（表单产生的 ?status=）→ 记忆清除，随后无参数访问回到默认全部列表
+      const clear = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=&suffix=`, headers: { cookie: `${session.cookie}; admin_list_filter=ended` } });
+      assert.equal(clear.statusCode, 200);
+      assert.equal(memoryFilterCookie(clear), '', '提交全部状态应清除记忆 cookie');
+      assert.equal(listArticles(clear.body).length, 4);
+      assert.doesNotMatch(clear.body, /<option value="[^"]+" selected>/, '下拉框应回显全部状态');
+
+      const afterClear = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(listArticles(afterClear.body).length, 4, '记忆清除后无参数访问回到默认全部列表');
+      assert.doesNotMatch(afterClear.body, /<option value="[^"]+" selected>/);
+    } finally { await app.close(); }
+  });
+
+  test('管理后台状态筛选记忆：非法记忆静默回退，尾号与页码不参与记忆', async () => {
+    const { app, database } = await openApplication();
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      // 25 条全部置为进行中，构造两页分页供页码断言
+      const created = await createBatch(app, session, '25');
+      assert.equal(created.statusCode, 201);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 25);
+      await database.pool.query("UPDATE activation_authorizations SET status = 'in_progress'");
+
+      // 手工篡改 cookie 为非法值 → 静默回退为不施加筛选，无异常，且重写为清除
+      const tampered = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: `${session.cookie}; admin_list_filter=garbage` } });
+      assert.equal(tampered.statusCode, 200);
+      assert.equal(listArticles(tampered.body).length, 20, '非法记忆值应回退为不施加筛选');
+      assert.match(tampered.body, /第 1 \/ 2 页/);
+      assert.doesNotMatch(tampered.body, /<option value="[^"]+" selected>/);
+      assert.equal(memoryFilterCookie(tampered), '', '非法记忆值应以清除重写');
+
+      // 页码不记忆：带 page=2 访问只记状态，无参数访问回到第 1 页；翻页链接仍携带状态筛选
+      const pageTwo = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=in_progress&page=2`, headers: { cookie: session.cookie } });
+      assert.equal(pageTwo.statusCode, 200);
+      assert.equal(listArticles(pageTwo.body).length, 5);
+      assert.match(pageTwo.body, /第 2 \/ 2 页/);
+      assert.equal(cookieValue(pageTwo, 'admin_list_filter'), 'in_progress', '记忆只含状态，不含页码');
+      const backHome = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: `${session.cookie}; admin_list_filter=in_progress` } });
+      assert.equal(listArticles(backHome.body).length, 20, '回到列表从第 1 页开始');
+      assert.match(backHome.body, /第 1 \/ 2 页/);
+      assert.match(backHome.body, new RegExp(`href="/${config.adminPath}\\?page=2&status=in_progress"`), '翻页链接仍携带当前状态筛选条件');
+
+      // 尾号不参与记忆：带 suffix 访问后无参数访问不再应用该尾号
+      const target = links[0]!.slice(-3);
+      const bySuffix = await app.inject({ method: 'GET', url: `/${config.adminPath}?suffix=${target}`, headers: { cookie: session.cookie } });
+      assert.equal(bySuffix.statusCode, 200);
+      assert.deepEqual(listArticles(bySuffix.body).map((article) => article.suffix), [target]);
+      const afterSuffix = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
+      assert.equal(listArticles(afterSuffix.body).length, 20, '尾号筛选不应被记忆');
+      assert.match(afterSuffix.body, /第 1 \/ 2 页/);
+    } finally { await app.close(); }
+  });
+
+  test('管理后台状态筛选记忆随会话：退出登录清除，会话作废残留与重新登录均从默认开始', async () => {
+    const { app, database } = await openApplication();
+    await resetAuthorizationTables(database);
+    try {
+      const session = await login(app);
+      const created = await createBatch(app, session, '3');
+      assert.equal(created.statusCode, 201);
+      const links = [...created.body.matchAll(/https:\/\/test\.example\/a\/([A-Za-z0-9_-]{43})/g)].map((match) => match[1]);
+      assert.equal(links.length, 3);
+      await database.pool.query('UPDATE activation_authorizations SET status = $2 WHERE token_suffix = $1', [links[0]!.slice(-3), 'ended']);
+
+      // 筛选"已结束"后退出登录 → 记忆 cookie 被删除
+      const remembered = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=ended`, headers: { cookie: session.cookie } });
+      assert.equal(cookieValue(remembered, 'admin_list_filter'), 'ended');
+      const loggedOut = await post(app, session, `/${config.adminPath}/logout`, {});
+      assert.equal(loggedOut.statusCode, 303);
+      assert.equal(memoryFilterCookie(loggedOut), '', '退出登录应清除状态筛选记忆');
+
+      // 会话作废后浏览器残留旧记忆 cookie：旧会话已失效，重新登录时同样被清除
+      const second = await login(app);
+      await database.pool.query('UPDATE activation_authorizations SET status = $2 WHERE token_suffix = $1', [links[0]!.slice(-3), 'ended']);
+      const rememberedAgain = await app.inject({ method: 'GET', url: `/${config.adminPath}?status=ended`, headers: { cookie: second.cookie } });
+      assert.equal(cookieValue(rememberedAgain, 'admin_list_filter'), 'ended');
+      const secondSessionId = second.cookie.match(/admin_session=([^;]+)/)?.[1];
+      assert.ok(secondSessionId);
+      await database.pool.query("UPDATE admin_sessions SET expires_at = now() - interval '1 second' WHERE id = $1", [secondSessionId]);
+      const stale = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: `${second.cookie}; admin_list_filter=ended` } });
+      assert.match(stale.body, /管理员登录/);
+
+      // 重新登录成功 → 记忆清除，无参数访问显示默认全部列表、下拉框选中"全部状态"
+      const page = await app.inject({ method: 'GET', url: `/${config.adminPath}` });
+      assert.match(page.body, /管理员登录/);
+      const fresh = await post(app, { cookie: `admin_csrf=${cookieValue(page, 'admin_csrf')}`, csrf: csrfValue(page.body) }, `/${config.adminPath}/login`, { password: config.adminPassword });
+      assert.equal(fresh.statusCode, 303);
+      assert.equal(memoryFilterCookie(fresh), '', '重新登录应清除残留记忆');
+      const freshCookie = `admin_session=${cookieValue(fresh, 'admin_session')}; admin_csrf=${cookieValue(fresh, 'admin_csrf')}`;
+      const home = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: freshCookie } });
+      assert.equal(home.statusCode, 200);
+      assert.equal(listArticles(home.body).length, 3, '重新登录后从默认全部列表开始');
+      assert.doesNotMatch(home.body, /<option value="[^"]+" selected>/, '下拉框应回显全部状态');
+    } finally { await app.close(); }
+  });
+
   test('库存列表按最近活动倒序与稳定次级排序，只读详情不重排', async () => {
     const now = new Date('2026-08-01T00:00:00.000Z');
     const { app, database } = await openApplication(scriptedHeroSms(), () => now);

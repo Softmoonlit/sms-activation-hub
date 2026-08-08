@@ -715,6 +715,56 @@ test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选�
   }
 });
 
+test('桌面视口状态筛选记忆：筛选进行中→详情→返回首页保持筛选→提交全部状态解除', async ({ browser }) => {
+  const database = new Database(databaseUrl!);
+  const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
+  await app.listen({ host: '127.0.0.1', port: 32124 });
+  try {
+    const { cookie, csrf, sessionValue, csrfValue } = await adminLogin(app);
+    await resetAuthorizationTables(database);
+    const links = await createBatch(app, cookie, csrf, '5');
+    // 其中两条改写为进行中，作为筛选目标
+    const inProgressSuffixes = links.slice(0, 2).map((link) => link.slice(-3));
+    const updated = await database.pool.query('UPDATE activation_authorizations SET status = $2 WHERE token_suffix = ANY($1::text[])', [inProgressSuffixes, 'in_progress']);
+    assert.equal(updated.rowCount, 2);
+
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const page = await context.newPage();
+    await context.addCookies([
+      { name: 'admin_session', value: sessionValue, domain: '127.0.0.1', path: '/' },
+      { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
+    ]);
+
+    // 初始无记忆：默认全部列表
+    await page.goto(`${origin}/${config.adminPath}`);
+    await expect(page.locator('article.authorization')).toHaveCount(5);
+
+    // 筛选"进行中"后点进一条详情
+    await page.locator('select[name="status"]').selectOption('in_progress');
+    await page.getByRole('button', { name: '筛选' }).click();
+    await expect(page.locator('article.authorization')).toHaveCount(2);
+    await page.locator('article.authorization').first().getByRole('link', { name: '查看详情' }).click();
+    await expect(page.locator('h1', { hasText: '激活授权详情' })).toBeVisible();
+
+    // 点"返回首页"→ 列表仍按"进行中"筛选且下拉框选中"进行中"
+    await page.getByRole('link', { name: '返回首页' }).click();
+    await expect(page).toHaveURL(`${origin}/${config.adminPath}`);
+    await expect(page.locator('article.authorization')).toHaveCount(2);
+    await expect(page.locator('select[name="status"]')).toHaveValue('in_progress');
+    await expect(page.locator('article.authorization .authorization-status').first()).toHaveText('🔄 进行中');
+
+    // 提交"全部状态"→ 回到默认列表、下拉框选中"全部状态"
+    await page.locator('select[name="status"]').selectOption('');
+    await page.getByRole('button', { name: '筛选' }).click();
+    await expect(page.locator('article.authorization')).toHaveCount(5);
+    await expect(page.locator('select[name="status"]')).toHaveValue('');
+
+    await context.close();
+  } finally {
+    await app.close();
+  }
+});
+
 test('移动视口库存列表 20 条紧凑卡片不重叠、箭头固定尺寸且无横向溢出', async ({ browser }) => {
   const database = new Database(databaseUrl!);
   const app = await createApp(config, database, { heroSms, now: () => new Date('2026-08-01T00:00:00.000Z') });
