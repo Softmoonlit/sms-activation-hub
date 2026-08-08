@@ -23,6 +23,8 @@ export interface AuthorizationListRecord {
   id: string;
   tokenSuffix?: string;
   status: '待领取' | '进行中' | '结果可查看' | '已结束';
+  /** 最近活动时间：SQL 内取 COALESCE(last_activity_at, created_at)，与列表主排序键同源。 */
+  lastActiveAt: Date;
 }
 
 export interface AuthorizationListPage {
@@ -782,9 +784,9 @@ export class Database {
     const offsetValue = addValue(offset);
     const limitValue = addValue(AUTHORIZATION_LIST_PAGE_SIZE);
     const result = await this.pool.query<{
-      id: string; token_suffix: string | null; status: AuthorizationStatus;
+      id: string; token_suffix: string | null; status: AuthorizationStatus; last_active_at: Date;
     }>(
-      `SELECT auth.id, auth.token_suffix, auth.status
+      `SELECT auth.id, auth.token_suffix, auth.status, COALESCE(auth.last_activity_at, auth.created_at) AS last_active_at
        FROM activation_authorizations auth
        ${whereClause}
        ORDER BY COALESCE(auth.last_activity_at, auth.created_at) DESC, auth.created_at DESC, auth.id DESC
@@ -796,6 +798,7 @@ export class Database {
       id: row.id,
       ...(row.token_suffix !== null ? { tokenSuffix: row.token_suffix } : {}),
       status: AUTHORIZATION_LIST_STATUS_LABELS[topLevelStatusOf(row.status)],
+      lastActiveAt: row.last_active_at,
     }));
     return {
       items,

@@ -125,13 +125,13 @@ async function cleanupBatchAuthorizations(database: Database): Promise<void> {
   });
 }
 
-interface ListArticle { id: string; suffix: string; status: string; }
+interface ListArticle { id: string; suffix: string; status: string; time: string; }
 function listArticles(body: string): ListArticle[] {
   const articles: ListArticle[] = [];
   for (const match of body.matchAll(
-    /<article class="authorization" data-authorization-id="([0-9a-f-]{36})"><span class="authorization-suffix">([\s\S]*?)<\/span><span class="authorization-status">([\s\S]*?)<\/span><a class="authorization-detail"[^>]*>→<\/a><\/article>/g,
+    /<article class="authorization" data-authorization-id="([0-9a-f-]{36})"><span class="authorization-suffix">([\s\S]*?)<\/span><span class="authorization-status">([\s\S]*?)<\/span><span class="authorization-time">([\s\S]*?)<\/span><a class="authorization-detail"[^>]*>→<\/a><\/article>/g,
   )) {
-    articles.push({ id: match[1]!, suffix: match[2]!, status: match[3]! });
+    articles.push({ id: match[1]!, suffix: match[2]!, status: match[3]!, time: match[4]! });
   }
   return articles;
 }
@@ -4607,6 +4607,7 @@ if (!databaseUrl) {
         for (const article of firstArticles) {
           assert.match(article.suffix, /^[A-Za-z0-9_-]{3}$/);
           assert.equal(article.status, '📋 待领取');
+          assert.match(article.time, /^\d{2}-\d{2} \d{2}:\d{2}$/, `列表行应显示当年 MM-DD HH:mm 最新时间，实际 ${article.time}`);
           assert.ok(expectedSuffixes.has(article.suffix));
           assert.ok(!seen.has(article.suffix), `后缀 ${article.suffix} 在分页中重复`);
           seen.add(article.suffix);
@@ -4793,7 +4794,15 @@ if (!databaseUrl) {
 
       const first = await app.inject({ method: 'GET', url: `/${config.adminPath}`, headers: { cookie: session.cookie } });
       assert.equal(first.statusCode, 200);
-      assert.deepEqual(listArticles(first.body).map((article) => article.suffix), [newest, middle, oldest]);
+      const firstArticles = listArticles(first.body);
+      assert.deepEqual(firstArticles.map((article) => article.suffix), [newest, middle, oldest]);
+      // 行内最新时间与排序键完全同源：newest/middle 取最近活动时间，oldest 无活动记录回退到创建时间；
+      // 北京时间、当年 MM-DD HH:mm（base 为 08-01 00:00 UTC，即北京时间 08-01 08:00）
+      assert.deepEqual(
+        firstArticles.map((article) => article.time),
+        ['08-01 08:30', '08-01 08:20', '08-01 08:00'],
+        '每行最新时间应取 COALESCE(last_activity_at, created_at) 并按排序先后递减',
+      );
 
       // 读取只读详情不得重排列表，也不得推进活动时间
       const oldestArticle = listArticles(first.body).find((article) => article.suffix === oldest); assert.ok(oldestArticle);

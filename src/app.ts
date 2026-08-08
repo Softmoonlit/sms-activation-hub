@@ -192,15 +192,16 @@ function htmlPage(title: string, content: string): string {
     .card form.batch-create-form button { margin: 0; min-height: 40px; }
     .card form.batch-create-form label { gap: 6px; }
     .authorization-list { display: grid; gap: 0; }
-    .authorization-list .authorization { box-sizing: border-box; min-height: 56px; display: grid; grid-template-columns: minmax(0, 1fr) auto 40px; align-items: center; gap: 16px; padding: 8px 0; }
+    .authorization-list .authorization { box-sizing: border-box; min-height: 56px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto 40px; align-items: center; gap: 16px; padding: 8px 0; }
     .authorization-suffix { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
     .authorization-status { white-space: nowrap; color: #53616c; font-size: 14px; }
+    .authorization-time { white-space: nowrap; color: #53616c; font-size: 14px; font-variant-numeric: tabular-nums; }
     .authorization-detail { box-sizing: border-box; width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; color: #0f6655; background: #edf3f1; font-size: 24px; line-height: 1; text-decoration: none; }
     .authorization-detail:hover { background: #dcebe6; }
     .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 18px; font-size: 14px; }
     .pagination a { min-width: 72px; height: 36px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; color: #0f6655; background: #edf3f1; text-decoration: none; }
     .pagination a.disabled { color: #9daab2; background: #f0f2f3; pointer-events: none; }
-    @media (max-width: 600px) { .shell { width: min(calc(100% - 32px), 1000px); } .inventory-filters { gap: 8px; } .authorization-list .authorization { gap: 8px; grid-template-columns: minmax(0, 1fr) auto 40px; } .authorization-status { font-size: 13px; } .pagination { gap: 8px; } }
+    @media (max-width: 600px) { .shell { width: min(calc(100% - 32px), 1000px); } .inventory-filters { gap: 8px; } .authorization-list .authorization { gap: 8px; grid-template-columns: minmax(0, 1fr) auto auto 40px; } .authorization-status { font-size: 13px; } .authorization-time { font-size: 13px; } .pagination { gap: 8px; } }
     .danger { background: #a12424; }
     .token { overflow-wrap: anywhere; padding: 12px; background: #edf3f1; border-radius: 4px; }
     .recipient { width: min(calc(100% - 32px), 520px); }
@@ -285,7 +286,7 @@ function adminShell(path: string, csrfToken: string, listPage: AuthorizationList
   const filters = `<form class="inventory-filters" method="get" action="/${path}"><label>状态<select name="status"><option value="">全部状态</option><option value="unclaimed"${listPage.status === 'unclaimed' ? ' selected' : ''}>待领取</option><option value="in_progress"${listPage.status === 'in_progress' ? ' selected' : ''}>进行中</option><option value="result_available"${listPage.status === 'result_available' ? ' selected' : ''}>结果可查看</option><option value="ended"${listPage.status === 'ended' ? ' selected' : ''}>已结束</option></select></label><label>链接末 3 位<input name="suffix" value="${escapeHtml(listPage.tokenSuffix ?? '')}" inputmode="text" pattern="[A-Za-z0-9_-]+"></label><button type="submit">筛选</button></form>`;
   const recent = listPage.items.length === 0
     ? `<p class="empty">${listPage.total === 0 && (listPage.status || listPage.tokenSuffix) ? '没有符合条件的激活授权。' : '尚未创建激活授权。'}</p>`
-    : `<div class="authorization-list">${listPage.items.map((authorization) => `<article class="authorization" data-authorization-id="${authorization.id}"><span class="authorization-suffix">${escapeHtml(authorization.tokenSuffix ?? '链接末 3 位未知')}</span><span class="authorization-status">${escapeHtml(authorizationStatusLabel(authorization.status))}</span><a class="authorization-detail" aria-label="查看详情" href="/${path}/authorizations/${authorization.id}">→</a></article>`).join('')}</div>`;
+    : `<div class="authorization-list">${listPage.items.map((authorization) => `<article class="authorization" data-authorization-id="${authorization.id}"><span class="authorization-suffix">${escapeHtml(authorization.tokenSuffix ?? '链接末 3 位未知')}</span><span class="authorization-status">${escapeHtml(authorizationStatusLabel(authorization.status))}</span><span class="authorization-time">${escapeHtml(formatDateTime(authorization.lastActiveAt, currentDate))}</span><a class="authorization-detail" aria-label="查看详情" href="/${path}/authorizations/${authorization.id}">→</a></article>`).join('')}</div>`;
   const pagination = listPage.totalPages > 0
     ? `<nav class="pagination" aria-label="授权列表分页"><a class="pagination-previous${listPage.hasPreviousPage ? '' : ' disabled'}"${listPage.hasPreviousPage ? ` href="/${path}${listQuery({ page: listPage.page - 1 })}"` : ' aria-disabled="true"'}>上一页</a><span>第 ${listPage.page} / ${listPage.totalPages} 页</span><a class="pagination-next${listPage.hasNextPage ? '' : ' disabled'}"${listPage.hasNextPage ? ` href="/${path}${listQuery({ page: listPage.page + 1 })}"` : ' aria-disabled="true"'}>下一页</a></nav>`
     : '';

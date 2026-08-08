@@ -659,11 +659,13 @@ test('桌面视口管理员库存列表：紧凑卡片、分页、状态筛选�
       { name: 'admin_csrf', value: csrfValue, domain: '127.0.0.1', path: '/' },
     ]);
 
-    // 首页每页恰好 20 条，卡片只含后缀、状态与箭头
+    // 首页每页恰好 20 条，卡片只含后缀、状态、最新时间与箭头
     await page.goto(`${origin}/${config.adminPath}`);
     await expect(page.locator('article.authorization')).toHaveCount(20);
     await expect(page.locator('article.authorization .authorization-suffix').first()).toBeVisible();
     await expect(page.locator('article.authorization .authorization-status').first()).toHaveText('📋 待领取');
+    await expect(page.locator('article.authorization .authorization-time').first()).toBeVisible();
+    await expect(page.locator('article.authorization .authorization-time').first()).toHaveText('08-01 08:00');
     await expect(page.locator('article.authorization .authorization-detail').first()).toBeVisible();
     await expect(page.getByText('第 1 / 2 页')).toBeVisible();
     await assertNoOverflow(page, '库存列表第一页');
