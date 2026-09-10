@@ -1814,9 +1814,8 @@ if (!databaseUrl) {
 
       const page = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(page.statusCode, 200);
-      assert.match(page.body, /美国 <span class="calling-code">\(\+1\)<\/span>|415 555 0123|复制号码/);
-      assert.match(page.body, /使用说明|482913|复制验证码/);
-      assert.doesNotMatch(page.body, /剩余号码获取额度|已收到验证码|更换号码|结束使用|可换号时间|可结束时间|正在监听短信验证码|验证码可查看至/);
+      assert.match(page.body, /482913|复制验证码/);
+      assert.doesNotMatch(page.body, /415 555 0123|复制号码|使用说明|剩余号码获取额度|已收到验证码|更换号码|结束使用|可换号时间|可结束时间|正在监听短信验证码|验证码可查看至/);
       const state = await database.pool.query<{ authorization_status: string; phone_number: string | null; sms_code: string | null }>(
         `SELECT auth.status AS authorization_status, activation.phone_number, activation.sms_code
          FROM activation_authorizations auth
@@ -2227,8 +2226,10 @@ if (!databaseUrl) {
       const recovered = await openApplication(heroSms, () => now);
       try {
         const recipient = await recovered.app.inject({ method: 'GET', url: `/a/${token}` });
-        assert.match(recipient.body, /短信已收到，暂时无法显示验证码，请联系发送者/);
+        assert.match(recipient.body, /正在监听短信验证码/);
+        assert.match(recipient.body, /415 555 0123/);
         assert.doesNotMatch(recipient.body, /验证码可查看至/);
+        assert.doesNotMatch(recipient.body, /短信已收到，暂时无法显示验证码/);
         assert.doesNotMatch(recipient.body, /剩余号码获取额度|已收到验证码/);
         assert.match(recipient.body, /location\.reload/);
         assert.doesNotMatch(recipient.body, /OpenAI unusual delivery body/);
@@ -2288,9 +2289,10 @@ if (!databaseUrl) {
     const recovered = await openApplication(heroSms, () => now);
     try {
       const page = await recovered.app.inject({ method: 'GET', url: `/a/${token}` });
-      assert.match(page.body, /短信已收到，暂时无法显示验证码，请联系发送者/);
+      assert.match(page.body, /正在监听短信验证码/);
       assert.match(page.body, /415 555 0123|复制号码/);
       assert.doesNotMatch(page.body, /验证码可查看至/);
+      assert.doesNotMatch(page.body, /短信已收到，暂时无法显示验证码/);
       assert.doesNotMatch(page.body, /剩余号码获取额度|已收到验证码/);
       assert.doesNotMatch(page.body, /可换号时间/);
     } finally { await recovered.app.close(); }
@@ -2301,6 +2303,7 @@ if (!databaseUrl) {
     try {
       const page = await structured.app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(page.body, /731904|复制验证码/);
+      assert.doesNotMatch(page.body, /415 555 0123|复制号码/);
       assert.doesNotMatch(page.body, /验证码可查看至/);
     } finally { await structured.app.close(); }
   });
@@ -2620,7 +2623,7 @@ if (!databaseUrl) {
       await new Promise((resolve) => setImmediate(resolve));
       const page = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(page.body, /482913|复制验证码/);
-      assert.match(page.body, /415 555 0123|复制号码/);
+      assert.doesNotMatch(page.body, /415 555 0123|复制号码/);
       assert.doesNotMatch(page.body, /获取下一个号码|获取号码/);
     } finally { await app.close(); }
   });
@@ -3234,7 +3237,7 @@ if (!databaseUrl) {
     try {
       const page = await reconciled.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(page.body, /482913|复制验证码/);
-      assert.match(page.body, /415 555 0123|复制号码/);
+      assert.doesNotMatch(page.body, /415 555 0123|复制号码/);
       assert.doesNotMatch(page.body, /获取下一个号码|获取号码/);
     } finally { await reconciled.close(); }
   });
@@ -3319,7 +3322,7 @@ if (!databaseUrl) {
     try {
       const page = await confirmed.app.inject({ method: 'GET', url: `/a/${token}` });
       assert.match(page.body, /482913|复制验证码/);
-      assert.match(page.body, /415 555 0123|复制号码/);
+      assert.doesNotMatch(page.body, /415 555 0123|复制号码/);
     } finally { await confirmed.app.close(); }
   });
 
@@ -3358,7 +3361,8 @@ if (!databaseUrl) {
       assert.match(detail.body, /完成确认中|已完成/);
       const recipient = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(recipient.statusCode, 200);
-      assert.match(recipient.body, /482913|复制验证码|415 555 0123/);
+      assert.match(recipient.body, /482913|复制验证码/);
+      assert.doesNotMatch(recipient.body, /415 555 0123|复制号码/);
       // 结果可查看没有独立倒计时：超过旧五分钟查看期后链接仍可访问。
       now = new Date('2026-08-21T00:05:00.000Z');
       assert.equal((await app.inject({ method: 'GET', url: `/a/${token}` })).statusCode, 200);
@@ -5307,9 +5311,9 @@ if (!databaseUrl) {
 
       const pageResultAvailable = await app.inject({ method: 'GET', url: `/a/${token}` });
       assert.equal(pageResultAvailable.statusCode, 200);
-      assert.match(pageResultAvailable.body, /aria-label="当前号码"/);
-      assert.match(pageResultAvailable.body, /142 278 186/);
-      assert.match(pageResultAvailable.body, /法国 <span class="calling-code">\(\+33\)<\/span>/);
+      assert.doesNotMatch(pageResultAvailable.body, /aria-label="当前号码"/);
+      assert.doesNotMatch(pageResultAvailable.body, /142 278 186/);
+      assert.doesNotMatch(pageResultAvailable.body, /法国 <span class="calling-code">\(\+33\)<\/span>/);
       assert.doesNotMatch(pageResultAvailable.body, /<p class="number-expiry"|号码有效至|<div class="steps-guide"|💡 使用说明/);
       assert.match(pageResultAvailable.body, /aria-label="验证码"/);
       assert.match(pageResultAvailable.body, /987654/);

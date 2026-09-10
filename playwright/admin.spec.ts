@@ -359,6 +359,8 @@ test('接收者页面不包含 HeroSMS、价格、库存、退款确认或内部
     await page.reload();
     await expect(page.locator('#verification-code')).toBeVisible();
     await expect(page.getByRole('button', { name: '复制验证码' })).toBeVisible();
+    await expect(page.locator('.section-current-number')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '复制号码' })).toHaveCount(0);
     await expect(page.getByText(/^验证码可查看至：/)).toHaveCount(0);
     await expect(page.getByRole('button', { name: '点击获取验证码' })).toHaveCount(0);
     await expect(page.getByText('把号码填入验证界面，并点继续，然后点击下方按钮获取验证码')).toHaveCount(0);
@@ -481,13 +483,9 @@ test('移动视口接收者页面各动态状态下控件和文本不溢出', as
     await expect(page.getByText(/剩余号码获取额度/)).toHaveCount(0);
     await expect(page.locator('.steps-guide')).toHaveCount(0);
     await expect(page.locator('.number-expiry')).toHaveCount(0);
-    const resultOrder = await Promise.all([
-      page.locator('.section-current-number').boundingBox(),
-      page.locator('.section-verification-result').boundingBox(),
-    ]);
-    assert.ok(resultOrder.every((box) => box !== null));
-    const [numberHeading, resultHeading] = resultOrder;
-    assert.ok(numberHeading!.y + numberHeading!.height <= resultHeading!.y);
+    await expect(page.locator('.section-current-number')).toHaveCount(0);
+    await expect(page.locator('.section-verification-result')).toBeVisible();
+    await expect(page.getByRole('button', { name: '复制验证码' })).toBeVisible();
     await assertNoOverflow(page, '验证码显示状态');
 
     await context.close();

@@ -209,6 +209,7 @@ function htmlPage(title: string, content: string): string {
     .token { overflow-wrap: anywhere; padding: 12px; background: #edf3f1; border-radius: 4px; }
     .recipient { width: min(calc(100% - 32px), 520px); }
     .section-verification-result { border-bottom: 1px solid #edf2f5; padding-bottom: 14px; }
+    .panel > .section-verification-result:last-child { border-bottom: none; padding-bottom: 0; }
     .section-action { margin-top: 14px; }
     .country { font-weight: 600; font-size: 16px; margin: 0 0 12px; color: #17202a; }
     .country .calling-code { color: #53616c; font-size: 13px; font-weight: 500; }
@@ -484,6 +485,11 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
   if (view.state === 'claimed' && view.activationTimeoutInProgress) {
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1><p>正在确认号码状态</p></section></main><script>setTimeout(()=>location.reload(),5000)</script>`);
   }
+  if (view.state === 'claimed' && view.verificationCode) {
+    const verificationMarkup = `<p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`;
+    const verificationSection = `<section class="section-verification-result" aria-label="验证码">${verificationMarkup}</section>`;
+    return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}${verificationSection}</section></main>`);
+  }
   if (view.state === 'claimed' && (view.phoneNumber || view.smsDelivered)) {
     const e164 = view.phoneNumber ? (view.phoneNumber.startsWith('+') ? view.phoneNumber : `+${view.phoneNumber}`) : undefined;
     const split = e164 ? splitNationalNumber(e164, countryCallingCode(view.countryName)) : undefined;
@@ -496,23 +502,16 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
         : `<p class="number">${escapeHtml(formatInternationalNumber(e164))}</p><button type="button" data-copy-value="${escapeHtml(e164)}" onclick="copyValue(this, this.dataset.copyValue)">复制号码</button>`
       : '';
     const numberExpiryIso = view.numberExpiresAt?.toISOString();
-    const numberExpiryMarkup = !view.smsDelivered && numberExpiryIso
+    const numberExpiryMarkup = numberExpiryIso
       ? `<p class="number-expiry">号码有效至：还剩 <span data-countdown="${escapeHtml(numberExpiryIso)}" data-format="clock" data-expired-text="00:00（号码已过期）">${escapeHtml(numberExpiryIso)}</span></p>`
       : '';
 
     const currentNumberSection = `<section class="section-current-number" aria-label="当前号码">${countryMarkup}${numberMarkup}${numberExpiryMarkup}</section>`;
 
-    const guideMarkup = view.smsDelivered
-      ? ''
-      : `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">把号码填入验证界面，并点继续，然后点击下方按钮获取验证码。</p></div>`;
+    const guideMarkup = `<div class="steps-guide"><p class="guide-title">💡 使用说明</p><p class="guide-copy">把号码填入验证界面，并点继续，然后点击下方按钮获取验证码。</p></div>`;
 
     let verificationMarkup = '';
-    if (view.smsDelivered) {
-      const delivery = view.verificationCode
-        ? `<p class="number" id="verification-code">${escapeHtml(view.verificationCode)}</p><button type="button" data-copy-value="${escapeHtml(view.verificationCode)}" onclick="copyValue(this, this.dataset.copyValue)">复制验证码</button>`
-        : '<p>短信已收到，暂时无法显示验证码，请联系发送者</p>';
-      verificationMarkup = delivery;
-    } else if (view.verificationRequestedAt || !view.currentNumberAction) {
+    if (view.verificationRequestedAt || !view.currentNumberAction) {
       // 已宣告开始等待，或处于非等待短信的过渡态（如结果待人工对账）：维持现有等待短信动画。
       verificationMarkup = `<div class="status-waiting"><span class="spinner"></span> 正在监听短信验证码...</div>`;
     } else {
@@ -524,35 +523,29 @@ function recipientPage(token: string, view: RecipientAuthorizationView, message?
     let actionPrompt = '';
     let actionButton = '';
 
-    if (!view.smsDelivered) {
-      const currentNumberAction = view.currentNumberAction;
-      const cancelAvailableIso = view.cancelAvailableAt?.toISOString();
-      if (currentNumberAction === 'replace') {
-        if (view.currentNumberActionAvailable) {
-          actionPrompt = '<p class="action-prompt">长时间未收到验证码，可点击更换号码</p>';
-          actionButton = `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">更换号码</button></form>`;
-        } else if (cancelAvailableIso) {
-          actionPrompt = `<p class="action-prompt"><span data-countdown="${escapeHtml(cancelAvailableIso)}" data-format="cancel-countdown" data-action="replace">${escapeHtml(cancelAvailableIso)}</span> 后可换号</p>`;
-          actionButton = '<button type="button" disabled>更换号码</button>';
-        }
-      } else if (currentNumberAction === 'end') {
-        if (view.currentNumberActionAvailable) {
-          actionPrompt = '<p class="action-prompt">仍长时间未收到验证码，可点击结束使用并联系管理员</p>';
-          actionButton = `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">结束使用</button></form>`;
-        } else if (cancelAvailableIso) {
-          actionPrompt = `<p class="action-prompt">再等 <span data-countdown="${escapeHtml(cancelAvailableIso)}" data-format="cancel-countdown" data-action="end">${escapeHtml(cancelAvailableIso)}</span></p>`;
-          actionButton = '<button type="button" disabled>结束使用</button>';
-        }
+    const currentNumberAction = view.currentNumberAction;
+    const cancelAvailableIso = view.cancelAvailableAt?.toISOString();
+    if (currentNumberAction === 'replace') {
+      if (view.currentNumberActionAvailable) {
+        actionPrompt = '<p class="action-prompt">长时间未收到验证码，可点击更换号码</p>';
+        actionButton = `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">更换号码</button></form>`;
+      } else if (cancelAvailableIso) {
+        actionPrompt = `<p class="action-prompt"><span data-countdown="${escapeHtml(cancelAvailableIso)}" data-format="cancel-countdown" data-action="replace">${escapeHtml(cancelAvailableIso)}</span> 后可换号</p>`;
+        actionButton = '<button type="button" disabled>更换号码</button>';
+      }
+    } else if (currentNumberAction === 'end') {
+      if (view.currentNumberActionAvailable) {
+        actionPrompt = '<p class="action-prompt">仍长时间未收到验证码，可点击结束使用并联系管理员</p>';
+        actionButton = `<form method="post" action="/a/${encodeURIComponent(token)}/replacement"><button type="submit">结束使用</button></form>`;
+      } else if (cancelAvailableIso) {
+        actionPrompt = `<p class="action-prompt">再等 <span data-countdown="${escapeHtml(cancelAvailableIso)}" data-format="cancel-countdown" data-action="end">${escapeHtml(cancelAvailableIso)}</span></p>`;
+        actionButton = '<button type="button" disabled>结束使用</button>';
       }
     }
 
-    const actionSection = view.smsDelivered
-      ? ''
-      : `<section class="section-action">${quotaMarkup(view.remainingNumberCount)}${actionPrompt}${actionButton}</section>`;
+    const actionSection = `<section class="section-action">${quotaMarkup(view.remainingNumberCount)}${actionPrompt}${actionButton}</section>`;
 
-    const pollingScript = (!view.smsDelivered || !view.verificationCode)
-      ? '<script>setTimeout(()=>location.reload(),5000)</script>'
-      : '';
+    const pollingScript = '<script>setTimeout(()=>location.reload(),5000)</script>';
 
     return htmlPage('OpenAI 短信激活', `<main class="recipient"><section class="panel"><h1>OpenAI</h1>${errorMarkup}${currentNumberSection}${guideMarkup}${verificationSection}${actionSection}</section></main>${countdownScript}${pollingScript}`);
   }
