@@ -612,9 +612,18 @@ function parseMaxPricePerNumber(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
-function loginFailure(reply: FastifyReply, adminPath: string, statusCode: number, message: string): FastifyReply {
+function sessionScopedCookieOptions(isSecure: boolean) {
+  return {
+    maxAge: ADMIN_SESSION_MAX_AGE_SECONDS,
+    path: '/',
+    sameSite: 'strict',
+    secure: isSecure,
+  } as const;
+}
+
+function loginFailure(reply: FastifyReply, adminPath: string, statusCode: number, message: string, isSecure: boolean): FastifyReply {
   const csrfToken = randomToken();
-  setLoginCsrf(reply, csrfToken);
+  setLoginCsrf(reply, csrfToken, isSecure);
   return reply.code(statusCode).type('text/html; charset=utf-8').send(loginPage(adminPath, csrfToken, message));
 }
 
@@ -623,40 +632,32 @@ function isSameOrigin(request: FastifyRequest, config: AppConfig): boolean {
     || (request.headers.origin === 'null' && request.headers['sec-fetch-site'] === 'same-origin');
 }
 
-function setLoginCsrf(reply: FastifyReply, csrfToken: string): void {
+function setLoginCsrf(reply: FastifyReply, csrfToken: string, isSecure: boolean): void {
   reply.setCookie(CSRF_COOKIE, csrfToken, {
     httpOnly: false,
     maxAge: 600,
     path: '/',
     sameSite: 'strict',
-    secure: true,
+    secure: isSecure,
   });
 }
 
-// 随管理员登录会话存活的 cookie 共同属性（过期语义与 admin_session 一致）；仅 httpOnly 因用途而异。
-const SESSION_SCOPED_COOKIE_OPTIONS = {
-  maxAge: ADMIN_SESSION_MAX_AGE_SECONDS,
-  path: '/',
-  sameSite: 'strict',
-  secure: true,
-} as const;
-
-function cookiesForSession(reply: FastifyReply, sessionId: string, csrfToken: string): void {
+function cookiesForSession(reply: FastifyReply, sessionId: string, csrfToken: string, isSecure: boolean): void {
   reply.setCookie(ADMIN_COOKIE, sessionId, {
-    ...SESSION_SCOPED_COOKIE_OPTIONS,
+    ...sessionScopedCookieOptions(isSecure),
     httpOnly: true,
   });
   reply.setCookie(CSRF_COOKIE, csrfToken, {
-    ...SESSION_SCOPED_COOKIE_OPTIONS,
+    ...sessionScopedCookieOptions(isSecure),
     httpOnly: false,
   });
 }
 
 // 状态筛选记忆写回：有生效状态则随会话过期语义重写 cookie，无状态（全部状态）则清除记忆。
-function setAdminListFilterCookie(reply: FastifyReply, status: AuthorizationListTopLevelStatus | undefined): void {
+function setAdminListFilterCookie(reply: FastifyReply, status: AuthorizationListTopLevelStatus | undefined, isSecure: boolean): void {
   if (status) {
     reply.setCookie(ADMIN_LIST_FILTER_COOKIE, status, {
-      ...SESSION_SCOPED_COOKIE_OPTIONS,
+      ...sessionScopedCookieOptions(isSecure),
       httpOnly: true,
     });
   } else {
@@ -983,13 +984,14 @@ export async function createApp(config: AppConfig, database = new Database(confi
     return reply.code(200).send();
   });
 
+  const isSecure = config.publicOrigin.startsWith('https://');
   const adminRoot = `/${config.adminPath}`;
   app.get<{ Querystring: { page?: string; status?: string; suffix?: string } }>(adminRoot, async (request, reply) => {
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     if (session) {
-      cookiesForSession(reply, session.id, session.csrfToken);
+      cookiesForSession(reply, session.id, session.csrfToken, isSecure);
       const listQuery = parseAuthorizationListQuery(request.query, request.cookies[ADMIN_LIST_FILTER_COOKIE]);
-      setAdminListFilterCookie(reply, listQuery.status);
+      setAdminListFilterCookie(reply, listQuery.status, isSecure);
       return reply.type('text/html; charset=utf-8').send(adminShell(
         config.adminPath,
         session.csrfToken,
@@ -1001,7 +1003,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     }
 
     const csrfToken = randomToken();
-    setLoginCsrf(reply, csrfToken);
+    setLoginCsrf(reply, csrfToken, isSecure);
     return reply.type('text/html; charset=utf-8').send(loginPage(config.adminPath, csrfToken));
   });
 
@@ -1016,7 +1018,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     await scheduleNextPendingReplacementCancellation().catch(retryPendingReplacementCancellationScheduling);
     const detail = await activationAuthorizations.detail(request.params.id);
     if (!detail) return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
-    cookiesForSession(reply, session.id, session.csrfToken);
+    cookiesForSession(reply, session.id, session.csrfToken, isSecure);
     return reply.type('text/html; charset=utf-8').send(authorizationDetailPage(config.adminPath, session.csrfToken, detail, dependencies.now?.() ?? new Date()));
   });
 
@@ -1025,28 +1027,28 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (!session) return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     const detail = await activationAuthorizations.detail(request.params.id);
     if (!detail || !detail.canRevoke) return reply.code(409).type('text/html; charset=utf-8').send(adminShell(config.adminPath, session.csrfToken, await activationAuthorizations.list({}), '该激活授权已经不可撤销。', [], dependencies.now?.() ?? new Date()));
-    cookiesForSession(reply, session.id, session.csrfToken);
+    cookiesForSession(reply, session.id, session.csrfToken, isSecure);
     return reply.type('text/html; charset=utf-8').send(authorizationRevocationConfirmationPage(config.adminPath, session.csrfToken, detail));
   });
 
   app.post<{ Body: LoginBody }>(`${adminRoot}/login`, async (request, reply) => {
     const csrfToken = csrfFrom(request);
     if (!isSameOrigin(request, config) || !csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
-      return loginFailure(reply, config.adminPath, 403, '请求已被拒绝。');
+      return loginFailure(reply, config.adminPath, 403, '请求已被拒绝。', isSecure);
     }
 
     try {
       const session = await authentication.createSession(request.body.password ?? '', request.ip);
       if (!session) {
-        return loginFailure(reply, config.adminPath, 401, '密码或请求无效。');
+        return loginFailure(reply, config.adminPath, 401, '密码或请求无效。', isSecure);
       }
-      cookiesForSession(reply, session.id, session.csrfToken);
+      cookiesForSession(reply, session.id, session.csrfToken, isSecure);
       // 新登录会话从默认列表开始：清除残留的状态筛选记忆（含上一会话作废后遗留在浏览器里的旧记忆）。
       clearAdminListFilterCookie(reply);
       return reply.redirect(adminRoot, 303);
     } catch (error) {
       if (error instanceof LoginRateLimitedError) {
-        return loginFailure(reply, config.adminPath, 429, '密码或请求无效。');
+        return loginFailure(reply, config.adminPath, 429, '密码或请求无效。', isSecure);
       }
       throw error;
     }
@@ -1226,7 +1228,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
     if (!session) {
       return reply.code(404).type('text/plain; charset=utf-8').send('Not Found');
     }
-    cookiesForSession(reply, session.id, session.csrfToken);
+    cookiesForSession(reply, session.id, session.csrfToken, isSecure);
     const saved = request.query.saved === '1';
     try {
       const settings = await defaultCandidateLocations.settings();

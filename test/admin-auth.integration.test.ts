@@ -140,6 +140,35 @@ if (!databaseUrl) {
     }
   });
 
+  test('HTTP origin 下 Cookie 不包含 Secure 属性，支持纯 HTTP 部署访问', async () => {
+    const httpOrigin = 'http://101.200.188.171:3101';
+    const { app } = await openApplication({ publicOrigin: httpOrigin });
+    try {
+      const getLogin = await app.inject({ method: 'GET', url: `/${config.adminPath}` });
+      assert.equal(getLogin.statusCode, 200);
+      const getSetCookie = getLogin.headers['set-cookie']?.toString() ?? '';
+      assert.ok(!getSetCookie.includes('Secure'), 'HTTP 下 set-cookie 不应包含 Secure');
+
+      const csrf = csrfValue(getLogin.body);
+      const csrfCookie = cookieValue(getLogin, 'admin_csrf');
+      const response = await app.inject({
+        method: 'POST',
+        url: `/${config.adminPath}/login`,
+        headers: {
+          cookie: `admin_csrf=${csrfCookie}`,
+          'content-type': 'application/x-www-form-urlencoded',
+          origin: httpOrigin,
+        },
+        payload: `csrf=${encodeURIComponent(csrf)}&password=${encodeURIComponent(config.adminPassword)}`,
+      });
+      assert.equal(response.statusCode, 303);
+      const postSetCookie = response.headers['set-cookie']?.toString() ?? '';
+      assert.ok(!postSetCookie.includes('Secure'), 'HTTP 登录成功后 set-cookie 不应包含 Secure');
+    } finally {
+      await app.close();
+    }
+  });
+
   test('新登录撤销旧会话，应用重新初始化也撤销会话', async () => {
     const first = await openApplication();
     let firstClosed = false;
