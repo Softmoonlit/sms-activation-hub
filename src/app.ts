@@ -628,8 +628,52 @@ function loginFailure(reply: FastifyReply, adminPath: string, statusCode: number
 }
 
 function isSameOrigin(request: FastifyRequest, config: AppConfig): boolean {
-  return request.headers.origin === config.publicOrigin
-    || (request.headers.origin === 'null' && request.headers['sec-fetch-site'] === 'same-origin');
+  const origin = request.headers.origin;
+  const secFetchSite = request.headers['sec-fetch-site'];
+
+  // 跨站请求明确拒绝
+  if (secFetchSite === 'cross-site') {
+    return false;
+  }
+
+  const requestHost = request.headers.host;
+
+  // 1. 存在明确 Origin 请求头
+  if (origin && origin !== 'null') {
+    if (origin === config.publicOrigin) return true;
+    if (requestHost && (origin === `http://${requestHost}` || origin === `https://${requestHost}`)) {
+      return true;
+    }
+    return false;
+  }
+
+  // 2. 某些特殊沙箱环境 origin 为 'null'，结合 sec-fetch-site 校验
+  if (origin === 'null') {
+    return secFetchSite === 'same-origin';
+  }
+
+  // 3. 部分浏览器（如 Safari 等）同源表单 POST 不附加 Origin，降级使用 Referer
+  const referer = request.headers.referer;
+  if (referer) {
+    try {
+      const refererOrigin = new URL(referer).origin;
+      if (refererOrigin === config.publicOrigin) return true;
+      if (requestHost && (refererOrigin === `http://${requestHost}` || refererOrigin === `https://${requestHost}`)) {
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  // 4. 既无 Origin 也无 Referer 时，根据 Sec-Fetch-Site 判定
+  if (secFetchSite) {
+    return secFetchSite === 'same-origin' || secFetchSite === 'same-site' || secFetchSite === 'none';
+  }
+
+  // 5. 传统 HTTP 客户端在双重 CSRF Token 保护下放行
+  return true;
 }
 
 function setLoginCsrf(reply: FastifyReply, csrfToken: string, isSecure: boolean): void {
@@ -928,7 +972,7 @@ export async function createApp(config: AppConfig, database = new Database(confi
   };
 
   app.addHook('onRequest', async (_request, reply) => {
-    reply.header('Referrer-Policy', 'no-referrer');
+    reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
     reply.header('X-Robots-Tag', 'noindex, nofollow, noarchive');
     reply.header('Cache-Control', 'no-store');
   });
@@ -986,6 +1030,9 @@ export async function createApp(config: AppConfig, database = new Database(confi
 
   const isSecure = config.publicOrigin.startsWith('https://');
   const adminRoot = `/${config.adminPath}`;
+  app.get(`${adminRoot}/login`, async (_request, reply) => {
+    return reply.redirect(adminRoot, 303);
+  });
   app.get<{ Querystring: { page?: string; status?: string; suffix?: string } }>(adminRoot, async (request, reply) => {
     const session = await authentication.sessionFor(request.cookies[ADMIN_COOKIE]);
     if (session) {
@@ -1033,7 +1080,11 @@ export async function createApp(config: AppConfig, database = new Database(confi
 
   app.post<{ Body: LoginBody }>(`${adminRoot}/login`, async (request, reply) => {
     const csrfToken = csrfFrom(request);
-    if (!isSameOrigin(request, config) || !csrfToken || csrfToken !== request.cookies[CSRF_COOKIE]) {
+    const cookieCsrf = request.cookies[CSRF_COOKIE];
+    const sameOrigin = isSameOrigin(request, config);
+
+    if (!sameOrigin || !csrfToken || csrfToken !== cookieCsrf) {
+      process.stdout.write(`[auth][warn] 登录校验被拒绝: sameOrigin=${sameOrigin} (origin=${request.headers.origin}, referer=${request.headers.referer}, host=${request.headers.host}, sec-fetch-site=${request.headers['sec-fetch-site']}), csrfTokenPresent=${Boolean(csrfToken)}, cookieCsrfPresent=${Boolean(cookieCsrf)}, match=${csrfToken === cookieCsrf}\n`);
       return loginFailure(reply, config.adminPath, 403, '请求已被拒绝。', isSecure);
     }
 
